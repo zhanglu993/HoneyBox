@@ -1,5 +1,6 @@
 #include "honey_media_core/media_core.h"
 
+#include "cinepak_common.hpp"
 #include "cinepak_decoder.hpp"
 #include "test_support.hpp"
 
@@ -330,6 +331,28 @@ HMC_TEST(cinepak_v1_uses_signed_floor_shift_quadrants_clipping_and_top_down_argb
             HMC_EXPECT(pixels[y * 4u + x] == expected[quadrant]);
         }
     }
+}
+
+HMC_TEST(cinepak_signed_chroma_boundaries_are_portable_and_reconstruct_exactly)
+{
+    HMC_EXPECT(honey::media::decode_cinepak_signed_byte(0x80u) == -128);
+    HMC_EXPECT(honey::media::decode_cinepak_signed_byte(0xffu) == -1);
+
+    const Entry minimum_u_negative_one_v{
+        128u, 128u, 128u, 128u, 0x80u, 0xffu};
+    const std::vector<std::uint32_t> first = decode_fresh(
+        4u, 4u, v1_frame(0u, 4u, 4u, minimum_u_negative_one_v));
+    HMC_EXPECT(std::all_of(first.begin(), first.end(), [](std::uint32_t value) {
+        return value == UINT32_C(0xff7ec100);
+    }));
+
+    const Entry negative_one_u_minimum_v{
+        128u, 128u, 128u, 128u, 0xffu, 0x80u};
+    const std::vector<std::uint32_t> second = decode_fresh(
+        4u, 4u, v1_frame(0u, 4u, 4u, negative_one_u_minimum_v));
+    HMC_EXPECT(std::all_of(second.begin(), second.end(), [](std::uint32_t value) {
+        return value == UINT32_C(0xff00ff7e);
+    }));
 }
 
 HMC_TEST(cinepak_v4_uses_quadrant_index_order_and_row_major_luma)

@@ -161,8 +161,8 @@ void read_codebook_entry(
     for (std::size_t i = 0u; i < 4u; ++i) {
         entry->y[i] = bytes[i];
     }
-    entry->u = static_cast<std::int8_t>(bytes[4u]);
-    entry->v = static_cast<std::int8_t>(bytes[5u]);
+    entry->u = decode_cinepak_signed_byte(bytes[4u]);
+    entry->v = decode_cinepak_signed_byte(bytes[5u]);
 }
 
 void paint_v1(
