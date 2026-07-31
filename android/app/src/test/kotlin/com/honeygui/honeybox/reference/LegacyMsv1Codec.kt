@@ -1,9 +1,14 @@
-package com.honeygui.honeybox
+package com.honeygui.honeybox.reference
 
 import java.io.ByteArrayOutputStream
 
 /**
- * Test-only Kotlin reference for MSV1 and its minimal AVI muxer, ported from
+ * TEST-ONLY IMMUTABLE MIGRATION REFERENCE. Never ship or import from production.
+ * Source: android/app/src/main/kotlin/com/honeygui/honeybox/SoftwareCodec.kt
+ * Git blob: eb9aa919ffcbad6c708f9654a73fea41e7a1baa9 (JPEG portion intentionally omitted).
+ * Behavioral edits require an intentional fixture review.
+ *
+ * Kotlin reference for MSV1 and its minimal AVI muxer, ported from
  * the w04_web_app reference (verified against libavcodec/msvideo1.c).
  */
 object LegacyMsv1Codec {

@@ -1,5 +1,9 @@
 package com.honeygui.honeybox
 
+import com.honeygui.honeybox.reference.LegacyCinepakDecoder
+import com.honeygui.honeybox.reference.LegacyCinepakEncoder
+import com.honeygui.honeybox.reference.LegacyCvidAviMuxer
+import com.honeygui.honeybox.reference.LegacyMsv1Codec
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -40,20 +44,32 @@ class MediaReferenceFixturesTest {
 
     @Test
     fun videoConverterHasNoUnqualifiedLegacyCinepakOrCvidReferences() {
-        val source = String(
-            Files.readAllBytes(
-                repositoryRoot().resolve(
-                    "android/app/src/main/kotlin/com/honeygui/honeybox/VideoConverter.kt",
-                ),
-            ),
-            Charsets.UTF_8,
+        val productionRoot = repositoryRoot().resolve("android/app/src/main/kotlin")
+        val forbiddenFiles = listOf(
+            "com/honeygui/honeybox/CinepakEncoder.kt",
+            "com/honeygui/honeybox/CinepakDecoder.kt",
+            "com/honeygui/honeybox/CvidAviMuxer.kt",
+            "com/honeygui/honeybox/SoftwareCodec.kt",
         )
-        val legacyReference = Regex(
-            "(?<!NativeMediaCodec\\.)\\b(CinepakEncoder|CinepakDecoder|CvidAviMuxer)\\b",
-        ).find(source)
-        if (legacyReference != null) {
-            fail("Legacy Cinepak/CVID reference remains: ${legacyReference.value}")
+        val remainingFiles = forbiddenFiles.filter { Files.exists(productionRoot.resolve(it)) }
+        assertTrue("Legacy production codec files remain: $remainingFiles", remainingFiles.isEmpty())
+
+        val legacyApi = Regex(
+            "CinepakEncoder\\.(Encoder|Options)|" +
+                "CinepakDecoder\\.(parseAvi|Decoder)|" +
+                "CvidAviMuxer\\.buildAvi|SoftwareCodec\\.",
+        )
+        val references = ArrayList<String>()
+        Files.walk(productionRoot).use { paths ->
+            paths.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".kt") }
+                .forEach { path ->
+                    val source = String(Files.readAllBytes(path), Charsets.UTF_8)
+                    legacyApi.findAll(source).forEach { match ->
+                        references += "${productionRoot.relativize(path)}:${match.value}"
+                    }
+                }
         }
+        assertTrue("Legacy production codec APIs remain: $references", references.isEmpty())
     }
 
     @Test
@@ -109,11 +125,11 @@ class MediaReferenceFixturesTest {
         LegacyMsv1Codec.decodeMsv1(msv1Inter, 8, 8, msv1Pixels)
         val msv1InterArgb = msv1Pixels.toLittleEndianArgb()
 
-        val cinepakEncoder = CinepakEncoder.Encoder(8, 8, CinepakEncoder.Options())
+        val cinepakEncoder = LegacyCinepakEncoder.Encoder(8, 8, LegacyCinepakEncoder.Options())
         val cinepakKey = cinepakEncoder.encode(a)
         val cinepakAllSkip = cinepakEncoder.encode(a)
         val cinepakInter = cinepakEncoder.encode(b)
-        val cinepakDecoder = CinepakDecoder.Decoder(8, 8)
+        val cinepakDecoder = LegacyCinepakDecoder.Decoder(8, 8)
         val cinepakKeyArgb = cinepakDecoder.decodeFrame(cinepakKey).toLittleEndianArgb()
         val cinepakAllSkipArgb = cinepakDecoder.decodeFrame(cinepakAllSkip).toLittleEndianArgb()
         val cinepakInterArgb = cinepakDecoder.decodeFrame(cinepakInter).toLittleEndianArgb()
@@ -137,7 +153,7 @@ class MediaReferenceFixturesTest {
             "cinepak_key.argb" to cinepakKeyArgb,
             "cinepak_all_skip.argb" to cinepakAllSkipArgb,
             "cinepak_inter.argb" to cinepakInterArgb,
-            "cvid_sample.avi" to CvidAviMuxer.buildAvi(
+            "cvid_sample.avi" to LegacyCvidAviMuxer.buildAvi(
                 listOf(cinepakKey, cinepakAllSkip, cinepakInter), 8, 8, 10,
             ),
         )

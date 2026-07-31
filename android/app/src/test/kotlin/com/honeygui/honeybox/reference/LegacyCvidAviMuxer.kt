@@ -1,4 +1,11 @@
-package com.honeygui.honeybox
+package com.honeygui.honeybox.reference
+
+/*
+ * TEST-ONLY IMMUTABLE MIGRATION REFERENCE. Never ship or import from production.
+ * Source: android/app/src/main/kotlin/com/honeygui/honeybox/CvidAviMuxer.kt
+ * Git blob: bf6a85417a931d51a91d4fef4ef6ee9089cbc6be
+ * Behavioral edits require an intentional fixture review.
+ */
 
 /**
  * Muxes Cinepak (CVID) frames into a standard AVI(CVID) container — a faithful
@@ -13,7 +20,7 @@ package com.honeygui.honeybox
  * The parser reads strh (56B) then the next 8B as the strf header, so strh's
  * body must be exactly 56B with strf immediately after — no padding.
  */
-object CvidAviMuxer {
+object LegacyCvidAviMuxer {
 
     private const val AVIH_BODY = 56
     private const val STRH_BODY = 56

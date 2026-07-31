@@ -141,8 +141,6 @@ class NativeMediaParityTest {
     fun cinepakEncoderMatchesFixturesAndResetRestoresFreshState() {
         val a = asset("input_8x8_a.rgba")
         val b = asset("input_8x8_b.rgba")
-        val kotlinEncoder = CinepakEncoder.Encoder(8, 8, CinepakEncoder.Options())
-
         NativeMediaCodec.CinepakEncoder(8, 8).use { encoder ->
             val key = encoder.encode(a)
             val allSkip = encoder.encode(a)
@@ -159,9 +157,6 @@ class NativeMediaParityTest {
             assertArrayEquals(asset("cinepak_all_skip.bin"), allSkip.bytes)
             assertArrayEquals(asset("cinepak_inter.bin"), inter.bytes)
             assertArrayEquals(asset("cinepak_key.bin"), forcedKey.bytes)
-            assertArrayEquals(kotlinEncoder.encode(a), key.bytes)
-            assertArrayEquals(kotlinEncoder.encode(a), allSkip.bytes)
-            assertArrayEquals(kotlinEncoder.encode(b), inter.bytes)
             assertNotSame(key.bytes, allSkip.bytes)
 
             encoder.reset()

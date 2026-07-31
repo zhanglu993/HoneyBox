@@ -1,4 +1,11 @@
-package com.honeygui.honeybox
+package com.honeygui.honeybox.reference
+
+/*
+ * TEST-ONLY IMMUTABLE MIGRATION REFERENCE. Never ship or import from production.
+ * Source: android/app/src/main/kotlin/com/honeygui/honeybox/CinepakEncoder.kt
+ * Git blob: d72ad9a80d8baaaf64f0a55417896bb0c59a114a
+ * Behavioral edits require an intentional fixture review.
+ */
 
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -25,7 +32,7 @@ import kotlin.math.roundToInt
  *   vectors: 0x32=all-V1, 0x30=key mixed (1 type bit/MB), 0x31=inter
  *            (1 skip bit/MB, then 1 type bit for coded blocks)
  */
-object CinepakEncoder {
+object LegacyCinepakEncoder {
 
     // ── Tunables resolved from options ──────────────────────────────────────
     class Params(

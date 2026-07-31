@@ -1,9 +1,16 @@
-package com.honeygui.honeybox
+package com.honeygui.honeybox.reference
+
+/*
+ * TEST-ONLY IMMUTABLE MIGRATION REFERENCE. Never ship or import from production.
+ * Source: android/app/src/main/kotlin/com/honeygui/honeybox/CinepakDecoder.kt
+ * Git blob: 4961ac214fd3e3b3793523b59c8c2cd28a9c195e
+ * Behavioral edits require an intentional fixture review.
+ */
 
 /**
- * Pure-Kotlin Cinepak (CVID) decoder — the exact inverse of [CinepakEncoder] and
- * the AVI written by [CvidAviMuxer]. It exists purely for **in-app preview** of a
- * cached clip: the cached `.avi` is Cinepak, which no Android platform decoder
+ * Pure-Kotlin Cinepak (CVID) decoder — the exact inverse of [LegacyCinepakEncoder] and
+ * the AVI written by [LegacyCvidAviMuxer]. It exists purely as a frozen test reference
+ * for cached clips: the cached `.avi` is Cinepak, which no Android platform decoder
  * (MediaCodec / MediaMetadataRetriever / ExoPlayer) can read — only the device
  * firmware and this app's own encoder handle it.
  *
@@ -25,7 +32,7 @@ package com.honeygui.honeybox
  * Inter frames keep a persistent YUV reconstruction ([Decoder] fields) so skipped
  * macroblocks reuse the previous frame's pixels.
  */
-object CinepakDecoder {
+object LegacyCinepakDecoder {
 
     // 4x4 MB → four 2x2 quadrants: TL, TR, BL, BR (identical to the encoder).
     private val QUAD_X = intArrayOf(0, 2, 0, 2)
@@ -52,7 +59,7 @@ object CinepakDecoder {
     }
 
     /**
-     * Parse a standard AVI(CVID) — the layout produced by [CvidAviMuxer] — into
+     * Parse a standard AVI(CVID) — the layout produced by [LegacyCvidAviMuxer] — into
      * its per-frame Cinepak bitstreams. Walks the RIFF chunk tree so it tolerates
      * ordering; reads dims from `strf`/`avih` (falling back to the first frame
      * header) and `usecPerFrame` from `avih`.
