@@ -4,6 +4,10 @@
 
 #include <cstdlib>
 
+#if defined(_MSC_VER) && defined(_CPPUNWIND)
+#error "ebadge_media_core must be compiled with C++ exceptions disabled"
+#endif
+
 uint32_t eb_media_abi_version(void)
 {
     return EB_MEDIA_ABI_VERSION;

@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(ebadge_media_core LANGUAGES CXX)
+project(ebadge_media_core LANGUAGES C CXX)
 
 if(MSVC)
-    string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE "[/-]EH[a-zA-Z-]*" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 endif()
 
 add_library(ebadge_media_core STATIC
@@ -21,7 +21,7 @@ target_include_directories(ebadge_media_core
 )
 
 if(MSVC)
-    target_compile_options(ebadge_media_core PRIVATE /W4 /WX /GR-)
+    target_compile_options(ebadge_media_core PRIVATE /W4 /WX /EHs-c- /GR-)
 else()
     target_compile_options(ebadge_media_core PRIVATE -Wall -Wextra -Wpedantic -Werror -fno-exceptions -fno-rtti)
 endif()

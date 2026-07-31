@@ -5,16 +5,17 @@
 #include "test_support.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace {
 
-void test_abi_version_is_one()
+EB_TEST(abi_version_is_one)
 {
     EB_EXPECT(eb_media_abi_version() == 1u);
 }
 
-void test_status_messages_are_stable_and_non_empty()
+EB_TEST(status_messages_are_stable_and_non_empty)
 {
     const eb_status_t statuses[] = {
         EB_STATUS_OK,
@@ -35,7 +36,7 @@ void test_status_messages_are_stable_and_non_empty()
     }
 }
 
-void test_releasing_an_empty_buffer_is_safe()
+EB_TEST(releasing_an_empty_buffer_is_safe)
 {
     eb_buffer_t buffer = {nullptr, 0u};
     eb_buffer_release(&buffer);
@@ -43,13 +44,13 @@ void test_releasing_an_empty_buffer_is_safe()
     EB_EXPECT(buffer.size == 0u);
 }
 
-void test_checked_addition_rejects_overflow()
+EB_TEST(checked_addition_rejects_overflow)
 {
     std::size_t result = 0u;
     EB_EXPECT(!ebadge::media_core::checked_add_size(std::numeric_limits<std::size_t>::max(), 1u, &result));
 }
 
-void test_checked_multiplication_rejects_overflow()
+EB_TEST(checked_multiplication_rejects_overflow)
 {
     std::size_t result = 0u;
     EB_EXPECT(!ebadge::media_core::checked_multiply_size(std::numeric_limits<std::size_t>::max(), 2u, &result));
@@ -59,10 +60,5 @@ void test_checked_multiplication_rejects_overflow()
 
 int main()
 {
-    test_abi_version_is_one();
-    test_status_messages_are_stable_and_non_empty();
-    test_releasing_an_empty_buffer_is_safe();
-    test_checked_addition_rejects_overflow();
-    test_checked_multiplication_rejects_overflow();
-    return ebadge::test::failures == 0 ? 0 : 1;
+    return ebadge::test::run_all_tests();
 }
