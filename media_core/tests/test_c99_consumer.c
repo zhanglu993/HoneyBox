@@ -12,6 +12,14 @@
 #error "media_core.h must expose HMC_CALL"
 #endif
 
+#if defined(HMC_EXPECT_USE_SHARED) && !defined(HMC_USE_SHARED)
+#error "a shared C99 consumer must compile with HMC_USE_SHARED"
+#endif
+
+#if !defined(HMC_EXPECT_USE_SHARED) && defined(HMC_USE_SHARED)
+#error "a static C99 consumer must not compile with HMC_USE_SHARED"
+#endif
+
 typedef char hmc_status_must_be_32_bits[
     sizeof(hmc_status_t) == sizeof(int32_t) ? 1 : -1];
 typedef char hmc_encode_flags_must_be_32_bits[

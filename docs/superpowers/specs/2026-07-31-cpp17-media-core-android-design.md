@@ -117,7 +117,9 @@ android/app/src/main/kotlin/com/honeygui/honeybox/
 ## 6. 公共 C ABI
 
 公共接口使用固定宽度整数、opaque handle 和显式内存所有权。内部可以使用
-`std::vector`、RAII 和 C++ 类，但不得穿过 ABI 边界。公共状态类型固定为
+RAII 和 C++ 类，但 fallible 分配路径不得依赖会抛异常的 `std::vector`、
+`std::string` 或其他 STL 容器增长，也不得调用 throwing `new`；具体 no-throw
+策略见下文。任何 C++ 类型都不得穿过 ABI 边界。公共状态类型固定为
 `int32_t`，状态编号只能在末尾追加，不得重编号、复用或删除。ABI 版本使用
 `major << 16 | minor` 的 `uint32_t` 打包值，首版为 `0x00010000`。
 
@@ -155,16 +157,22 @@ android/app/src/main/kotlin/com/honeygui/honeybox/
   指针与长度，不包含 `struct_size`；
 - 每个 owned-buffer 输出在调用前必须为 `{NULL, 0}`，失败后仍为空，并且
   只能由 `hmc_owned_buffer_release` 释放；
+- 每个 borrowed `hmc_bytes_view_t` 输出在调用前也必须为 `{NULL, 0}`，
+  失败后仍为 `{NULL, 0}`；
+- 编码接口的 `output_frame_flags` 必须非 NULL；失败时保持调用者原值不变，
+  只有成功时才写入实际的归一化帧标志；
 - 每个 create 输出 handle 在调用前必须指向 NULL，失败后仍为 NULL；
 - 可扩展结构以 `struct_size` 为首字段，只允许在尾部追加字段，不使用 packed
   layout，且为首版布局定义固定数值 `HMC_*_V1_SIZE`；已发布字段、类型和语义
   永不改变；
-- `struct_size` 表示包括自身在内的调用者实际分配尺寸。被调用方接受至少 V1
-  的尺寸，最多读写自己认识的范围，要求未知输入/尾部字节和 reserved 字段为
-  零，并且不修改 `struct_size`；
+- `struct_size` 表示包括自身在内的调用者实际分配尺寸。除 config init 外，
+  被调用方接受至少 V1 的尺寸，最多读写自己认识的范围，要求未知输入/尾部
+  字节和 reserved 字段为零，并且不修改 `struct_size`；
 - 输出结构由调用者先清零并设置 `struct_size`；失败时整个输出保持不变；
 - 配置初始化函数签名统一为 `(config*, uint32_t config_size)`，清零调用者提供
-  的容量、写入已知默认值并返回状态；
+  的容量、写入已知默认值、把 `struct_size` 设置为 `config_size` 并返回状态；
+  NULL 返回 INVALID_ARGUMENT，小于 V1 返回 BUFFER_TOO_SMALL，失败不改调用者
+  内存；
 - 所有尺寸和长度在进入核心前做溢出检查；输入 buffer 由调用者持有并在调用
   期间保持有效；
 - 未知 encode/frame flag 位返回 `HMC_STATUS_UNSUPPORTED`。AVI 只消费显式
@@ -183,9 +191,49 @@ android/app/src/main/kotlin/com/honeygui/honeybox/
 - encoder/muxer 任一失败调用都保持帧索引、重建状态、关键帧跟踪以及已经加入
   的帧不变，因此 OOM 后可以重试。
 
+### 6.1 可恢复分配与事务提交
+
+`media_core` 以关闭异常的方式构建，因此 Tasks 3–6 统一使用库内
+`NoThrowBuffer<T>`/`NoThrowArray<T>`（名称可在实现时等价调整）以及显式
+`malloc`/`realloc`/`free` 路径：
+
+- 所有 count×element-size 和 capacity 增长先通过 checked-size helper；
+- `allocate`、`reserve`、`resize`、`append` 都返回 `hmc_status_t`，分配失败
+  返回 `HMC_STATUS_OUT_OF_MEMORY`，绝不调用 throwing `new`，也不让
+  `std::bad_alloc` 成为控制流；
+- `realloc` 只把结果写入临时指针，失败时保留原指针、logical size 和内容；
+- runtime fallible path 禁止使用 default-allocator `std::vector`/`std::string`
+  的构造、复制、reserve、resize、push/append 等可能抛异常的增长操作；
+- 内部 allocator 有仅供 native test target 使用的 fault-injection dispatch，
+  可令第 N 次分配失败；它不进入公共 C ABI。Tasks 3–6 必须逐 allocation
+  point 扫描，验证返回 OOM、输出契约、内部状态不变以及取消故障后可重试成功。
+
+具体提交点如下：
+
+- AVI muxer `add_frame` 先验证并计算全部尺寸，在隔离的 candidate byte/index/
+  metadata buffers 中复制既有逻辑内容并追加新帧；只有 candidate 全部成功后才
+  以 no-fail swap 提交全部 buffers 和 frame count。当前 buffers/capacities 在
+  任一失败时都不变化。`finish` 在独立 scratch buffer 中构建完整 AVI，成功
+  转交 owned buffer 后才把 muxer 标记 sealed；
+- AVI reader 在未发布的 candidate handle 中完成输入复制、解析和 no-throw
+  元数据分配，全部成功后才写 create 输出 handle；
+- MSV1 encode 在独立 scratch output 中完成，成功时才转交 owned buffer 并
+  写 frame flags。MSV1 decode 先解码到 scratch pixel buffer，成功后才一次性
+  复制到调用者 ARGB；
+- Cinepak decoder 把当前重建状态复制到 no-throw candidate state，并在
+  candidate/scratch output 上完成整帧解码；只有完整成功后才交换状态并复制
+  输出；
+- Cinepak encoder 在 no-throw candidate reconstruction/codebook/frame buffers
+  上完成整帧、帧类型和 frame flags 决策；只有全部成功后才交换内部状态、
+  推进 frame index 并转交输出。
+
 AVI 使用增量 opaque muxer，帧率为 `num/den` 有理数（当前整数 FPS 映射为
 `fps/1`），reader 同时暴露原始 `idx1` flags 和归一化 frame flags。实现必须
 保留历史 CVID/MSVC/MJPG header 的精确差异，并显式拒绝不支持的 FOURCC。
+成功 `finish` 后 muxer 永久进入 sealed 状态；重复 `finish` 或 sealed 后
+`add_frame` 返回 `HMC_STATUS_INVALID_STATE`，输出与逻辑状态保持不变。失败的
+`finish` 不 seal，允许修复故障后重试。muxer/reader/encoder/decoder 的
+destroy 以及 owned-buffer release 始终接受 NULL。
 MSV1 编解码和 Cinepak 编解码分别使用带 init 函数的可扩展配置结构；编码
 返回 owned bytes 和实际 `hmc_frame_flags_t`。Cinepak 实际帧标志在首帧、
 key interval 与 force-key 逻辑完成后产生；所有 stateful reset 返回状态，

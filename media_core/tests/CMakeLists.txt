@@ -19,6 +19,8 @@ add_library(honey_media_core_c99_consumer OBJECT
     test_c99_consumer.c
 )
 
+target_link_libraries(honey_media_core_c99_consumer PRIVATE honey_media_core)
+
 set_target_properties(honey_media_core_c99_consumer PROPERTIES
     C_STANDARD 99
     C_STANDARD_REQUIRED YES
@@ -28,6 +30,12 @@ set_target_properties(honey_media_core_c99_consumer PROPERTIES
 target_include_directories(honey_media_core_c99_consumer PRIVATE
     ${PROJECT_SOURCE_DIR}/include
 )
+
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(honey_media_core_c99_consumer PRIVATE
+        HMC_EXPECT_USE_SHARED
+    )
+endif()
 
 if(MSVC)
     target_compile_options(honey_media_core_c99_consumer PRIVATE /W4 /WX)

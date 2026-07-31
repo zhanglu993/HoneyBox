@@ -22,14 +22,18 @@
 - RGBA input is contiguous byte order `R,G,B,A`; ARGB output is numeric `uint32_t 0xAARRGGBB`, independent of host memory byte order.
 - `(NULL, 0)` is a valid empty span only where explicitly allowed; `(NULL, nonzero)` is always invalid.
 - Fixed-layout transport structs `hmc_owned_buffer_t` and `hmc_bytes_view_t` contain only pointer/size fields and do not contain `struct_size`.
-- Every owned-buffer output is `{NULL, 0}` on entry, remains empty on failure, and is released only by `hmc_owned_buffer_release`; every create output handle points to NULL on entry and remains NULL on failure.
+- Every owned-buffer output and borrowed `hmc_bytes_view_t` output is `{NULL, 0}` on entry and remains empty on failure. Owned buffers are released only by `hmc_owned_buffer_release`; every create output handle points to NULL on entry and remains NULL on failure.
+- Every encoder `output_frame_flags` pointer is non-NULL. Both MSV1 and Cinepak leave the caller's scalar value unchanged on failure and write actual normalized flags only on success.
 - Extensible structs put `struct_size` first, allow only tail additions, define a fixed numeric `HMC_*_V1_SIZE`, use no packed layout, and preserve every published field/type/semantic.
-- `struct_size` is caller allocation size including itself. Callees accept at least V1 size, read/write only known bytes, require unknown input/tail bytes and reserved fields to be zero, and never change `struct_size`.
-- Output structs are zeroed by the caller with `struct_size` set; failure leaves the whole output unchanged. Config init functions take `(config*, uint32_t config_size)`, zero the provided capacity, set known defaults, and return status.
+- `struct_size` is caller allocation size including itself. Except for config init, callees accept at least V1 size, read/write only known bytes, require unknown input/tail bytes and reserved fields to be zero, and never change `struct_size`.
+- Output structs are zeroed by the caller with `struct_size` set; failure leaves the whole output unchanged. Config init functions take `(config*, uint32_t config_size)`; NULL returns `HMC_STATUS_INVALID_ARGUMENT`, smaller than V1 returns `HMC_STATUS_BUFFER_TOO_SMALL`, and either failure leaves caller memory unchanged. Success zeros the provided capacity, sets known defaults, and sets `struct_size = config_size`.
 - Unknown encode/frame flag bits return `HMC_STATUS_UNSUPPORTED`.
 - A borrowed `hmc_bytes_view_t` returned by an AVI reader remains valid only until `hmc_avi_reader_destroy`.
 - Independent handles may run concurrently. One encoder/decoder/muxer handle is externally serialized; immutable reader queries may run concurrently; destroy is never concurrent with another call.
 - Failed decoder calls preserve output and all internal state. Failed encoder/muxer calls preserve frame index, reconstruction, keyframe tracking, and previously added frames so OOM can be retried.
+- Stateful destroy functions and `hmc_owned_buffer_release` always accept NULL; other handle operations reject NULL with `HMC_STATUS_INVALID_ARGUMENT`.
+- Tasks 3–6 must not use throwing `new` or default-allocator STL growth (`std::vector`/`std::string` construction/copy/reserve/resize/push/append) on any fallible runtime path. Use checked-size, malloc/realloc/free-backed internal no-throw buffers whose mutating operations return `hmc_status_t`; keep `realloc` results temporary until success.
+- The internal allocator exposes a native-test-only Nth-allocation failure hook, never public ABI. Each Task 3–6 test suite sweeps every allocation point and verifies OOM status, required output values, unchanged logical state, and successful retry after fault removal.
 - First prove Kotlin/C++ byte parity, then switch production call sites, then move legacy Kotlin codec implementations to test-only reference sources.
 - A passing host build is not a device-runtime claim. Record Android build, emulator/device, and physical eBadge checks separately.
 
@@ -225,7 +229,7 @@ private fun rgbaB(): ByteArray = rgbaA().also { out ->
 
 - [ ] First make the native and C99 tests require 32-bit status/flag types, packed ABI 1.0, all exact status/flag values, public export/calling-convention macros, and stable non-empty messages for every status. Run the unchanged implementation and record the expected compile/test failure.
 - [ ] Replace the public C enum with fixed `int32_t`, append `UNSUPPORTED`, `BUFFER_TOO_SMALL`, and `INVALID_STATE`, add stable 32-bit encode/frame flags, return the packed current ABI version, and annotate all current declarations/definitions with `HMC_API`/`HMC_CALL`.
-- [ ] Configure CMake to define `HMC_BUILD_SHARED` for a shared-library implementation and propagate `HMC_USE_SHARED` to its consumers while preserving the default static build.
+- [ ] Configure CMake to define `HMC_BUILD_SHARED` for a shared-library implementation and propagate `HMC_USE_SHARED` to its consumers while preserving the default static build. Make the C99 object a real target consumer and compile-assert that shared receives `HMC_USE_SHARED` while static does not.
 - [ ] Freeze the ABI-wide layout, ownership, byte-order, flags, concurrency, and failure-atomicity rules in this plan and the design; rewrite Tasks 3-7 before their public symbols are implemented.
 - [ ] Run Windows Debug configure/build, the C99 consumer, CTest, `git diff --check`, and stale-symbol scans.
 - [ ] Commit:
@@ -329,14 +333,17 @@ HMC_API hmc_status_t HMC_CALL hmc_avi_reader_copy_frame(
 HMC_API void HMC_CALL hmc_avi_reader_destroy(hmc_avi_reader_t *reader);
 ```
 
-- [ ] Write failing tests for incremental empty/multi-frame muxing, odd-sized frame padding, invalid rational frame rates, CVID/MSVC/MJPG handler/compression/bit-count combinations, `idx1` offsets/flags, original and normalized frame flags, borrowed/copy frame access, round-trip parsing, truncated chunks, oversized chunk lengths, invalid RIFF signatures, null arguments, and out-of-range `uint32_t` indexes.
+- [ ] Write failing tests for config init setting `struct_size == config_size`, V1/tail-zero rules, incremental empty/multi-frame muxing, odd-sized frame padding, invalid rational frame rates, CVID/MSVC/MJPG handler/compression/bit-count combinations, `idx1` offsets/flags, original and normalized frame flags, borrowed/copy frame access, round-trip parsing, truncated chunks, oversized chunk lengths, invalid RIFF signatures, null arguments, NULL-tolerant destroy, and out-of-range `uint32_t` indexes.
 - [ ] Run CTest and confirm failures because AVI functions are absent.
-- [ ] Implement little-endian writer/reader helpers with checked `size_t` addition and multiplication. The muxer owns copies/state incrementally; the reader owns a copy of input bytes, borrowed views remain stable until destroy, and Swift/Node bindings default to `hmc_avi_reader_copy_frame`.
+- [ ] Implement little-endian writer/reader helpers with checked `size_t` addition and multiplication plus malloc/realloc/free-backed no-throw buffers. Do not use throwing STL growth. The muxer owns copies/state incrementally; the reader owns a copy of input bytes, borrowed views remain stable until destroy, and Swift/Node bindings default to `hmc_avi_reader_copy_frame`.
 - [ ] Consume only explicit normalized `hmc_frame_flags_t`; never inspect codec payload to guess keyframes. Expose original `idx1` flags separately from normalized flags and reject unknown flags/unsupported FOURCC with `HMC_STATUS_UNSUPPORTED`.
 - [ ] Use rational `frame_rate_num/frame_rate_den`; map the current integer FPS to `fps/1`. Match `CvidAviMuxer` exactly for CVID, including lowercase `cvid`, 24-bit `strf`, and first `movi` frame offset `4`.
 - [ ] Match `SoftwareCodec.buildAvi` exactly for MSVC/MJPG, including explicit frame flags and `biSizeImage = width * height * 2`; preserve all existing CVID/MSVC/MJPG header differences.
 - [ ] Add exact byte comparisons against `cvid_sample.avi` and `msvc_sample.avi`.
-- [ ] Test config init/tail-zero validation, V1-size acceptance, unchanged output structs on failure, empty owned output on failure, unchanged muxer state after failed add/finish, and immutable concurrent reader queries.
+- [ ] Make `add_frame` validate first, then copy/append into isolated candidate byte/index/metadata buffers; only an all-buffer no-fail swap commits the frame and count, so even current capacities remain unchanged on failure. Build reader copies/metadata in an unpublished candidate handle and publish it only after complete success. Make `finish` build entirely in a scratch owned buffer; only after successful transfer does it seal the muxer.
+- [ ] After successful `finish`, repeated `finish` and every later `add_frame` return `HMC_STATUS_INVALID_STATE`; the owned output stays empty and logical state is unchanged. A failed `finish` does not seal and is retryable.
+- [ ] Test unchanged output structs on failure, `{NULL,0}` borrowed view and owned outputs on failure, unchanged muxer state after failed add/finish, sealed-state invalid calls, NULL-tolerant destroy, and immutable concurrent reader queries.
+- [ ] Sweep the test-only Nth-allocation failure hook across create-copy, add-frame, and finish. Each injected failure must return OOM with the required empty/unchanged output and logical state, then succeed when retried without the fault.
 - [ ] Run CTest with malformed/truncated corpus tests and confirm no crash, out-of-bounds access, partial output buffer, or partial muxer state escapes.
 - [ ] Commit:
 
@@ -403,11 +410,13 @@ HMC_API hmc_status_t HMC_CALL hmc_msv1_decode(
     size_t argb_pixel_count);
 ```
 
-- [ ] Write failing tests for both config init functions/V1 sizes/tail-zero rules, solid-color blocks, two-color blocks, key-frame fixture equality, inter-frame fixture equality, force-key and unknown encode flags, returned normalized frame flags, persistent decode output for skipped blocks, dimensions not divisible by four, short RGBA/ARGB buffers, truncated words, malformed skip runs, and size-overflow dimensions.
+- [ ] Write failing tests for encoder config init setting `struct_size == config_size`, decoder config init setting `struct_size == config_size`, both V1 sizes/tail-zero rules, solid-color blocks, two-color blocks, key-frame fixture equality, inter-frame fixture equality, force-key and unknown encode flags, returned normalized frame flags, persistent decode output for skipped blocks, dimensions not divisible by four, short RGBA/ARGB buffers, truncated words, malformed skip runs, and size-overflow dimensions.
 - [ ] Run CTest and confirm failures because MSV1 functions are absent.
 - [ ] Port the Kotlin scan order, RGB555 conversion, skip-color collision handling, luminance clustering, mask inversion, bottom-up block order, skip-run splitting at `0x3ff`, and terminating word using fixed-width arithmetic.
+- [ ] Encode into a checked-size malloc-backed scratch buffer and publish owned bytes/frame flags only at the final no-fail commit. Decode into a no-throw scratch pixel array and copy to caller ARGB only after complete success; do not use throwing STL growth.
 - [ ] Port decode behavior while replacing silent Kotlin truncation returns with `HMC_STATUS_MALFORMED_DATA`. Preserve previous pixels for valid skipped blocks.
 - [ ] On encode failure keep owned output empty and `output_frame_flags` unchanged. On decode failure preserve the caller output and all persistent pixels; reject unknown flags with `HMC_STATUS_UNSUPPORTED`.
+- [ ] Sweep every encode/decode allocation point with the internal Nth-allocation failure hook; assert OOM, empty/unchanged output and frame flags, preserved decode pixels, then successful retry after clearing the fault.
 - [ ] Compare encoded bytes exactly with `msv1_key.bin` and `msv1_inter.bin`; compare decoded pixels exactly with the committed ARGB fixtures.
 - [ ] Run CTest in Debug and Release configurations.
 - [ ] Commit:
@@ -462,10 +471,12 @@ HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_decode(
     size_t argb_pixel_count);
 ```
 
-- [ ] Write failing tests for decoder config init/V1 size/tail-zero rules, decoding the key/inter fixtures in sequence, status-returning reset behavior, incorrect frame dimensions, truncated 10-byte frame headers, truncated strip/chunk payloads, invalid strip counts, invalid codebook indexes, impossible frame/chunk sizes, and null/short output buffers.
+- [ ] Write failing tests for decoder config init setting `struct_size == config_size`, V1 size/tail-zero rules, decoding the key/inter fixtures in sequence, status-returning reset behavior, NULL-tolerant destroy, incorrect frame dimensions, truncated 10-byte frame headers, truncated strip/chunk payloads, invalid strip counts, invalid codebook indexes, impossible frame/chunk sizes, null/short output buffers, and every failure leaving caller output plus decoder state unchanged.
 - [ ] Run CTest and confirm failures because Cinepak decoder functions are absent.
 - [ ] Port the codebook parsing, V1/V4 vector handling, strip row accumulator, signed U/V conversion, YUV reconstruction, and persistent inter-frame reconstruction.
-- [ ] Require every read to pass a remaining-length check before consuming data. Return `HMC_STATUS_MALFORMED_DATA` on invalid frame structure and leave both caller output and all decoder state unchanged on every failure.
+- [ ] Build create results in an unpublished candidate handle. Use malloc-backed no-throw scratch output plus a complete candidate reconstruction/codebook state. Require every read to pass a remaining-length check before consuming data; only publish/swap candidate state and copy output after the complete operation succeeds.
+- [ ] Return `HMC_STATUS_MALFORMED_DATA` on invalid frame structure and leave both caller output and all decoder state unchanged on every failure.
+- [ ] Sweep every decoder create/decode allocation point with the internal Nth-allocation failure hook; assert OOM, unchanged caller output/state, and successful retry after clearing the fault.
 - [ ] Compare decoded ARGB exactly with `cinepak_key.argb` and `cinepak_inter.argb`.
 - [ ] Parse `cvid_sample.avi` with the AVI reader, feed its frames sequentially to the decoder, and compare the same ARGB fixtures.
 - [ ] Run CTest in Debug and Release configurations.
@@ -529,11 +540,13 @@ HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_encode(
     hmc_frame_flags_t *output_frame_flags);
 ```
 
-- [ ] Write failing tests for config init/V1 size/tail-zero rules and defaults, dimensions divisible by four, key-frame fixture equality, inter-frame fixture equality, explicit force-key and unknown flags, actual returned frame flags, key interval, status-returning reset producing the original first frame, deterministic repeated runs, invalid options, short RGBA input, and overflow-sized dimensions.
+- [ ] Write failing tests for config init setting `struct_size == config_size`, V1 size/tail-zero rules/defaults, dimensions divisible by four, key-frame fixture equality, inter-frame fixture equality, explicit force-key and unknown flags, actual returned frame flags, `output_frame_flags` unchanged on every failure, key interval, status-returning reset producing the original first frame, NULL-tolerant destroy, deterministic repeated runs, invalid options, short RGBA input, and overflow-sized dimensions.
 - [ ] Run CTest and confirm failures because Cinepak encoder functions are absent.
 - [ ] Port RGB-to-YUV fixed-point conversion, macroblock extraction, median-cut initialization, deterministic Lloyd refinement, V1/V4 decision, codebook emission, key/inter skip decisions, strip construction, frame assembly, and reconstruction state.
+- [ ] Build create results in an unpublished candidate handle. Use malloc-backed no-throw candidate reconstruction/codebook/frame buffers. Complete frame assembly and frame-type decision in candidates; only after success publish/swap state, advance frame index, transfer owned output, and write frame flags.
 - [ ] Preserve Kotlin integer rounding and stable tie-breaking exactly; do not parallelize codebook generation in this version because output determinism is part of the format contract.
-- [ ] Select and return actual normalized frame flags only after first-frame, key-interval, and force-key logic. Reject unknown encode flags with `HMC_STATUS_UNSUPPORTED`; every failed encode/reset preserves frame index, reconstruction, and keyframe tracking so OOM can be retried.
+- [ ] Select and return actual normalized frame flags only after first-frame, key-interval, and force-key logic. Reject unknown encode flags with `HMC_STATUS_UNSUPPORTED`; every failed encode/reset preserves frame index, reconstruction, keyframe tracking, owned output emptiness, and the caller's `output_frame_flags` value so OOM can be retried.
+- [ ] Sweep every encoder create/encode allocation point with the internal Nth-allocation failure hook; assert OOM, empty output, unchanged flags/state, and successful retry after clearing the fault.
 - [ ] Compare encoded bytes exactly with `cinepak_key.bin` and `cinepak_inter.bin`, then decode those C++ outputs and compare ARGB fixtures.
 - [ ] Build C++ output into AVI and compare exactly with `cvid_sample.avi`.
 - [ ] Run CTest in Debug and Release configurations.
