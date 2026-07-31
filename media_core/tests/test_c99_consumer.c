@@ -1,14 +1,14 @@
-#include "ebadge/media_core.h"
+#include "honey_media_core/media_core.h"
 
-void ebadge_media_core_c99_compile_test(void)
+void honey_media_core_c99_compile_test(void)
 {
-    eb_buffer_t buffer = {NULL, 0u};
-    eb_byte_view_t view = {NULL, 0u};
-    const uint32_t fourcc = EB_MEDIA_FOURCC('R', 'G', 'B', 'A');
-    const eb_status_t status = EB_STATUS_OK;
+    hmc_owned_buffer_t buffer = {NULL, 0u};
+    hmc_bytes_view_t view = {NULL, 0u};
+    const uint32_t fourcc = HMC_MEDIA_FOURCC('R', 'G', 'B', 'A');
+    const hmc_status_t status = HMC_STATUS_OK;
 
     (void)view;
     (void)fourcc;
     (void)status;
-    eb_buffer_release(&buffer);
+    hmc_owned_buffer_release(&buffer);
 }

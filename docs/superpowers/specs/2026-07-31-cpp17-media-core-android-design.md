@@ -1,4 +1,4 @@
-# C++17 eBadge 媒体核心 Android 迁移设计
+# C++17 Honey Media Core Android 迁移设计
 
 **日期：** 2026-07-31
 **状态：** 已批准，进入实施
@@ -61,7 +61,7 @@ Android MainActivity / VideoConverter / CameraEncoder
                 │
                 │ Kotlin 薄包装 + JNI
                 ▼
-        libebadge_media.so
+        libhoney_media_jni.so
                 │
                 ▼
         C ABI + C++17 核心
@@ -77,7 +77,7 @@ Windows 第一版不接 Flutter，而是：
 media_core_tests.exe
         │
         ▼
-同一个 ebadge_media.h / C++17 核心
+同一个 honey_media_core/media_core.h / C++17 核心
 ```
 
 Android 是功能接入和设备行为验证平台；Windows 是第二编译器、第二运行环境和
@@ -89,14 +89,15 @@ Android 是功能接入和设备行为验证平台；Windows 是第二编译器�
 media_core/
 ├── CMakeLists.txt
 ├── include/
-│   └── ebadge_media.h
+│   └── honey_media_core/
+│       └── media_core.h
 ├── src/
 │   ├── cinepak_encoder.cpp
 │   ├── cinepak_decoder.cpp
 │   ├── msv1_codec.cpp
 │   ├── avi_muxer.cpp
 │   ├── avi_parser.cpp
-│   └── ebadge_media_c_api.cpp
+│   └── c_api.cpp
 └── tests/
     ├── CMakeLists.txt
     ├── media_core_tests.cpp
@@ -104,7 +105,7 @@ media_core/
 
 android/app/src/main/cpp/
 ├── CMakeLists.txt
-└── ebadge_media_jni.cpp
+└── native_media_jni.cpp
 
 android/app/src/main/kotlin/com/honeygui/honeybox/
 └── NativeMediaCodec.kt
@@ -117,6 +118,11 @@ android/app/src/main/kotlin/com/honeygui/honeybox/
 
 公共接口使用固定宽度整数、opaque handle 和显式内存所有权。内部可以使用
 `std::vector`、RAII 和 C++ 类，但不得穿过 ABI 边界。
+
+公共库和 CMake target 统一命名为 `honey_media_core`，公共头文件路径为
+`honey_media_core/media_core.h`。C 符号和类型统一使用 `hmc_` 前缀，宏和
+状态值统一使用 `HMC_` 前缀；Android JNI target 命名为
+`honey_media_jni`。内部 C++ namespace 使用 `honey::media`。
 
 首版接口覆盖：
 
@@ -133,7 +139,9 @@ android/app/src/main/kotlin/com/honeygui/honeybox/
 
 接口约束：
 
-- 所有公开结构体包含 `struct_size`；
+- 固定布局传输结构 `hmc_owned_buffer_t` 和 `hmc_bytes_view_t` 只包含
+  指针与长度，不包含 `struct_size`；
+- 后续新增的可扩展配置结构必须以 `struct_size` 作为首字段；
 - 所有尺寸和长度在进入核心前做溢出检查；
 - 输入 buffer 由调用者持有，调用期间保持有效；
 - 输出 buffer 由核心分配，只能通过核心提供的释放函数释放；

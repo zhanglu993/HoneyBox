@@ -1,39 +1,39 @@
-#include "ebadge/media_core.h"
+#include "honey_media_core/media_core.h"
 
 #include "core_types.hpp"
 
 #include <cstdlib>
 
 #if defined(_MSC_VER) && defined(_CPPUNWIND)
-#error "ebadge_media_core must be compiled with C++ exceptions disabled"
+#error "honey_media_core must be compiled with C++ exceptions disabled"
 #endif
 
-uint32_t eb_media_abi_version(void)
+uint32_t hmc_abi_version(void)
 {
-    return EB_MEDIA_ABI_VERSION;
+    return HMC_MEDIA_ABI_VERSION;
 }
 
-const char *eb_status_message(eb_status_t status)
+const char *hmc_status_message(hmc_status_t status)
 {
     switch (status) {
-    case EB_STATUS_OK:
+    case HMC_STATUS_OK:
         return "ok";
-    case EB_STATUS_INVALID_ARGUMENT:
+    case HMC_STATUS_INVALID_ARGUMENT:
         return "invalid argument";
-    case EB_STATUS_OUT_OF_MEMORY:
+    case HMC_STATUS_OUT_OF_MEMORY:
         return "out of memory";
-    case EB_STATUS_MALFORMED_DATA:
+    case HMC_STATUS_MALFORMED_DATA:
         return "malformed data";
-    case EB_STATUS_OVERFLOW:
+    case HMC_STATUS_OVERFLOW:
         return "overflow";
-    case EB_STATUS_INTERNAL_ERROR:
+    case HMC_STATUS_INTERNAL_ERROR:
         return "internal error";
     default:
         return "unknown status";
     }
 }
 
-void eb_buffer_release(eb_buffer_t *buffer)
+void hmc_owned_buffer_release(hmc_owned_buffer_t *buffer)
 {
     if (buffer == nullptr) {
         return;

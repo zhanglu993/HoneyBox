@@ -1,4 +1,4 @@
-# C++17 eBadge Media Core Android Migration Implementation Plan
+# C++17 Honey Media Core Android Migration Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox state so work can resume safely after interruption.
 
@@ -15,8 +15,10 @@
 - Do not add FFmpeg or another codec/container dependency.
 - Treat all external sizes and offsets as untrusted; validate multiplication/addition before allocation or indexing.
 - Keep C++ exceptions and RTTI out of the public/runtime path. No exception may cross C or JNI boundaries.
-- The library owns every returned `eb_buffer_t`; callers release it with `eb_buffer_release`.
-- A borrowed `eb_byte_view_t` returned by an AVI reader remains valid only until `eb_avi_reader_destroy`.
+- The public library/CMake target is `honey_media_core`; its header is `honey_media_core/media_core.h`, public C symbols/types use `hmc_`, macros/status values use `HMC_`, and internal C++ namespaces use `honey::media`.
+- Fixed-layout transport structs `hmc_owned_buffer_t` and `hmc_bytes_view_t` contain only pointer/size fields and do not contain `struct_size`; extensible configuration structs introduced by later tasks begin with `struct_size`.
+- The library owns every returned `hmc_owned_buffer_t`; callers release it with `hmc_owned_buffer_release`.
+- A borrowed `hmc_bytes_view_t` returned by an AVI reader remains valid only until `hmc_avi_reader_destroy`.
 - First prove Kotlin/C++ byte parity, then switch production call sites, then move legacy Kotlin codec implementations to test-only reference sources.
 - A passing host build is not a device-runtime claim. Record Android build, emulator/device, and physical eBadge checks separately.
 
@@ -27,7 +29,7 @@
 **Files:**
 
 - Create: `media_core/CMakeLists.txt`
-- Create: `media_core/include/ebadge/media_core.h`
+- Create: `media_core/include/honey_media_core/media_core.h`
 - Create: `media_core/src/c_api.cpp`
 - Create: `media_core/src/core_types.hpp`
 - Create: `media_core/tests/CMakeLists.txt`
@@ -39,33 +41,33 @@
 **Interfaces:**
 
 ```c
-#define EB_MEDIA_ABI_VERSION 1u
-#define EB_MEDIA_FOURCC(a, b, c, d) \
+#define HMC_MEDIA_ABI_VERSION 1u
+#define HMC_MEDIA_FOURCC(a, b, c, d) \
     ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8u) | \
      ((uint32_t)(uint8_t)(c) << 16u) | ((uint32_t)(uint8_t)(d) << 24u))
 
-typedef enum eb_status {
-    EB_STATUS_OK = 0,
-    EB_STATUS_INVALID_ARGUMENT = 1,
-    EB_STATUS_OUT_OF_MEMORY = 2,
-    EB_STATUS_MALFORMED_DATA = 3,
-    EB_STATUS_OVERFLOW = 4,
-    EB_STATUS_INTERNAL_ERROR = 5
-} eb_status_t;
+typedef enum hmc_status {
+    HMC_STATUS_OK = 0,
+    HMC_STATUS_INVALID_ARGUMENT = 1,
+    HMC_STATUS_OUT_OF_MEMORY = 2,
+    HMC_STATUS_MALFORMED_DATA = 3,
+    HMC_STATUS_OVERFLOW = 4,
+    HMC_STATUS_INTERNAL_ERROR = 5
+} hmc_status_t;
 
-typedef struct eb_buffer {
+typedef struct hmc_owned_buffer {
     uint8_t *data;
     size_t size;
-} eb_buffer_t;
+} hmc_owned_buffer_t;
 
-typedef struct eb_byte_view {
+typedef struct hmc_bytes_view {
     const uint8_t *data;
     size_t size;
-} eb_byte_view_t;
+} hmc_bytes_view_t;
 
-uint32_t eb_media_abi_version(void);
-const char *eb_status_message(eb_status_t status);
-void eb_buffer_release(eb_buffer_t *buffer);
+uint32_t hmc_abi_version(void);
+const char *hmc_status_message(hmc_status_t status);
+void hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
 ```
 
 - [ ] Write `test_main.cpp` with a small registration/assertion harness and initial tests that require ABI version `1`, stable non-empty status messages, and safe release of `{NULL, 0}`.
@@ -77,7 +79,7 @@ void eb_buffer_release(eb_buffer_t *buffer);
   ```
 
 - [ ] Add `media_core.h`, internal checked-size helpers in `core_types.hpp`, and the minimum `c_api.cpp` implementation. Use `extern "C"` guards and fixed-width integer types.
-- [ ] Make CMake build `ebadge_media_core` as a static library with public include directory `media_core/include`, C++17 required, extensions disabled, and warning-as-error options for MSVC and Clang/GCC.
+- [ ] Make CMake build `honey_media_core` as a static library with public include directory `media_core/include`, C++17 required, extensions disabled, and warning-as-error options for MSVC and Clang/GCC.
 - [ ] Add only generated native build directories such as `/build/media-core-*` to `.gitignore`; do not ignore fixture binaries under `media_core/tests/fixtures`.
 - [ ] Run:
 
@@ -182,7 +184,7 @@ private fun rgbaB(): ByteArray = rgbaA().also { out ->
 
 **Files:**
 
-- Modify: `media_core/include/ebadge/media_core.h`
+- Modify: `media_core/include/honey_media_core/media_core.h`
 - Create: `media_core/src/avi.hpp`
 - Create: `media_core/src/avi.cpp`
 - Modify: `media_core/src/c_api.cpp`
@@ -192,9 +194,9 @@ private fun rgbaB(): ByteArray = rgbaA().also { out ->
 **Interfaces:**
 
 ```c
-typedef struct eb_avi_reader eb_avi_reader_t;
+typedef struct hmc_avi_reader hmc_avi_reader_t;
 
-typedef struct eb_avi_build_config {
+typedef struct hmc_avi_build_config {
     uint32_t struct_size;
     uint32_t width;
     uint32_t height;
@@ -202,28 +204,28 @@ typedef struct eb_avi_build_config {
     uint32_t fourcc;
     uint16_t bit_count;
     uint16_t reserved;
-} eb_avi_build_config_t;
+} hmc_avi_build_config_t;
 
-eb_status_t eb_avi_build(
-    const eb_avi_build_config_t *config,
-    const eb_byte_view_t *frames,
+hmc_status_t hmc_avi_build(
+    const hmc_avi_build_config_t *config,
+    const hmc_bytes_view_t *frames,
     const uint8_t *key_flags,
     size_t frame_count,
-    eb_buffer_t *output);
+    hmc_owned_buffer_t *output);
 
-eb_status_t eb_avi_reader_create(
+hmc_status_t hmc_avi_reader_create(
     const uint8_t *data,
     size_t size,
-    eb_avi_reader_t **reader);
-void eb_avi_reader_destroy(eb_avi_reader_t *reader);
-uint32_t eb_avi_reader_width(const eb_avi_reader_t *reader);
-uint32_t eb_avi_reader_height(const eb_avi_reader_t *reader);
-uint32_t eb_avi_reader_usec_per_frame(const eb_avi_reader_t *reader);
-size_t eb_avi_reader_frame_count(const eb_avi_reader_t *reader);
-eb_status_t eb_avi_reader_frame(
-    const eb_avi_reader_t *reader,
+    hmc_avi_reader_t **reader);
+void hmc_avi_reader_destroy(hmc_avi_reader_t *reader);
+uint32_t hmc_avi_reader_width(const hmc_avi_reader_t *reader);
+uint32_t hmc_avi_reader_height(const hmc_avi_reader_t *reader);
+uint32_t hmc_avi_reader_usec_per_frame(const hmc_avi_reader_t *reader);
+size_t hmc_avi_reader_frame_count(const hmc_avi_reader_t *reader);
+hmc_status_t hmc_avi_reader_frame(
+    const hmc_avi_reader_t *reader,
     size_t index,
-    eb_byte_view_t *frame);
+    hmc_bytes_view_t *frame);
 ```
 
 - [ ] Write failing tests for empty frame lists, odd-sized frame padding, default/fallback FPS behavior, CVID/MSVC fourcc and bit count, `idx1` offsets/flags, round-trip parsing, truncated chunks, oversized chunk lengths, invalid RIFF signatures, null arguments, and out-of-range frame indexes.
@@ -246,7 +248,7 @@ eb_status_t eb_avi_reader_frame(
 
 **Files:**
 
-- Modify: `media_core/include/ebadge/media_core.h`
+- Modify: `media_core/include/honey_media_core/media_core.h`
 - Create: `media_core/src/msv1.hpp`
 - Create: `media_core/src/msv1.cpp`
 - Modify: `media_core/src/c_api.cpp`
@@ -256,7 +258,7 @@ eb_status_t eb_avi_reader_frame(
 **Interfaces:**
 
 ```c
-eb_status_t eb_msv1_encode(
+hmc_status_t hmc_msv1_encode(
     const uint8_t *rgba,
     size_t rgba_size,
     uint32_t width,
@@ -264,9 +266,9 @@ eb_status_t eb_msv1_encode(
     const uint8_t *previous_rgba,
     size_t previous_rgba_size,
     uint32_t skip_threshold,
-    eb_buffer_t *output);
+    hmc_owned_buffer_t *output);
 
-eb_status_t eb_msv1_decode(
+hmc_status_t hmc_msv1_decode(
     const uint8_t *encoded,
     size_t encoded_size,
     uint32_t width,
@@ -278,7 +280,7 @@ eb_status_t eb_msv1_decode(
 - [ ] Write failing tests for solid-color blocks, two-color blocks, key-frame fixture equality, inter-frame fixture equality, persistent decode output for skipped blocks, dimensions not divisible by four, short RGBA/ARGB buffers, truncated words, malformed skip runs, and size-overflow dimensions.
 - [ ] Run CTest and confirm failures because MSV1 functions are absent.
 - [ ] Port the Kotlin scan order, RGB555 conversion, skip-color collision handling, luminance clustering, mask inversion, bottom-up block order, skip-run splitting at `0x3ff`, and terminating word using fixed-width arithmetic.
-- [ ] Port decode behavior while replacing silent Kotlin truncation returns with `EB_STATUS_MALFORMED_DATA`. Preserve previous pixels for valid skipped blocks.
+- [ ] Port decode behavior while replacing silent Kotlin truncation returns with `HMC_STATUS_MALFORMED_DATA`. Preserve previous pixels for valid skipped blocks.
 - [ ] Compare encoded bytes exactly with `msv1_key.bin` and `msv1_inter.bin`; compare decoded pixels exactly with the committed ARGB fixtures.
 - [ ] Run CTest in Debug and Release configurations.
 - [ ] Commit:
@@ -294,7 +296,7 @@ eb_status_t eb_msv1_decode(
 
 **Files:**
 
-- Modify: `media_core/include/ebadge/media_core.h`
+- Modify: `media_core/include/honey_media_core/media_core.h`
 - Create: `media_core/src/cinepak_common.hpp`
 - Create: `media_core/src/cinepak_decoder.hpp`
 - Create: `media_core/src/cinepak_decoder.cpp`
@@ -305,16 +307,16 @@ eb_status_t eb_msv1_decode(
 **Interfaces:**
 
 ```c
-typedef struct eb_cinepak_decoder eb_cinepak_decoder_t;
+typedef struct hmc_cinepak_decoder hmc_cinepak_decoder_t;
 
-eb_status_t eb_cinepak_decoder_create(
+hmc_status_t hmc_cinepak_decoder_create(
     uint32_t width,
     uint32_t height,
-    eb_cinepak_decoder_t **decoder);
-void eb_cinepak_decoder_reset(eb_cinepak_decoder_t *decoder);
-void eb_cinepak_decoder_destroy(eb_cinepak_decoder_t *decoder);
-eb_status_t eb_cinepak_decoder_decode(
-    eb_cinepak_decoder_t *decoder,
+    hmc_cinepak_decoder_t **decoder);
+void hmc_cinepak_decoder_reset(hmc_cinepak_decoder_t *decoder);
+void hmc_cinepak_decoder_destroy(hmc_cinepak_decoder_t *decoder);
+hmc_status_t hmc_cinepak_decoder_decode(
+    hmc_cinepak_decoder_t *decoder,
     const uint8_t *encoded,
     size_t encoded_size,
     uint32_t *argb,
@@ -324,7 +326,7 @@ eb_status_t eb_cinepak_decoder_decode(
 - [ ] Write failing tests for decoding the key/inter fixtures in sequence, reset behavior, incorrect frame dimensions, truncated 10-byte frame headers, truncated strip/chunk payloads, invalid strip counts, invalid codebook indexes, impossible frame/chunk sizes, and null/short output buffers.
 - [ ] Run CTest and confirm failures because Cinepak decoder functions are absent.
 - [ ] Port the codebook parsing, V1/V4 vector handling, strip row accumulator, signed U/V conversion, YUV reconstruction, and persistent inter-frame reconstruction.
-- [ ] Require every read to pass a remaining-length check before consuming data. Return `EB_STATUS_MALFORMED_DATA` on invalid frame structure and leave the caller output buffer unchanged on failure.
+- [ ] Require every read to pass a remaining-length check before consuming data. Return `HMC_STATUS_MALFORMED_DATA` on invalid frame structure and leave the caller output buffer unchanged on failure.
 - [ ] Compare decoded ARGB exactly with `cinepak_key.argb` and `cinepak_inter.argb`.
 - [ ] Parse `cvid_sample.avi` with the AVI reader, feed its frames sequentially to the decoder, and compare the same ARGB fixtures.
 - [ ] Run CTest in Debug and Release configurations.
@@ -341,7 +343,7 @@ eb_status_t eb_cinepak_decoder_decode(
 
 **Files:**
 
-- Modify: `media_core/include/ebadge/media_core.h`
+- Modify: `media_core/include/honey_media_core/media_core.h`
 - Create: `media_core/src/cinepak_encoder.hpp`
 - Create: `media_core/src/cinepak_encoder.cpp`
 - Modify: `media_core/src/c_api.cpp`
@@ -351,9 +353,9 @@ eb_status_t eb_cinepak_decoder_decode(
 **Interfaces:**
 
 ```c
-typedef struct eb_cinepak_encoder eb_cinepak_encoder_t;
+typedef struct hmc_cinepak_encoder hmc_cinepak_encoder_t;
 
-typedef struct eb_cinepak_config {
+typedef struct hmc_cinepak_config {
     uint32_t struct_size;
     uint32_t width;
     uint32_t height;
@@ -365,20 +367,20 @@ typedef struct eb_cinepak_config {
     int32_t strips;
     int32_t skip_threshold;
     int32_t key_interval;
-} eb_cinepak_config_t;
+} hmc_cinepak_config_t;
 
-void eb_cinepak_config_init(eb_cinepak_config_t *config);
-eb_status_t eb_cinepak_encoder_create(
-    const eb_cinepak_config_t *config,
-    eb_cinepak_encoder_t **encoder);
-void eb_cinepak_encoder_reset(eb_cinepak_encoder_t *encoder);
-void eb_cinepak_encoder_destroy(eb_cinepak_encoder_t *encoder);
-eb_status_t eb_cinepak_encoder_encode(
-    eb_cinepak_encoder_t *encoder,
+void hmc_cinepak_config_init(hmc_cinepak_config_t *config);
+hmc_status_t hmc_cinepak_encoder_create(
+    const hmc_cinepak_config_t *config,
+    hmc_cinepak_encoder_t **encoder);
+void hmc_cinepak_encoder_reset(hmc_cinepak_encoder_t *encoder);
+void hmc_cinepak_encoder_destroy(hmc_cinepak_encoder_t *encoder);
+hmc_status_t hmc_cinepak_encoder_encode(
+    hmc_cinepak_encoder_t *encoder,
     const uint8_t *rgba,
     size_t rgba_size,
     uint8_t force_key,
-    eb_buffer_t *output);
+    hmc_owned_buffer_t *output);
 ```
 
 - [ ] Write failing tests for default config values, dimensions divisible by four, key-frame fixture equality, inter-frame fixture equality, explicit force-key, key interval, reset producing the original first frame, deterministic repeated runs, invalid options, short RGBA input, and overflow-sized dimensions.
@@ -411,7 +413,7 @@ eb_status_t eb_cinepak_encoder_encode(
 
 ```kotlin
 internal object NativeMediaCodec {
-    init { System.loadLibrary("ebadge_media_jni") }
+    init { System.loadLibrary("honey_media_jni") }
 
     external fun encodeMsv1(
         rgba: ByteArray,
@@ -436,11 +438,11 @@ internal object NativeMediaCodec {
 }
 ```
 
-- [ ] Add `externalNativeBuild.cmake` pointing to `src/main/cpp/CMakeLists.txt`; link one shared JNI target to the standalone static `ebadge_media_core`.
+- [ ] Add `externalNativeBuild.cmake` pointing to `src/main/cpp/CMakeLists.txt`; link the shared JNI target `honey_media_jni` to the standalone static `honey_media_core`.
 - [ ] Add AndroidX test runner configuration and a parity test that initially calls `NativeMediaCodec` for every committed fixture. Run it on the available emulator/device and confirm it fails because JNI symbols are absent.
 - [ ] Implement JNI array-size validation, `GetByteArrayRegion`/`SetIntArrayRegion` transfers, opaque handle checks, deterministic `IllegalArgumentException` for invalid input, `IOException` for malformed media, and `IllegalStateException` for closed handles/internal failures.
 - [ ] Never expose a native pointer directly to Dart. Store handles only in package-internal Kotlin wrapper objects and make `close()` idempotent.
-- [ ] Implement JNI methods for MSV1, Cinepak encoder/decoder, AVI build, AVI parse metadata, and AVI frame extraction. Every returned `eb_buffer_t` must be copied into a Java byte array and released on all paths.
+- [ ] Implement JNI methods for MSV1, Cinepak encoder/decoder, AVI build, AVI parse metadata, and AVI frame extraction. Every returned `hmc_owned_buffer_t` must be copied into a Java byte array and released on all paths.
 - [ ] Make the Android instrumentation parity test compare native output byte-for-byte with committed fixture files and the still-present Kotlin implementation.
 - [ ] Run:
 
@@ -552,7 +554,7 @@ internal object NativeMediaCodec {
   Expected: only `NativeMediaCodec` API names and JNI binding references remain; no legacy Kotlin implementation is compiled into the APK.
 
 - [ ] Run the fixture test, Android parity/integration tests, Flutter tests, and debug APK build.
-- [ ] Inspect the APK contents and confirm `libebadge_media_jni.so` exists for configured ABIs and legacy Kotlin codec class files do not.
+- [ ] Inspect the APK contents and confirm `libhoney_media_jni.so` exists for configured ABIs and legacy Kotlin codec class files do not.
 - [ ] Commit:
 
   ```powershell

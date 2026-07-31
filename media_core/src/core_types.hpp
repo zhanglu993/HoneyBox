@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <limits>
 
-namespace ebadge::media_core {
+namespace honey::media {
 
 inline bool checked_add_size(std::size_t left, std::size_t right, std::size_t *result) noexcept
 {
@@ -25,4 +25,4 @@ inline bool checked_multiply_size(std::size_t left, std::size_t right, std::size
     return true;
 }
 
-} // namespace ebadge::media_core
+} // namespace honey::media

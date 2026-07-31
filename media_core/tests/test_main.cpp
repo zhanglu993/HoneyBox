@@ -1,4 +1,4 @@
-#include "ebadge/media_core.h"
+#include "honey_media_core/media_core.h"
 
 #include "core_types.hpp"
 
@@ -10,55 +10,55 @@
 
 namespace {
 
-EB_TEST(abi_version_is_one)
+HMC_TEST(abi_version_is_one)
 {
-    EB_EXPECT(eb_media_abi_version() == 1u);
+    HMC_EXPECT(hmc_abi_version() == 1u);
 }
 
-EB_TEST(status_messages_are_stable_and_non_empty)
+HMC_TEST(status_messages_are_stable_and_non_empty)
 {
-    const eb_status_t statuses[] = {
-        EB_STATUS_OK,
-        EB_STATUS_INVALID_ARGUMENT,
-        EB_STATUS_OUT_OF_MEMORY,
-        EB_STATUS_MALFORMED_DATA,
-        EB_STATUS_OVERFLOW,
-        EB_STATUS_INTERNAL_ERROR,
+    const hmc_status_t statuses[] = {
+        HMC_STATUS_OK,
+        HMC_STATUS_INVALID_ARGUMENT,
+        HMC_STATUS_OUT_OF_MEMORY,
+        HMC_STATUS_MALFORMED_DATA,
+        HMC_STATUS_OVERFLOW,
+        HMC_STATUS_INTERNAL_ERROR,
     };
 
-    for (const eb_status_t status : statuses) {
-        const char *first = eb_status_message(status);
-        const char *second = eb_status_message(status);
-        EB_EXPECT(first != nullptr);
-        EB_EXPECT(first[0] != '\0');
-        EB_EXPECT(second != nullptr);
-        EB_EXPECT(std::strcmp(first, second) == 0);
+    for (const hmc_status_t status : statuses) {
+        const char *first = hmc_status_message(status);
+        const char *second = hmc_status_message(status);
+        HMC_EXPECT(first != nullptr);
+        HMC_EXPECT(first[0] != '\0');
+        HMC_EXPECT(second != nullptr);
+        HMC_EXPECT(std::strcmp(first, second) == 0);
     }
 }
 
-EB_TEST(releasing_an_empty_buffer_is_safe)
+HMC_TEST(releasing_an_empty_buffer_is_safe)
 {
-    eb_buffer_t buffer = {nullptr, 0u};
-    eb_buffer_release(&buffer);
-    EB_EXPECT(buffer.data == nullptr);
-    EB_EXPECT(buffer.size == 0u);
+    hmc_owned_buffer_t buffer = {nullptr, 0u};
+    hmc_owned_buffer_release(&buffer);
+    HMC_EXPECT(buffer.data == nullptr);
+    HMC_EXPECT(buffer.size == 0u);
 }
 
-EB_TEST(checked_addition_rejects_overflow)
+HMC_TEST(checked_addition_rejects_overflow)
 {
     std::size_t result = 0u;
-    EB_EXPECT(!ebadge::media_core::checked_add_size(std::numeric_limits<std::size_t>::max(), 1u, &result));
+    HMC_EXPECT(!honey::media::checked_add_size(std::numeric_limits<std::size_t>::max(), 1u, &result));
 }
 
-EB_TEST(checked_multiplication_rejects_overflow)
+HMC_TEST(checked_multiplication_rejects_overflow)
 {
     std::size_t result = 0u;
-    EB_EXPECT(!ebadge::media_core::checked_multiply_size(std::numeric_limits<std::size_t>::max(), 2u, &result));
+    HMC_EXPECT(!honey::media::checked_multiply_size(std::numeric_limits<std::size_t>::max(), 2u, &result));
 }
 
 } // namespace
 
 int main()
 {
-    return ebadge::test::run_all_tests();
+    return honey::test::run_all_tests();
 }

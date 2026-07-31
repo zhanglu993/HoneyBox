@@ -2,7 +2,7 @@
 
 #include <cstdio>
 
-namespace ebadge::test {
+namespace honey::test {
 
 inline int failures = 0;
 
@@ -54,12 +54,12 @@ inline int run_all_tests()
     return failures == 0 ? 0 : 1;
 }
 
-} // namespace ebadge::test
+} // namespace honey::test
 
-#define EB_TEST(name) \
+#define HMC_TEST(name) \
     static void name(); \
-    static ::ebadge::test::Registration name##_registration(#name, &name); \
+    static ::honey::test::Registration name##_registration(#name, &name); \
     static void name()
 
-#define EB_EXPECT(expression) \
-    ::ebadge::test::expect((expression), #expression, __FILE__, __LINE__)
+#define HMC_EXPECT(expression) \
+    ::honey::test::expect((expression), #expression, __FILE__, __LINE__)
