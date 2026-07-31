@@ -8,12 +8,12 @@
 #error "honey_media_core must be compiled with C++ exceptions disabled"
 #endif
 
-uint32_t hmc_abi_version(void)
+HMC_API uint32_t HMC_CALL hmc_abi_version(void)
 {
-    return HMC_MEDIA_ABI_VERSION;
+    return HMC_ABI_VERSION_CURRENT;
 }
 
-const char *hmc_status_message(hmc_status_t status)
+HMC_API const char *HMC_CALL hmc_status_message(hmc_status_t status)
 {
     switch (status) {
     case HMC_STATUS_OK:
@@ -28,12 +28,18 @@ const char *hmc_status_message(hmc_status_t status)
         return "overflow";
     case HMC_STATUS_INTERNAL_ERROR:
         return "internal error";
+    case HMC_STATUS_UNSUPPORTED:
+        return "unsupported";
+    case HMC_STATUS_BUFFER_TOO_SMALL:
+        return "buffer too small";
+    case HMC_STATUS_INVALID_STATE:
+        return "invalid state";
     default:
         return "unknown status";
     }
 }
 
-void hmc_owned_buffer_release(hmc_owned_buffer_t *buffer)
+HMC_API void HMC_CALL hmc_owned_buffer_release(hmc_owned_buffer_t *buffer)
 {
     if (buffer == nullptr) {
         return;

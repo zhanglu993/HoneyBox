@@ -4,23 +4,56 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define HMC_CALL __cdecl
+#if defined(HMC_BUILD_SHARED)
+#define HMC_API __declspec(dllexport)
+#elif defined(HMC_USE_SHARED)
+#define HMC_API __declspec(dllimport)
+#else
+#define HMC_API
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define HMC_API __attribute__((visibility("default")))
+#define HMC_CALL
+#else
+#define HMC_API
+#define HMC_CALL
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define HMC_MEDIA_ABI_VERSION 1u
+#define HMC_ABI_VERSION_1_0     UINT32_C(0x00010000)
+#define HMC_ABI_VERSION_CURRENT HMC_ABI_VERSION_1_0
+#define HMC_ABI_VERSION_GET_MAJOR(version) (((uint32_t)(version) >> 16u) & UINT32_C(0xffff))
+#define HMC_ABI_VERSION_GET_MINOR(version) ((uint32_t)(version) & UINT32_C(0xffff))
+
 #define HMC_MEDIA_FOURCC(a, b, c, d) \
     ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8u) | \
      ((uint32_t)(uint8_t)(c) << 16u) | ((uint32_t)(uint8_t)(d) << 24u))
 
-typedef enum hmc_status {
-    HMC_STATUS_OK = 0,
-    HMC_STATUS_INVALID_ARGUMENT = 1,
-    HMC_STATUS_OUT_OF_MEMORY = 2,
-    HMC_STATUS_MALFORMED_DATA = 3,
-    HMC_STATUS_OVERFLOW = 4,
-    HMC_STATUS_INTERNAL_ERROR = 5
-} hmc_status_t;
+typedef int32_t hmc_status_t;
+
+#define HMC_STATUS_OK               ((hmc_status_t)0)
+#define HMC_STATUS_INVALID_ARGUMENT ((hmc_status_t)1)
+#define HMC_STATUS_OUT_OF_MEMORY    ((hmc_status_t)2)
+#define HMC_STATUS_MALFORMED_DATA   ((hmc_status_t)3)
+#define HMC_STATUS_OVERFLOW         ((hmc_status_t)4)
+#define HMC_STATUS_INTERNAL_ERROR   ((hmc_status_t)5)
+#define HMC_STATUS_UNSUPPORTED      ((hmc_status_t)6)
+#define HMC_STATUS_BUFFER_TOO_SMALL ((hmc_status_t)7)
+#define HMC_STATUS_INVALID_STATE    ((hmc_status_t)8)
+
+typedef uint32_t hmc_encode_flags_t;
+typedef uint32_t hmc_frame_flags_t;
+
+#define HMC_ENCODE_FLAG_NONE      UINT32_C(0)
+#define HMC_ENCODE_FLAG_FORCE_KEY UINT32_C(0x00000001)
+#define HMC_FRAME_FLAG_NONE       UINT32_C(0)
+#define HMC_FRAME_FLAG_KEY        UINT32_C(0x00000001)
+#define HMC_FRAME_FLAG_KEY_KNOWN  UINT32_C(0x00000002)
 
 typedef struct hmc_owned_buffer {
     uint8_t *data;
@@ -32,9 +65,9 @@ typedef struct hmc_bytes_view {
     size_t size;
 } hmc_bytes_view_t;
 
-uint32_t hmc_abi_version(void);
-const char *hmc_status_message(hmc_status_t status);
-void hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
+HMC_API uint32_t HMC_CALL hmc_abi_version(void);
+HMC_API const char *HMC_CALL hmc_status_message(hmc_status_t status);
+HMC_API void HMC_CALL hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
 
 #ifdef __cplusplus
 }

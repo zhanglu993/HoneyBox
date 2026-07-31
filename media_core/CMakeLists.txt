@@ -6,9 +6,19 @@ if(MSVC)
     string(REGEX REPLACE "[/-]EH[a-zA-Z-]*" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 endif()
 
-add_library(honey_media_core STATIC
+add_library(honey_media_core
     src/c_api.cpp
 )
+
+if(BUILD_SHARED_LIBS)
+    set_target_properties(honey_media_core PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    target_compile_definitions(honey_media_core
+        PRIVATE HMC_BUILD_SHARED
+        INTERFACE HMC_USE_SHARED
+    )
+endif()
 
 target_compile_features(honey_media_core PUBLIC cxx_std_17)
 set_target_properties(honey_media_core PROPERTIES

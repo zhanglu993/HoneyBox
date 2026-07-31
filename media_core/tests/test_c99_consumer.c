@@ -4,15 +4,56 @@
 #error "media_core.h must expose the HMC_MEDIA_CORE_H include guard"
 #endif
 
+#ifndef HMC_API
+#error "media_core.h must expose HMC_API"
+#endif
+
+#ifndef HMC_CALL
+#error "media_core.h must expose HMC_CALL"
+#endif
+
+typedef char hmc_status_must_be_32_bits[
+    sizeof(hmc_status_t) == sizeof(int32_t) ? 1 : -1];
+typedef char hmc_encode_flags_must_be_32_bits[
+    sizeof(hmc_encode_flags_t) == sizeof(uint32_t) ? 1 : -1];
+typedef char hmc_frame_flags_must_be_32_bits[
+    sizeof(hmc_frame_flags_t) == sizeof(uint32_t) ? 1 : -1];
+typedef char hmc_abi_1_0_must_be_packed[
+    HMC_ABI_VERSION_1_0 == UINT32_C(0x00010000) ? 1 : -1];
+typedef char hmc_status_values_must_be_frozen[
+    HMC_STATUS_OK == 0 &&
+    HMC_STATUS_INVALID_ARGUMENT == 1 &&
+    HMC_STATUS_OUT_OF_MEMORY == 2 &&
+    HMC_STATUS_MALFORMED_DATA == 3 &&
+    HMC_STATUS_OVERFLOW == 4 &&
+    HMC_STATUS_INTERNAL_ERROR == 5 &&
+    HMC_STATUS_UNSUPPORTED == 6 &&
+    HMC_STATUS_BUFFER_TOO_SMALL == 7 &&
+    HMC_STATUS_INVALID_STATE == 8 ? 1 : -1];
+typedef char hmc_flag_values_must_be_frozen[
+    HMC_ENCODE_FLAG_NONE == UINT32_C(0) &&
+    HMC_ENCODE_FLAG_FORCE_KEY == UINT32_C(0x00000001) &&
+    HMC_FRAME_FLAG_NONE == UINT32_C(0) &&
+    HMC_FRAME_FLAG_KEY == UINT32_C(0x00000001) &&
+    HMC_FRAME_FLAG_KEY_KNOWN == UINT32_C(0x00000002) ? 1 : -1];
+
 void honey_media_core_c99_compile_test(void)
 {
     hmc_owned_buffer_t buffer = {NULL, 0u};
     hmc_bytes_view_t view = {NULL, 0u};
     const uint32_t fourcc = HMC_MEDIA_FOURCC('R', 'G', 'B', 'A');
     const hmc_status_t status = HMC_STATUS_OK;
+    const uint32_t abi_major = HMC_ABI_VERSION_GET_MAJOR(HMC_ABI_VERSION_CURRENT);
+    const uint32_t abi_minor = HMC_ABI_VERSION_GET_MINOR(HMC_ABI_VERSION_CURRENT);
+    hmc_encode_flags_t encode_flags = HMC_ENCODE_FLAG_NONE;
+    hmc_frame_flags_t frame_flags = HMC_FRAME_FLAG_NONE;
 
     (void)view;
     (void)fourcc;
     (void)status;
+    (void)abi_major;
+    (void)abi_minor;
+    (void)encode_flags;
+    (void)frame_flags;
     hmc_owned_buffer_release(&buffer);
 }

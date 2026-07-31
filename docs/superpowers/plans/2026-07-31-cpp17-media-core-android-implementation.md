@@ -16,9 +16,20 @@
 - Treat all external sizes and offsets as untrusted; validate multiplication/addition before allocation or indexing.
 - Keep C++ exceptions and RTTI out of the public/runtime path. No exception may cross C or JNI boundaries.
 - The public library/CMake target is `honey_media_core`; its header is `honey_media_core/media_core.h`, public C symbols/types use `hmc_`, macros/status values use `HMC_`, and internal C++ namespaces use `honey::media`.
-- Fixed-layout transport structs `hmc_owned_buffer_t` and `hmc_bytes_view_t` contain only pointer/size fields and do not contain `struct_size`; extensible configuration structs introduced by later tasks begin with `struct_size`.
-- The library owns every returned `hmc_owned_buffer_t`; callers release it with `hmc_owned_buffer_release`.
+- Every public function declaration and definition uses `HMC_API` and `HMC_CALL`; Windows/Cygwin is `__cdecl`, shared builds/consumers select export/import with `HMC_BUILD_SHARED`/`HMC_USE_SHARED`, static Windows leaves `HMC_API` empty, and GCC/Clang uses default visibility with an empty calling convention.
+- Status storage is fixed `int32_t`; published numeric values are append-only and may never be renumbered, reused, or removed. ABI version is packed `major << 16 | minor`.
+- `size_t` is only for in-process byte/pixel buffer sizes and capacities. It is never serialized or sent across IPC; logical AVI frame counts and indexes use `uint32_t`.
+- RGBA input is contiguous byte order `R,G,B,A`; ARGB output is numeric `uint32_t 0xAARRGGBB`, independent of host memory byte order.
+- `(NULL, 0)` is a valid empty span only where explicitly allowed; `(NULL, nonzero)` is always invalid.
+- Fixed-layout transport structs `hmc_owned_buffer_t` and `hmc_bytes_view_t` contain only pointer/size fields and do not contain `struct_size`.
+- Every owned-buffer output is `{NULL, 0}` on entry, remains empty on failure, and is released only by `hmc_owned_buffer_release`; every create output handle points to NULL on entry and remains NULL on failure.
+- Extensible structs put `struct_size` first, allow only tail additions, define a fixed numeric `HMC_*_V1_SIZE`, use no packed layout, and preserve every published field/type/semantic.
+- `struct_size` is caller allocation size including itself. Callees accept at least V1 size, read/write only known bytes, require unknown input/tail bytes and reserved fields to be zero, and never change `struct_size`.
+- Output structs are zeroed by the caller with `struct_size` set; failure leaves the whole output unchanged. Config init functions take `(config*, uint32_t config_size)`, zero the provided capacity, set known defaults, and return status.
+- Unknown encode/frame flag bits return `HMC_STATUS_UNSUPPORTED`.
 - A borrowed `hmc_bytes_view_t` returned by an AVI reader remains valid only until `hmc_avi_reader_destroy`.
+- Independent handles may run concurrently. One encoder/decoder/muxer handle is externally serialized; immutable reader queries may run concurrently; destroy is never concurrent with another call.
+- Failed decoder calls preserve output and all internal state. Failed encoder/muxer calls preserve frame index, reconstruction, keyframe tracking, and previously added frames so OOM can be retried.
 - First prove Kotlin/C++ byte parity, then switch production call sites, then move legacy Kotlin codec implementations to test-only reference sources.
 - A passing host build is not a device-runtime claim. Record Android build, emulator/device, and physical eBadge checks separately.
 
@@ -41,19 +52,34 @@
 **Interfaces:**
 
 ```c
-#define HMC_MEDIA_ABI_VERSION 1u
+#define HMC_ABI_VERSION_1_0     UINT32_C(0x00010000)
+#define HMC_ABI_VERSION_CURRENT HMC_ABI_VERSION_1_0
+#define HMC_ABI_VERSION_GET_MAJOR(version) (((uint32_t)(version) >> 16u) & UINT32_C(0xffff))
+#define HMC_ABI_VERSION_GET_MINOR(version) ((uint32_t)(version) & UINT32_C(0xffff))
 #define HMC_MEDIA_FOURCC(a, b, c, d) \
     ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8u) | \
      ((uint32_t)(uint8_t)(c) << 16u) | ((uint32_t)(uint8_t)(d) << 24u))
 
-typedef enum hmc_status {
-    HMC_STATUS_OK = 0,
-    HMC_STATUS_INVALID_ARGUMENT = 1,
-    HMC_STATUS_OUT_OF_MEMORY = 2,
-    HMC_STATUS_MALFORMED_DATA = 3,
-    HMC_STATUS_OVERFLOW = 4,
-    HMC_STATUS_INTERNAL_ERROR = 5
-} hmc_status_t;
+typedef int32_t hmc_status_t;
+
+#define HMC_STATUS_OK               ((hmc_status_t)0)
+#define HMC_STATUS_INVALID_ARGUMENT ((hmc_status_t)1)
+#define HMC_STATUS_OUT_OF_MEMORY    ((hmc_status_t)2)
+#define HMC_STATUS_MALFORMED_DATA   ((hmc_status_t)3)
+#define HMC_STATUS_OVERFLOW         ((hmc_status_t)4)
+#define HMC_STATUS_INTERNAL_ERROR   ((hmc_status_t)5)
+#define HMC_STATUS_UNSUPPORTED      ((hmc_status_t)6)
+#define HMC_STATUS_BUFFER_TOO_SMALL ((hmc_status_t)7)
+#define HMC_STATUS_INVALID_STATE    ((hmc_status_t)8)
+
+typedef uint32_t hmc_encode_flags_t;
+typedef uint32_t hmc_frame_flags_t;
+
+#define HMC_ENCODE_FLAG_NONE      UINT32_C(0)
+#define HMC_ENCODE_FLAG_FORCE_KEY UINT32_C(0x00000001)
+#define HMC_FRAME_FLAG_NONE       UINT32_C(0)
+#define HMC_FRAME_FLAG_KEY        UINT32_C(0x00000001)
+#define HMC_FRAME_FLAG_KEY_KNOWN  UINT32_C(0x00000002)
 
 typedef struct hmc_owned_buffer {
     uint8_t *data;
@@ -65,12 +91,12 @@ typedef struct hmc_bytes_view {
     size_t size;
 } hmc_bytes_view_t;
 
-uint32_t hmc_abi_version(void);
-const char *hmc_status_message(hmc_status_t status);
-void hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
+HMC_API uint32_t HMC_CALL hmc_abi_version(void);
+HMC_API const char *HMC_CALL hmc_status_message(hmc_status_t status);
+HMC_API void HMC_CALL hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
 ```
 
-- [ ] Write `test_main.cpp` with a small registration/assertion harness and initial tests that require ABI version `1`, stable non-empty status messages, and safe release of `{NULL, 0}`.
+- [ ] Write `test_main.cpp` with a small registration/assertion harness and initial tests that require packed ABI version 1.0, fixed 32-bit status/flag storage and values, stable non-empty status messages, and safe release of `{NULL, 0}`.
 - [ ] Add `scripts/test-media-core-windows.ps1`. It must resolve `cmake.exe` from `PATH` or the current Visual Studio installation, use repository-relative source/build paths, and return the failing command's exit code.
 - [ ] Run the native configure/build script and confirm the test target fails because the public header and functions do not exist:
 
@@ -79,7 +105,7 @@ void hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
   ```
 
 - [ ] Add `media_core.h`, internal checked-size helpers in `core_types.hpp`, and the minimum `c_api.cpp` implementation. Use `extern "C"` guards and fixed-width integer types.
-- [ ] Make CMake build `honey_media_core` as a static library with public include directory `media_core/include`, C++17 required, extensions disabled, and warning-as-error options for MSVC and Clang/GCC.
+- [ ] Make CMake build `honey_media_core` as a static library by default (and a correctly exported shared library when `BUILD_SHARED_LIBS` is enabled), with public include directory `media_core/include`, C++17 required, extensions disabled, and warning-as-error options for MSVC and Clang/GCC.
 - [ ] Add only generated native build directories such as `/build/media-core-*` to `.gitignore`; do not ignore fixture binaries under `media_core/tests/fixtures`.
 - [ ] Run:
 
@@ -185,6 +211,32 @@ private fun rgbaB(): ByteArray = rgbaA().also { out ->
 
 ---
 
+## Task 2.5: Freeze the general-purpose C ABI
+
+**Files:**
+
+- Modify: `media_core/include/honey_media_core/media_core.h`
+- Modify: `media_core/src/c_api.cpp`
+- Modify: `media_core/CMakeLists.txt`
+- Modify: `media_core/tests/test_main.cpp`
+- Modify: `media_core/tests/test_c99_consumer.c`
+- Modify: `docs/superpowers/specs/2026-07-31-cpp17-media-core-android-design.md`
+- Modify: `docs/superpowers/plans/2026-07-31-cpp17-media-core-android-implementation.md`
+
+- [ ] First make the native and C99 tests require 32-bit status/flag types, packed ABI 1.0, all exact status/flag values, public export/calling-convention macros, and stable non-empty messages for every status. Run the unchanged implementation and record the expected compile/test failure.
+- [ ] Replace the public C enum with fixed `int32_t`, append `UNSUPPORTED`, `BUFFER_TOO_SMALL`, and `INVALID_STATE`, add stable 32-bit encode/frame flags, return the packed current ABI version, and annotate all current declarations/definitions with `HMC_API`/`HMC_CALL`.
+- [ ] Configure CMake to define `HMC_BUILD_SHARED` for a shared-library implementation and propagate `HMC_USE_SHARED` to its consumers while preserving the default static build.
+- [ ] Freeze the ABI-wide layout, ownership, byte-order, flags, concurrency, and failure-atomicity rules in this plan and the design; rewrite Tasks 3-7 before their public symbols are implemented.
+- [ ] Run Windows Debug configure/build, the C99 consumer, CTest, `git diff --check`, and stale-symbol scans.
+- [ ] Commit:
+
+  ```powershell
+  git add media_core docs/superpowers/specs/2026-07-31-cpp17-media-core-android-design.md docs/superpowers/plans/2026-07-31-cpp17-media-core-android-implementation.md
+  git commit -m "refactor: 固化媒体核心跨平台ABI"
+  ```
+
+---
+
 ## Task 3: Port AVI muxing and parsing with strict bounds checks
 
 **Files:**
@@ -199,47 +251,93 @@ private fun rgbaB(): ByteArray = rgbaA().also { out ->
 **Interfaces:**
 
 ```c
+typedef struct hmc_avi_muxer hmc_avi_muxer_t;
 typedef struct hmc_avi_reader hmc_avi_reader_t;
 
-typedef struct hmc_avi_build_config {
+typedef struct hmc_avi_muxer_config {
     uint32_t struct_size;
     uint32_t width;
     uint32_t height;
-    uint32_t fps;
-    uint32_t fourcc;
-    uint16_t bit_count;
-    uint16_t reserved;
-} hmc_avi_build_config_t;
+    uint32_t frame_rate_num;
+    uint32_t frame_rate_den;
+    uint32_t handler_fourcc;
+    uint32_t compression_fourcc;
+    uint32_t bit_count;
+} hmc_avi_muxer_config_t;
 
-hmc_status_t hmc_avi_build(
-    const hmc_avi_build_config_t *config,
-    const hmc_bytes_view_t *frames,
-    const uint8_t *key_flags,
-    size_t frame_count,
+#define HMC_AVI_MUXER_CONFIG_V1_SIZE UINT32_C(32)
+
+typedef struct hmc_avi_info {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t usec_per_frame;
+    uint32_t frame_rate_num;
+    uint32_t frame_rate_den;
+    uint32_t handler_fourcc;
+    uint32_t compression_fourcc;
+    uint32_t bit_count;
+    uint32_t frame_count;
+} hmc_avi_info_t;
+
+#define HMC_AVI_INFO_V1_SIZE UINT32_C(40)
+
+typedef struct hmc_avi_frame_info {
+    uint32_t struct_size;
+    uint32_t chunk_fourcc;
+    uint32_t avi_index_flags;
+    uint32_t frame_flags;
+} hmc_avi_frame_info_t;
+
+#define HMC_AVI_FRAME_INFO_V1_SIZE UINT32_C(16)
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_config_init(
+    hmc_avi_muxer_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_create(
+    const hmc_avi_muxer_config_t *config,
+    hmc_avi_muxer_t **muxer);
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_add_frame(
+    hmc_avi_muxer_t *muxer,
+    const uint8_t *data,
+    size_t size,
+    hmc_frame_flags_t frame_flags);
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_finish(
+    hmc_avi_muxer_t *muxer,
     hmc_owned_buffer_t *output);
+HMC_API void HMC_CALL hmc_avi_muxer_destroy(hmc_avi_muxer_t *muxer);
 
-hmc_status_t hmc_avi_reader_create(
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_create_copy(
     const uint8_t *data,
     size_t size,
     hmc_avi_reader_t **reader);
-void hmc_avi_reader_destroy(hmc_avi_reader_t *reader);
-uint32_t hmc_avi_reader_width(const hmc_avi_reader_t *reader);
-uint32_t hmc_avi_reader_height(const hmc_avi_reader_t *reader);
-uint32_t hmc_avi_reader_usec_per_frame(const hmc_avi_reader_t *reader);
-size_t hmc_avi_reader_frame_count(const hmc_avi_reader_t *reader);
-hmc_status_t hmc_avi_reader_frame(
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_info(
     const hmc_avi_reader_t *reader,
-    size_t index,
+    hmc_avi_info_t *info);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_frame_info(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_avi_frame_info_t *frame_info);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_frame_view(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
     hmc_bytes_view_t *frame);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_copy_frame(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_owned_buffer_t *frame);
+HMC_API void HMC_CALL hmc_avi_reader_destroy(hmc_avi_reader_t *reader);
 ```
 
-- [ ] Write failing tests for empty frame lists, odd-sized frame padding, default/fallback FPS behavior, CVID/MSVC fourcc and bit count, `idx1` offsets/flags, round-trip parsing, truncated chunks, oversized chunk lengths, invalid RIFF signatures, null arguments, and out-of-range frame indexes.
+- [ ] Write failing tests for incremental empty/multi-frame muxing, odd-sized frame padding, invalid rational frame rates, CVID/MSVC/MJPG handler/compression/bit-count combinations, `idx1` offsets/flags, original and normalized frame flags, borrowed/copy frame access, round-trip parsing, truncated chunks, oversized chunk lengths, invalid RIFF signatures, null arguments, and out-of-range `uint32_t` indexes.
 - [ ] Run CTest and confirm failures because AVI functions are absent.
-- [ ] Implement little-endian writer/reader helpers with checked `size_t` addition and multiplication. The reader must own a copy of input bytes and frame views must point into that owned copy.
-- [ ] Match `CvidAviMuxer` exactly for CVID: lowercase `cvid`, 24-bit `strf`, first `movi` frame offset `4`, and key status from frame byte zero when `key_flags == NULL`.
-- [ ] Match `SoftwareCodec.buildAvi` exactly for MSVC/MJPG, including caller-provided key flags and `biSizeImage = width * height * 2`.
+- [ ] Implement little-endian writer/reader helpers with checked `size_t` addition and multiplication. The muxer owns copies/state incrementally; the reader owns a copy of input bytes, borrowed views remain stable until destroy, and Swift/Node bindings default to `hmc_avi_reader_copy_frame`.
+- [ ] Consume only explicit normalized `hmc_frame_flags_t`; never inspect codec payload to guess keyframes. Expose original `idx1` flags separately from normalized flags and reject unknown flags/unsupported FOURCC with `HMC_STATUS_UNSUPPORTED`.
+- [ ] Use rational `frame_rate_num/frame_rate_den`; map the current integer FPS to `fps/1`. Match `CvidAviMuxer` exactly for CVID, including lowercase `cvid`, 24-bit `strf`, and first `movi` frame offset `4`.
+- [ ] Match `SoftwareCodec.buildAvi` exactly for MSVC/MJPG, including explicit frame flags and `biSizeImage = width * height * 2`; preserve all existing CVID/MSVC/MJPG header differences.
 - [ ] Add exact byte comparisons against `cvid_sample.avi` and `msvc_sample.avi`.
-- [ ] Run CTest with malformed/truncated corpus tests and confirm no crash, out-of-bounds access, or partial output buffer escapes.
+- [ ] Test config init/tail-zero validation, V1-size acceptance, unchanged output structs on failure, empty owned output on failure, unchanged muxer state after failed add/finish, and immutable concurrent reader queries.
+- [ ] Run CTest with malformed/truncated corpus tests and confirm no crash, out-of-bounds access, partial output buffer, or partial muxer state escapes.
 - [ ] Commit:
 
   ```powershell
@@ -263,29 +361,53 @@ hmc_status_t hmc_avi_reader_frame(
 **Interfaces:**
 
 ```c
-hmc_status_t hmc_msv1_encode(
+typedef struct hmc_msv1_encoder_config {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t skip_threshold;
+} hmc_msv1_encoder_config_t;
+
+#define HMC_MSV1_ENCODER_CONFIG_V1_SIZE UINT32_C(16)
+
+typedef struct hmc_msv1_decoder_config {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+} hmc_msv1_decoder_config_t;
+
+#define HMC_MSV1_DECODER_CONFIG_V1_SIZE UINT32_C(12)
+
+HMC_API hmc_status_t HMC_CALL hmc_msv1_encoder_config_init(
+    hmc_msv1_encoder_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_msv1_decoder_config_init(
+    hmc_msv1_decoder_config_t *config,
+    uint32_t config_size);
+
+HMC_API hmc_status_t HMC_CALL hmc_msv1_encode(
+    const hmc_msv1_encoder_config_t *config,
     const uint8_t *rgba,
     size_t rgba_size,
-    uint32_t width,
-    uint32_t height,
     const uint8_t *previous_rgba,
     size_t previous_rgba_size,
-    uint32_t skip_threshold,
-    hmc_owned_buffer_t *output);
+    hmc_encode_flags_t encode_flags,
+    hmc_owned_buffer_t *output,
+    hmc_frame_flags_t *output_frame_flags);
 
-hmc_status_t hmc_msv1_decode(
+HMC_API hmc_status_t HMC_CALL hmc_msv1_decode(
+    const hmc_msv1_decoder_config_t *config,
     const uint8_t *encoded,
     size_t encoded_size,
-    uint32_t width,
-    uint32_t height,
     uint32_t *argb,
     size_t argb_pixel_count);
 ```
 
-- [ ] Write failing tests for solid-color blocks, two-color blocks, key-frame fixture equality, inter-frame fixture equality, persistent decode output for skipped blocks, dimensions not divisible by four, short RGBA/ARGB buffers, truncated words, malformed skip runs, and size-overflow dimensions.
+- [ ] Write failing tests for both config init functions/V1 sizes/tail-zero rules, solid-color blocks, two-color blocks, key-frame fixture equality, inter-frame fixture equality, force-key and unknown encode flags, returned normalized frame flags, persistent decode output for skipped blocks, dimensions not divisible by four, short RGBA/ARGB buffers, truncated words, malformed skip runs, and size-overflow dimensions.
 - [ ] Run CTest and confirm failures because MSV1 functions are absent.
 - [ ] Port the Kotlin scan order, RGB555 conversion, skip-color collision handling, luminance clustering, mask inversion, bottom-up block order, skip-run splitting at `0x3ff`, and terminating word using fixed-width arithmetic.
 - [ ] Port decode behavior while replacing silent Kotlin truncation returns with `HMC_STATUS_MALFORMED_DATA`. Preserve previous pixels for valid skipped blocks.
+- [ ] On encode failure keep owned output empty and `output_frame_flags` unchanged. On decode failure preserve the caller output and all persistent pixels; reject unknown flags with `HMC_STATUS_UNSUPPORTED`.
 - [ ] Compare encoded bytes exactly with `msv1_key.bin` and `msv1_inter.bin`; compare decoded pixels exactly with the committed ARGB fixtures.
 - [ ] Run CTest in Debug and Release configurations.
 - [ ] Commit:
@@ -314,13 +436,25 @@ hmc_status_t hmc_msv1_decode(
 ```c
 typedef struct hmc_cinepak_decoder hmc_cinepak_decoder_t;
 
-hmc_status_t hmc_cinepak_decoder_create(
-    uint32_t width,
-    uint32_t height,
+typedef struct hmc_cinepak_decoder_config {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+} hmc_cinepak_decoder_config_t;
+
+#define HMC_CINEPAK_DECODER_CONFIG_V1_SIZE UINT32_C(12)
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_config_init(
+    hmc_cinepak_decoder_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_create(
+    const hmc_cinepak_decoder_config_t *config,
     hmc_cinepak_decoder_t **decoder);
-void hmc_cinepak_decoder_reset(hmc_cinepak_decoder_t *decoder);
-void hmc_cinepak_decoder_destroy(hmc_cinepak_decoder_t *decoder);
-hmc_status_t hmc_cinepak_decoder_decode(
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_reset(
+    hmc_cinepak_decoder_t *decoder);
+HMC_API void HMC_CALL hmc_cinepak_decoder_destroy(
+    hmc_cinepak_decoder_t *decoder);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_decode(
     hmc_cinepak_decoder_t *decoder,
     const uint8_t *encoded,
     size_t encoded_size,
@@ -328,10 +462,10 @@ hmc_status_t hmc_cinepak_decoder_decode(
     size_t argb_pixel_count);
 ```
 
-- [ ] Write failing tests for decoding the key/inter fixtures in sequence, reset behavior, incorrect frame dimensions, truncated 10-byte frame headers, truncated strip/chunk payloads, invalid strip counts, invalid codebook indexes, impossible frame/chunk sizes, and null/short output buffers.
+- [ ] Write failing tests for decoder config init/V1 size/tail-zero rules, decoding the key/inter fixtures in sequence, status-returning reset behavior, incorrect frame dimensions, truncated 10-byte frame headers, truncated strip/chunk payloads, invalid strip counts, invalid codebook indexes, impossible frame/chunk sizes, and null/short output buffers.
 - [ ] Run CTest and confirm failures because Cinepak decoder functions are absent.
 - [ ] Port the codebook parsing, V1/V4 vector handling, strip row accumulator, signed U/V conversion, YUV reconstruction, and persistent inter-frame reconstruction.
-- [ ] Require every read to pass a remaining-length check before consuming data. Return `HMC_STATUS_MALFORMED_DATA` on invalid frame structure and leave the caller output buffer unchanged on failure.
+- [ ] Require every read to pass a remaining-length check before consuming data. Return `HMC_STATUS_MALFORMED_DATA` on invalid frame structure and leave both caller output and all decoder state unchanged on every failure.
 - [ ] Compare decoded ARGB exactly with `cinepak_key.argb` and `cinepak_inter.argb`.
 - [ ] Parse `cvid_sample.avi` with the AVI reader, feed its frames sequentially to the decoder, and compare the same ARGB fixtures.
 - [ ] Run CTest in Debug and Release configurations.
@@ -360,7 +494,7 @@ hmc_status_t hmc_cinepak_decoder_decode(
 ```c
 typedef struct hmc_cinepak_encoder hmc_cinepak_encoder_t;
 
-typedef struct hmc_cinepak_config {
+typedef struct hmc_cinepak_encoder_config {
     uint32_t struct_size;
     uint32_t width;
     uint32_t height;
@@ -372,26 +506,34 @@ typedef struct hmc_cinepak_config {
     int32_t strips;
     int32_t skip_threshold;
     int32_t key_interval;
-} hmc_cinepak_config_t;
+} hmc_cinepak_encoder_config_t;
 
-void hmc_cinepak_config_init(hmc_cinepak_config_t *config);
-hmc_status_t hmc_cinepak_encoder_create(
-    const hmc_cinepak_config_t *config,
+#define HMC_CINEPAK_ENCODER_CONFIG_V1_SIZE UINT32_C(44)
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_config_init(
+    hmc_cinepak_encoder_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_create(
+    const hmc_cinepak_encoder_config_t *config,
     hmc_cinepak_encoder_t **encoder);
-void hmc_cinepak_encoder_reset(hmc_cinepak_encoder_t *encoder);
-void hmc_cinepak_encoder_destroy(hmc_cinepak_encoder_t *encoder);
-hmc_status_t hmc_cinepak_encoder_encode(
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_reset(
+    hmc_cinepak_encoder_t *encoder);
+HMC_API void HMC_CALL hmc_cinepak_encoder_destroy(
+    hmc_cinepak_encoder_t *encoder);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_encode(
     hmc_cinepak_encoder_t *encoder,
     const uint8_t *rgba,
     size_t rgba_size,
-    uint8_t force_key,
-    hmc_owned_buffer_t *output);
+    hmc_encode_flags_t encode_flags,
+    hmc_owned_buffer_t *output,
+    hmc_frame_flags_t *output_frame_flags);
 ```
 
-- [ ] Write failing tests for default config values, dimensions divisible by four, key-frame fixture equality, inter-frame fixture equality, explicit force-key, key interval, reset producing the original first frame, deterministic repeated runs, invalid options, short RGBA input, and overflow-sized dimensions.
+- [ ] Write failing tests for config init/V1 size/tail-zero rules and defaults, dimensions divisible by four, key-frame fixture equality, inter-frame fixture equality, explicit force-key and unknown flags, actual returned frame flags, key interval, status-returning reset producing the original first frame, deterministic repeated runs, invalid options, short RGBA input, and overflow-sized dimensions.
 - [ ] Run CTest and confirm failures because Cinepak encoder functions are absent.
 - [ ] Port RGB-to-YUV fixed-point conversion, macroblock extraction, median-cut initialization, deterministic Lloyd refinement, V1/V4 decision, codebook emission, key/inter skip decisions, strip construction, frame assembly, and reconstruction state.
 - [ ] Preserve Kotlin integer rounding and stable tie-breaking exactly; do not parallelize codebook generation in this version because output determinism is part of the format contract.
+- [ ] Select and return actual normalized frame flags only after first-frame, key-interval, and force-key logic. Reject unknown encode flags with `HMC_STATUS_UNSUPPORTED`; every failed encode/reset preserves frame index, reconstruction, and keyframe tracking so OOM can be retried.
 - [ ] Compare encoded bytes exactly with `cinepak_key.bin` and `cinepak_inter.bin`, then decode those C++ outputs and compare ARGB fixtures.
 - [ ] Build C++ output into AVI and compare exactly with `cvid_sample.avi`.
 - [ ] Run CTest in Debug and Release configurations.
@@ -420,13 +562,19 @@ hmc_status_t hmc_cinepak_encoder_encode(
 internal object NativeMediaCodec {
     init { System.loadLibrary("honey_media_jni") }
 
+    data class EncodedFrame(
+        val bytes: ByteArray,
+        val frameFlags: Int,
+    )
+
     external fun encodeMsv1(
         rgba: ByteArray,
         width: Int,
         height: Int,
         previousRgba: ByteArray?,
         skipThreshold: Int,
-    ): ByteArray
+        forceKey: Boolean,
+    ): EncodedFrame
 
     external fun decodeMsv1(
         encoded: ByteArray,
@@ -436,7 +584,7 @@ internal object NativeMediaCodec {
     )
 
     class CinepakEncoder internal constructor(internal var handle: Long) : AutoCloseable {
-        external fun encode(rgba: ByteArray, forceKey: Boolean): ByteArray
+        external fun encode(rgba: ByteArray, forceKey: Boolean): EncodedFrame
         external fun reset()
         override external fun close()
     }
@@ -445,9 +593,12 @@ internal object NativeMediaCodec {
 
 - [ ] Add `externalNativeBuild.cmake` pointing to `src/main/cpp/CMakeLists.txt`; link the shared JNI target `honey_media_jni` to the standalone static `honey_media_core`.
 - [ ] Add AndroidX test runner configuration and a parity test that initially calls `NativeMediaCodec` for every committed fixture. Run it on the available emulator/device and confirm it fails because JNI symbols are absent.
-- [ ] Implement JNI array-size validation, `GetByteArrayRegion`/`SetIntArrayRegion` transfers, opaque handle checks, deterministic `IllegalArgumentException` for invalid input, `IOException` for malformed media, and `IllegalStateException` for closed handles/internal failures.
+- [ ] Implement JNI array-size validation, `GetByteArrayRegion`/`SetIntArrayRegion` transfers, opaque handle checks, deterministic `IllegalArgumentException` for invalid input, `IOException` for malformed media, `UnsupportedOperationException` for unsupported FOURCC/flags, and `IllegalStateException` for closed handles/invalid state/internal failures.
 - [ ] Never expose a native pointer directly to Dart. Store handles only in package-internal Kotlin wrapper objects and make `close()` idempotent.
-- [ ] Implement JNI methods for MSV1, Cinepak encoder/decoder, AVI build, AVI parse metadata, and AVI frame extraction. Every returned `hmc_owned_buffer_t` must be copied into a Java byte array and released on all paths.
+- [ ] JNI creates every extensible config through its `_config_init(config, sizeof(config))`, sets only known fields, and passes normalized `HMC_ENCODE_FLAG_*` values; Kotlin `Boolean forceKey` maps to `HMC_ENCODE_FLAG_FORCE_KEY`, never to an ABI `uint8_t`.
+- [ ] Return the encoder-selected `hmc_frame_flags_t` together with each encoded byte array and pass those flags unchanged into the incremental AVI muxer. Do not inspect Cinepak/MSV1 payload bytes to infer keyframes.
+- [ ] Implement JNI methods for MSV1, Cinepak encoder/decoder, incremental AVI muxing, AVI metadata/frame-info queries, and copy-frame extraction. Kotlin/Android uses `hmc_avi_reader_copy_frame`, not a borrowed native view. Every returned `hmc_owned_buffer_t` is copied into a Java byte array and released on all paths.
+- [ ] Map status-returning reset calls through the same error path as encode/decode. Keep Flutter method results and legacy caller-visible behavior unchanged while adapting `VideoConverter`/`CameraEncoder` internals to `EncodedFrame`.
 - [ ] Make the Android instrumentation parity test compare native output byte-for-byte with committed fixture files and the still-present Kotlin implementation.
 - [ ] Run:
 
@@ -478,14 +629,14 @@ internal object NativeMediaCodec {
 
 **Call-site mapping:**
 
-- `CinepakDecoder.parseAvi` → `NativeMediaCodec.openAvi`
+- `CinepakDecoder.parseAvi` → `NativeMediaCodec.openAvi`; metadata/frame-info use immutable reader queries and payload extraction uses copy-frame
 - `CinepakDecoder.Decoder` → `NativeMediaCodec.CinepakDecoder`
-- `CinepakEncoder.Encoder` → `NativeMediaCodec.CinepakEncoder`
-- `CvidAviMuxer.buildAvi` → `NativeMediaCodec.buildAvi` with `fourcc = "cvid"` and 24-bit header
+- `CinepakEncoder.Encoder` → `NativeMediaCodec.CinepakEncoder`, returning `EncodedFrame(bytes, frameFlags)`
+- `CvidAviMuxer.buildAvi` → scoped `NativeMediaCodec.AviMuxer` configured with rational FPS, lowercase `cvid`, and 24-bit header; add each encoded frame with its returned normalized flags, then finish
 
 - [ ] Add a failing production-path instrumentation test that converts a short deterministic 8×8 frame sequence and asserts the output equals `cvid_sample.avi` while the legacy Kotlin codec is made unavailable to that test through a test-only guard.
 - [ ] Run the focused test and confirm the current `VideoConverter` still reaches Kotlin codec objects.
-- [ ] Replace only Cinepak/AVI calls in `VideoConverter`. Preserve Android frame extraction, crop/scale, cancellation checks, progress frequency, output path, and result maps.
+- [ ] Replace only Cinepak/AVI calls in `VideoConverter`. Convert integer FPS to `fps/1`, carry encoder-returned frame flags into the incremental muxer, and preserve Android frame extraction, crop/scale, cancellation checks, progress frequency, output path, and result maps.
 - [ ] Scope every native encoder/decoder/AVI reader with `use`/`try-finally` so cancellation and exceptions release handles.
 - [ ] Run Android parity tests, existing Flutter tests, and a debug APK build.
 - [ ] Manually inspect one converted CVID AVI on Android and confirm its width, height, frame count, FPS, and preview decode match the pre-switch output.
@@ -511,12 +662,12 @@ internal object NativeMediaCodec {
 
 **Boundary after this task:**
 
-- Native: MSV1 encode/decode and AVI build.
+- Native: MSV1 encode/decode and incremental AVI muxing/owned-copy reading.
 - Kotlin/Android: JPEG `Bitmap.compress`, frame acquisition/transforms, H.264 `MediaCodec`, camera and product state.
 
 - [ ] Add failing focused tests that make `CameraEncoder` MSV1 key/inter output and AVI match committed fixtures through the production facade.
 - [ ] Run the tests and confirm production still calls `SoftwareCodec.encodeMsv1`, `decodeMsv1`, and `buildAvi`.
-- [ ] Replace those three call paths with `NativeMediaCodec`. Keep `SoftwareCodec.encodeJpeg` in Kotlin.
+- [ ] Replace those three call paths with `NativeMediaCodec`. Use separate initialized MSV1 encoder/decoder configs, carry each encoder-returned frame flag into the incremental muxer, and keep `SoftwareCodec.encodeJpeg` in Kotlin.
 - [ ] Rename `SoftwareCodec` to a JPEG-specific production object or reduce it to `encodeJpeg`; remove all codec/container helpers from that production source.
 - [ ] Confirm MSV1 previous-RGBA lifetime and persistent decode-ARGB lifetime are unchanged across frames.
 - [ ] Run Android parity tests, existing Flutter tests, debug APK build, and a short MSV1 capture/preview flow.

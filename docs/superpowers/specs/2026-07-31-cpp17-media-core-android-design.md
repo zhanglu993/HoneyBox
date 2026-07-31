@@ -117,7 +117,9 @@ android/app/src/main/kotlin/com/honeygui/honeybox/
 ## 6. 公共 C ABI
 
 公共接口使用固定宽度整数、opaque handle 和显式内存所有权。内部可以使用
-`std::vector`、RAII 和 C++ 类，但不得穿过 ABI 边界。
+`std::vector`、RAII 和 C++ 类，但不得穿过 ABI 边界。公共状态类型固定为
+`int32_t`，状态编号只能在末尾追加，不得重编号、复用或删除。ABI 版本使用
+`major << 16 | minor` 的 `uint32_t` 打包值，首版为 `0x00010000`。
 
 公共库和 CMake target 统一命名为 `honey_media_core`，公共头文件路径为
 `honey_media_core/media_core.h`。C 符号和类型统一使用 `hmc_` 前缀，宏和
@@ -139,17 +141,55 @@ android/app/src/main/kotlin/com/honeygui/honeybox/
 
 接口约束：
 
+- 公共函数声明和定义都使用 `HMC_API` 与 `HMC_CALL`。Windows/Cygwin 调用
+  约定固定为 `__cdecl`；共享库构建/使用分别由 `HMC_BUILD_SHARED` 和
+  `HMC_USE_SHARED` 选择导出/导入，Windows 静态库不加导出属性；
+  GCC/Clang 使用 default visibility 和空调用约定；
+- `size_t` 只表示同进程内 byte/pixel buffer 的尺寸或容量，不序列化，也不
+  跨 IPC；AVI 的逻辑帧数和索引固定为 `uint32_t`；
+- RGBA 输入是连续的 `R,G,B,A` 字节顺序；ARGB 输出是与宿主内存字节序无关
+  的数值 `uint32_t 0xAARRGGBB`；
+- `(NULL, 0)` 只在接口明确允许空输入时表示有效空 span；
+  `(NULL, nonzero)` 始终无效；
 - 固定布局传输结构 `hmc_owned_buffer_t` 和 `hmc_bytes_view_t` 只包含
   指针与长度，不包含 `struct_size`；
-- 后续新增的可扩展配置结构必须以 `struct_size` 作为首字段；
-- 所有尺寸和长度在进入核心前做溢出检查；
-- 输入 buffer 由调用者持有，调用期间保持有效；
-- 输出 buffer 由核心分配，只能通过核心提供的释放函数释放；
-- C++ 异常不得越过 C ABI 或 JNI；
-- 失败时返回错误码，不返回部分有效对象；
-- 帧编码会话不承诺线程安全，一个会话只能由一个线程使用；
-- 不依赖宿主字节序，AVI 和 codec 字段显式读写大小端；
-- 相同输入、参数和调用顺序必须产生确定性输出。
+- 每个 owned-buffer 输出在调用前必须为 `{NULL, 0}`，失败后仍为空，并且
+  只能由 `hmc_owned_buffer_release` 释放；
+- 每个 create 输出 handle 在调用前必须指向 NULL，失败后仍为 NULL；
+- 可扩展结构以 `struct_size` 为首字段，只允许在尾部追加字段，不使用 packed
+  layout，且为首版布局定义固定数值 `HMC_*_V1_SIZE`；已发布字段、类型和语义
+  永不改变；
+- `struct_size` 表示包括自身在内的调用者实际分配尺寸。被调用方接受至少 V1
+  的尺寸，最多读写自己认识的范围，要求未知输入/尾部字节和 reserved 字段为
+  零，并且不修改 `struct_size`；
+- 输出结构由调用者先清零并设置 `struct_size`；失败时整个输出保持不变；
+- 配置初始化函数签名统一为 `(config*, uint32_t config_size)`，清零调用者提供
+  的容量、写入已知默认值并返回状态；
+- 所有尺寸和长度在进入核心前做溢出检查；输入 buffer 由调用者持有并在调用
+  期间保持有效；
+- 未知 encode/frame flag 位返回 `HMC_STATUS_UNSUPPORTED`。AVI 只消费显式
+  归一化的帧标志，不解析 codec payload 猜测关键帧；
+- C++ 异常不得越过 C ABI 或 JNI；失败返回错误码且不泄露部分有效对象；
+- 不依赖宿主字节序，AVI 和 codec 字段显式读写大小端；相同输入、参数和调用
+  顺序必须产生确定性输出。
+
+所有权和并发规则：
+
+- AVI reader 创建时复制输入；borrowed frame view 在 reader destroy 前稳定。
+  Swift/Node 默认使用 copy-frame 接口；
+- 独立 handle 可以并发运行。同一个 encoder/decoder/muxer handle 必须由调用
+  者串行化；immutable reader 查询可以并发；destroy 绝不与其他调用并发；
+- decoder 任一失败调用都保持输出和全部内部状态不变；
+- encoder/muxer 任一失败调用都保持帧索引、重建状态、关键帧跟踪以及已经加入
+  的帧不变，因此 OOM 后可以重试。
+
+AVI 使用增量 opaque muxer，帧率为 `num/den` 有理数（当前整数 FPS 映射为
+`fps/1`），reader 同时暴露原始 `idx1` flags 和归一化 frame flags。实现必须
+保留历史 CVID/MSVC/MJPG header 的精确差异，并显式拒绝不支持的 FOURCC。
+MSV1 编解码和 Cinepak 编解码分别使用带 init 函数的可扩展配置结构；编码
+返回 owned bytes 和实际 `hmc_frame_flags_t`。Cinepak 实际帧标志在首帧、
+key interval 与 force-key 逻辑完成后产生；所有 stateful reset 返回状态，
+只有 destroy/release 返回 `void` 且接受 NULL。
 
 ## 7. Android 集成
 
