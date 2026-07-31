@@ -699,7 +699,7 @@ internal object NativeMediaCodec {
 - [ ] JNI creates every extensible config through its `_config_init(config, sizeof(config))`, sets only known fields, and passes normalized `HMC_ENCODE_FLAG_*` values; Kotlin `Boolean forceKey` maps to `HMC_ENCODE_FLAG_FORCE_KEY`, never to an ABI `uint8_t`.
 - [ ] Return the encoder-selected `hmc_frame_flags_t` together with each encoded byte array and pass those flags unchanged into the incremental AVI muxer. Do not inspect Cinepak/MSV1 payload bytes to infer keyframes.
 - [ ] Implement JNI methods for MSV1, Cinepak encoder/decoder, incremental AVI muxing, AVI metadata/frame-info queries, and copy-frame extraction. Kotlin/Android uses `hmc_avi_reader_copy_frame`, not a borrowed native view. Every returned `hmc_owned_buffer_t` is copied into a Java byte array and released on all paths.
-- [ ] Map status-returning reset calls through the same error path as encode/decode. Keep Flutter method results and legacy caller-visible behavior unchanged while adapting `VideoConverter`/`CameraEncoder` internals to `EncodedFrame`.
+- [ ] Map status-returning reset calls through the same error path as encode/decode. Keep Flutter method results and legacy caller-visible behavior unchanged; Task 7 does not modify `VideoConverter` or `CameraEncoder`, and their production adaptation to `EncodedFrame` remains in Tasks 8 and 9.
 - [ ] Make the Android instrumentation parity test compare native output byte-for-byte with committed fixture files and the still-present Kotlin implementation.
 - [ ] Run:
 
