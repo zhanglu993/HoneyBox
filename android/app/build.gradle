@@ -48,3 +48,18 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+}
+
+tasks.withType(Test).configureEach {
+    systemProperty "ebadge.repositoryRoot", System.getProperty(
+        "ebadge.repositoryRoot",
+        rootProject.projectDir.parentFile.absolutePath,
+    )
+    systemProperty "ebadge.regenerateFixtures", System.getProperty(
+        "ebadge.regenerateFixtures",
+        "false",
+    )
+}
