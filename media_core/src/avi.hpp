@@ -16,9 +16,12 @@ struct hmc_avi_muxer {
     hmc_avi_muxer_config_t config;
     std::uint32_t usec_per_frame;
     std::uint32_t frame_count;
+    std::uint32_t movi_size;
     std::uint8_t *payloads;
     std::size_t payloads_size;
+    std::size_t payloads_capacity;
     hmc_avi_frame_record *frames;
+    std::size_t frames_capacity;
     bool sealed;
 };
 

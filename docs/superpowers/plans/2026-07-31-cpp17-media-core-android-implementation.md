@@ -368,7 +368,16 @@ HMC_API void HMC_CALL hmc_avi_reader_destroy(hmc_avi_reader_t *reader);
 - [ ] Use rational `frame_rate_num/frame_rate_den`; map the current integer FPS to `fps/1`. Match `CvidAviMuxer` exactly for CVID, including lowercase `cvid`, 24-bit `strf`, and first `movi` frame offset `4`.
 - [ ] Match `SoftwareCodec.buildAvi` exactly for MSVC/MJPG, including explicit frame flags and `biSizeImage = width * height * 2`; preserve all existing CVID/MSVC/MJPG header differences.
 - [ ] Add exact byte comparisons against `cvid_sample.avi` and `msvc_sample.avi`.
-- [ ] Make `add_frame` validate first, then copy/append into isolated candidate byte/index/metadata buffers; only an all-buffer no-fail swap commits the frame and count, so even current capacities remain unchanged on failure. Build reader copies/metadata in an unpublished candidate handle and publish it only after complete success. Make `finish` build entirely in a scratch owned buffer; only after successful transfer does it seal the muxer.
+- [ ] Make `add_frame` validate first and maintain checked incremental wire-size
+  metadata. Payload and frame-record buffers use geometric capacities so
+  cumulative append work is amortized O(total bytes/frames). When either
+  capacity must grow, allocate every required replacement as an isolated
+  candidate and commit pointers, capacities, logical sizes, wire size, and
+  frame count only after all allocations succeed; any failure leaves every
+  prior field unchanged and retryable. Build reader copies/metadata in an
+  unpublished candidate handle and publish it only after complete success.
+  Make `finish` build entirely in a scratch owned buffer; only after successful
+  transfer does it seal the muxer.
 - [ ] After successful `finish`, repeated `finish` and every later `add_frame` return `HMC_STATUS_INVALID_STATE`; the owned output stays empty and logical state is unchanged. A failed `finish` does not seal and is retryable.
 - [ ] Test unchanged output structs on failure, `{NULL,0}` borrowed view and owned outputs on failure, unchanged muxer state after failed add/finish, sealed-state invalid calls, NULL-tolerant destroy, and immutable concurrent reader queries.
 - [ ] Sweep the test-only Nth-allocation failure hook across create-copy, add-frame, and finish. Each injected failure must return OOM with the required empty/unchanged output and logical state, then succeed when retried without the fault.

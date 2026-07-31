@@ -210,11 +210,13 @@ RAII 和 C++ 类，但 fallible 分配路径不得依赖会抛异常的 `std::ve
 
 具体提交点如下：
 
-- AVI muxer `add_frame` 先验证并计算全部尺寸，在隔离的 candidate byte/index/
-  metadata buffers 中复制既有逻辑内容并追加新帧；只有 candidate 全部成功后才
-  以 no-fail swap 提交全部 buffers 和 frame count。当前 buffers/capacities 在
-  任一失败时都不变化。`finish` 在独立 scratch buffer 中构建完整 AVI，成功
-  转交 owned buffer 后才把 muxer 标记 sealed；
+- AVI muxer `add_frame` 先验证尺寸，并以事务方式维护累计 `movi` wire size。
+  payload 和 frame metadata 使用几何增长容量，使累计追加工作为 amortized
+  O(total bytes/frames)。仅在容量不足时分配隔离的 candidate buffer；若两个
+  buffer 都需增长，必须全部分配成功后才一次提交 pointers、capacities、
+  logical sizes、wire size 和 frame count。任一失败都不改变旧状态并可重试。
+  `finish` 在独立 scratch buffer 中构建完整 AVI，成功转交 owned buffer 后才
+  把 muxer 标记 sealed；
 - AVI reader 在未发布的 candidate handle 中完成输入复制、解析和 no-throw
   元数据分配，全部成功后才写 create 输出 handle；
 - MSV1 encode 在独立 scratch output 中完成，成功时才转交 owned buffer 并

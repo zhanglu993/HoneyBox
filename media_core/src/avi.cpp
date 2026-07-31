@@ -66,6 +66,38 @@ bool size_fits_u32(std::size_t value) noexcept
     return value <= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
 }
 
+hmc_status_t geometric_capacity(
+    std::size_t current,
+    std::size_t required,
+    std::size_t minimum,
+    std::size_t limit,
+    std::size_t *result) noexcept
+{
+    if (result == nullptr || required > limit) {
+        return HMC_STATUS_OVERFLOW;
+    }
+    if (required <= current) {
+        *result = current;
+        return HMC_STATUS_OK;
+    }
+    std::size_t candidate = current == 0u ? minimum : current;
+    if (candidate > limit) {
+        return HMC_STATUS_OVERFLOW;
+    }
+    while (candidate < required) {
+        if (candidate > limit / 2u) {
+            candidate = limit;
+        } else {
+            candidate *= 2u;
+        }
+        if (candidate < required && candidate == limit) {
+            return HMC_STATUS_OVERFLOW;
+        }
+    }
+    *result = candidate;
+    return HMC_STATUS_OK;
+}
+
 std::uint16_t read_u16(const std::uint8_t *data) noexcept
 {
     return static_cast<std::uint16_t>(
@@ -211,6 +243,9 @@ hmc_status_t calculate_avi_size(
     if (!checked_multiply_size(muxer->frame_count, 16u, &index) ||
         !size_fits_u32(index) || !size_fits_u32(movi)) {
         return HMC_STATUS_OVERFLOW;
+    }
+    if (movi != muxer->movi_size) {
+        return HMC_STATUS_INTERNAL_ERROR;
     }
     std::size_t total = 0u;
     if (!checked_add_size(228u, movi, &total) ||
@@ -472,9 +507,12 @@ hmc_status_t avi_muxer_create(
     candidate->config.struct_size = HMC_AVI_MUXER_CONFIG_V1_SIZE;
     candidate->usec_per_frame = usec;
     candidate->frame_count = 0u;
+    candidate->movi_size = 4u;
     candidate->payloads = nullptr;
     candidate->payloads_size = 0u;
+    candidate->payloads_capacity = 0u;
     candidate->frames = nullptr;
+    candidate->frames_capacity = 0u;
     candidate->sealed = false;
     *muxer = candidate;
     return HMC_STATUS_OK;
@@ -502,75 +540,113 @@ hmc_status_t avi_muxer_add_frame(
     if (!size_fits_u32(size) || muxer->frame_count == UINT32_MAX) {
         return HMC_STATUS_OVERFLOW;
     }
-    std::size_t current_total = 0u;
-    std::uint32_t current_movi = 0u;
-    std::uint32_t current_idx = 0u;
-    std::uint32_t current_maximum = 0u;
-    if (calculate_avi_size(
-            muxer,
-            &current_total,
-            &current_movi,
-            &current_idx,
-            &current_maximum) != HMC_STATUS_OK) {
-        return HMC_STATUS_INTERNAL_ERROR;
-    }
-    (void)current_maximum;
+    const std::size_t required_records =
+        static_cast<std::size_t>(muxer->frame_count) + 1u;
     std::size_t frame_chunk_size = 0u;
     std::size_t prospective_total = 0u;
     std::size_t prospective_movi = 0u;
+    std::size_t prospective_idx = 0u;
     if (!checked_add_size(8u, size, &frame_chunk_size) ||
         !checked_add_size(frame_chunk_size, size & 1u, &frame_chunk_size) ||
-        !checked_add_size(current_movi, frame_chunk_size, &prospective_movi) ||
+        !checked_add_size(muxer->movi_size, frame_chunk_size, &prospective_movi) ||
         !size_fits_u32(prospective_movi) ||
-        current_idx > UINT32_MAX - 16u ||
-        !checked_add_size(current_total, frame_chunk_size, &prospective_total) ||
-        !checked_add_size(prospective_total, 16u, &prospective_total) ||
+        !checked_multiply_size(required_records, 16u, &prospective_idx) ||
+        !size_fits_u32(prospective_idx) ||
+        !checked_add_size(228u, prospective_movi, &prospective_total) ||
+        !checked_add_size(prospective_total, prospective_idx, &prospective_total) ||
         prospective_total < 8u ||
         !size_fits_u32(prospective_total - 8u)) {
         return HMC_STATUS_OVERFLOW;
     }
     std::size_t candidate_payload_size = 0u;
-    std::size_t candidate_records_size = 0u;
-    if (!checked_add_size(muxer->payloads_size, size, &candidate_payload_size) ||
-        !checked_multiply_size(
-            static_cast<std::size_t>(muxer->frame_count) + 1u,
-            sizeof(hmc_avi_frame_record),
-            &candidate_records_size)) {
+    if (!checked_add_size(muxer->payloads_size, size, &candidate_payload_size)) {
         return HMC_STATUS_OVERFLOW;
     }
-    auto *candidate_payloads =
-        static_cast<std::uint8_t *>(avi_allocate(candidate_payload_size));
-    if (candidate_payloads == nullptr) {
-        return HMC_STATUS_OUT_OF_MEMORY;
+
+    std::size_t candidate_payload_capacity = muxer->payloads_capacity;
+    std::size_t candidate_frames_capacity = muxer->frames_capacity;
+    hmc_status_t capacity_status = geometric_capacity(
+        muxer->payloads_capacity,
+        candidate_payload_size,
+        64u,
+        static_cast<std::size_t>(UINT32_MAX),
+        &candidate_payload_capacity);
+    if (capacity_status != HMC_STATUS_OK) {
+        return capacity_status;
     }
-    auto *candidate_records =
-        static_cast<hmc_avi_frame_record *>(avi_allocate(candidate_records_size));
-    if (candidate_records == nullptr) {
-        avi_deallocate(candidate_payloads);
-        return HMC_STATUS_OUT_OF_MEMORY;
+    capacity_status = geometric_capacity(
+        muxer->frames_capacity,
+        required_records,
+        1u,
+        static_cast<std::size_t>(UINT32_MAX),
+        &candidate_frames_capacity);
+    if (capacity_status != HMC_STATUS_OK) {
+        return capacity_status;
     }
-    if (muxer->payloads_size != 0u) {
-        std::memcpy(candidate_payloads, muxer->payloads, muxer->payloads_size);
+
+    const bool grow_payloads =
+        candidate_payload_capacity != muxer->payloads_capacity;
+    const bool grow_frames =
+        candidate_frames_capacity != muxer->frames_capacity;
+    std::uint8_t *candidate_payloads = nullptr;
+    hmc_avi_frame_record *candidate_records = nullptr;
+    if (grow_payloads) {
+        candidate_payloads =
+            static_cast<std::uint8_t *>(avi_allocate(candidate_payload_capacity));
+        if (candidate_payloads == nullptr) {
+            return HMC_STATUS_OUT_OF_MEMORY;
+        }
     }
-    std::memcpy(candidate_payloads + muxer->payloads_size, data, size);
-    if (muxer->frame_count != 0u) {
+    if (grow_frames) {
+        std::size_t candidate_records_size = 0u;
+        if (!checked_multiply_size(
+                candidate_frames_capacity,
+                sizeof(hmc_avi_frame_record),
+                &candidate_records_size)) {
+            avi_deallocate(candidate_payloads);
+            return HMC_STATUS_OVERFLOW;
+        }
+        candidate_records =
+            static_cast<hmc_avi_frame_record *>(avi_allocate(candidate_records_size));
+        if (candidate_records == nullptr) {
+            avi_deallocate(candidate_payloads);
+            return HMC_STATUS_OUT_OF_MEMORY;
+        }
+    }
+
+    std::uint8_t *target_payloads =
+        grow_payloads ? candidate_payloads : muxer->payloads;
+    hmc_avi_frame_record *target_records =
+        grow_frames ? candidate_records : muxer->frames;
+    if (grow_payloads && muxer->payloads_size != 0u) {
+        std::memcpy(target_payloads, muxer->payloads, muxer->payloads_size);
+    }
+    if (grow_frames && muxer->frame_count != 0u) {
         std::memcpy(
-            candidate_records,
+            target_records,
             muxer->frames,
             static_cast<std::size_t>(muxer->frame_count) * sizeof(hmc_avi_frame_record));
     }
-    hmc_avi_frame_record &record = candidate_records[muxer->frame_count];
+    std::memcpy(target_payloads + muxer->payloads_size, data, size);
+    hmc_avi_frame_record &record = target_records[muxer->frame_count];
     record.payload_offset = muxer->payloads_size;
     record.payload_size = size;
     record.avi_index_flags =
         (frame_flags & HMC_FRAME_FLAG_KEY) != 0u ? 0x10u : 0u;
     record.frame_flags = frame_flags;
 
-    avi_deallocate(muxer->payloads);
-    avi_deallocate(muxer->frames);
-    muxer->payloads = candidate_payloads;
+    if (grow_payloads) {
+        avi_deallocate(muxer->payloads);
+        muxer->payloads = candidate_payloads;
+        muxer->payloads_capacity = candidate_payload_capacity;
+    }
+    if (grow_frames) {
+        avi_deallocate(muxer->frames);
+        muxer->frames = candidate_records;
+        muxer->frames_capacity = candidate_frames_capacity;
+    }
     muxer->payloads_size = candidate_payload_size;
-    muxer->frames = candidate_records;
+    muxer->movi_size = static_cast<std::uint32_t>(prospective_movi);
     ++muxer->frame_count;
     return HMC_STATUS_OK;
 }

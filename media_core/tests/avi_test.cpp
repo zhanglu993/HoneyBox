@@ -744,3 +744,163 @@ HMC_TEST(avi_null_and_small_output_arguments_return_without_partial_results)
     HMC_EXPECT(std::memcmp(tailed_before, tailed_frame_info, sizeof(tailed_frame_info)) == 0);
     hmc_avi_reader_destroy(reader);
 }
+
+HMC_TEST(avi_growth_failure_keeps_single_frame_and_can_retry_second_frame)
+{
+    const hmc_avi_muxer_config_t config = make_config(kCvid, 24u);
+    std::vector<std::uint8_t> first(64u);
+    for (std::size_t i = 0u; i < first.size(); ++i) {
+        first[i] = static_cast<std::uint8_t>(i);
+    }
+    const std::vector<std::uint8_t> second{0xfeu};
+    const hmc_frame_flags_t first_flags =
+        HMC_FRAME_FLAG_KEY | HMC_FRAME_FLAG_KEY_KNOWN;
+    const hmc_frame_flags_t second_flags = HMC_FRAME_FLAG_KEY_KNOWN;
+    const std::vector<std::uint8_t> single_baseline =
+        mux(config, {first}, {first_flags});
+    const std::vector<std::uint8_t> two_frame_baseline =
+        mux(config, {first, second}, {first_flags, second_flags});
+
+    for (std::size_t nth = 1u; nth <= 2u; ++nth) {
+        hmc_avi_muxer_t *finish_after_failure = nullptr;
+        HMC_EXPECT(hmc_avi_muxer_create(&config, &finish_after_failure) == HMC_STATUS_OK);
+        HMC_EXPECT(hmc_avi_muxer_add_frame(
+            finish_after_failure,
+            first.data(),
+            first.size(),
+            first_flags) == HMC_STATUS_OK);
+        honey::media::avi_test_fail_nth_allocation(nth);
+        HMC_EXPECT(hmc_avi_muxer_add_frame(
+            finish_after_failure,
+            second.data(),
+            second.size(),
+            second_flags) == HMC_STATUS_OUT_OF_MEMORY);
+        honey::media::avi_test_clear_allocation_failure();
+        hmc_owned_buffer_t single_output{};
+        HMC_EXPECT(hmc_avi_muxer_finish(finish_after_failure, &single_output) ==
+                   HMC_STATUS_OK);
+        HMC_EXPECT(single_output.size == single_baseline.size());
+        HMC_EXPECT(std::memcmp(
+            single_output.data, single_baseline.data(), single_baseline.size()) == 0);
+        hmc_owned_buffer_release(&single_output);
+        hmc_avi_muxer_destroy(finish_after_failure);
+
+        hmc_avi_muxer_t *retry_after_failure = nullptr;
+        HMC_EXPECT(hmc_avi_muxer_create(&config, &retry_after_failure) == HMC_STATUS_OK);
+        HMC_EXPECT(hmc_avi_muxer_add_frame(
+            retry_after_failure,
+            first.data(),
+            first.size(),
+            first_flags) == HMC_STATUS_OK);
+        honey::media::avi_test_fail_nth_allocation(nth);
+        HMC_EXPECT(hmc_avi_muxer_add_frame(
+            retry_after_failure,
+            second.data(),
+            second.size(),
+            second_flags) == HMC_STATUS_OUT_OF_MEMORY);
+        honey::media::avi_test_clear_allocation_failure();
+        HMC_EXPECT(hmc_avi_muxer_add_frame(
+            retry_after_failure,
+            second.data(),
+            second.size(),
+            second_flags) == HMC_STATUS_OK);
+        hmc_owned_buffer_t two_frame_output{};
+        HMC_EXPECT(hmc_avi_muxer_finish(retry_after_failure, &two_frame_output) ==
+                   HMC_STATUS_OK);
+        HMC_EXPECT(two_frame_output.size == two_frame_baseline.size());
+        HMC_EXPECT(std::memcmp(
+            two_frame_output.data,
+            two_frame_baseline.data(),
+            two_frame_baseline.size()) == 0);
+        hmc_owned_buffer_release(&two_frame_output);
+        hmc_avi_muxer_destroy(retry_after_failure);
+    }
+}
+
+HMC_TEST(avi_geometric_growth_avoids_per_frame_double_allocation)
+{
+    const hmc_avi_muxer_config_t config = make_config(kCvid, 24u);
+    hmc_avi_muxer_t *muxer = nullptr;
+    HMC_EXPECT(hmc_avi_muxer_create(&config, &muxer) == HMC_STATUS_OK);
+    honey::media::avi_test_clear_allocation_failure();
+    for (std::uint32_t i = 0u; i < 128u; ++i) {
+        const std::uint8_t byte = static_cast<std::uint8_t>(i);
+        HMC_EXPECT(hmc_avi_muxer_add_frame(
+            muxer, &byte, 1u, HMC_FRAME_FLAG_KEY_KNOWN) == HMC_STATUS_OK);
+    }
+    HMC_EXPECT(honey::media::avi_test_allocation_count() <= 16u);
+
+    hmc_owned_buffer_t output{};
+    HMC_EXPECT(hmc_avi_muxer_finish(muxer, &output) == HMC_STATUS_OK);
+    hmc_avi_reader_t *reader = nullptr;
+    HMC_EXPECT(hmc_avi_reader_create_copy(output.data, output.size, &reader) == HMC_STATUS_OK);
+    hmc_avi_info_t info{};
+    info.struct_size = sizeof(info);
+    HMC_EXPECT(hmc_avi_reader_get_info(reader, &info) == HMC_STATUS_OK);
+    HMC_EXPECT(info.frame_count == 128u);
+    for (std::uint32_t i : {0u, 63u, 64u, 127u}) {
+        hmc_bytes_view_t view{};
+        HMC_EXPECT(hmc_avi_reader_get_frame_view(reader, i, &view) == HMC_STATUS_OK);
+        HMC_EXPECT(view.size == 1u && view.data[0] == static_cast<std::uint8_t>(i));
+    }
+    hmc_avi_reader_destroy(reader);
+    hmc_owned_buffer_release(&output);
+    hmc_avi_muxer_destroy(muxer);
+    honey::media::avi_test_clear_allocation_failure();
+}
+
+HMC_TEST(avi_add_uses_existing_capacity_without_allocating)
+{
+    const hmc_avi_muxer_config_t config = make_config(kCvid, 24u);
+    hmc_avi_muxer_t *muxer = nullptr;
+    HMC_EXPECT(hmc_avi_muxer_create(&config, &muxer) == HMC_STATUS_OK);
+    std::vector<std::uint8_t> first(64u, 0x11u);
+    const std::uint8_t later = 0x22u;
+    HMC_EXPECT(hmc_avi_muxer_add_frame(
+        muxer, first.data(), first.size(), HMC_FRAME_FLAG_KEY_KNOWN) == HMC_STATUS_OK);
+    HMC_EXPECT(hmc_avi_muxer_add_frame(
+        muxer, &later, 1u, HMC_FRAME_FLAG_KEY_KNOWN) == HMC_STATUS_OK);
+    HMC_EXPECT(hmc_avi_muxer_add_frame(
+        muxer, &later, 1u, HMC_FRAME_FLAG_KEY_KNOWN) == HMC_STATUS_OK);
+
+    honey::media::avi_test_fail_nth_allocation(1u);
+    HMC_EXPECT(hmc_avi_muxer_add_frame(
+        muxer, &later, 1u, HMC_FRAME_FLAG_KEY_KNOWN) == HMC_STATUS_OK);
+    HMC_EXPECT(honey::media::avi_test_allocation_count() == 0u);
+    honey::media::avi_test_clear_allocation_failure();
+    hmc_avi_muxer_destroy(muxer);
+}
+
+HMC_TEST(avi_mjpg_matches_an_independent_msvc_golden_transform)
+{
+    const std::vector<std::uint8_t> msv1_key = load_fixture("msv1_key.bin");
+    const std::vector<std::uint8_t> msv1_skip = load_fixture("msv1_all_skip.bin");
+    const std::vector<std::uint8_t> msv1_inter = load_fixture("msv1_inter.bin");
+    const std::vector<hmc_frame_flags_t> flags{
+        HMC_FRAME_FLAG_KEY | HMC_FRAME_FLAG_KEY_KNOWN,
+        HMC_FRAME_FLAG_KEY_KNOWN,
+        HMC_FRAME_FLAG_KEY_KNOWN};
+    const std::vector<std::uint8_t> actual = mux(
+        make_config(kMjpg, 24u),
+        {msv1_key, msv1_skip, msv1_inter},
+        flags);
+
+    std::vector<std::uint8_t> expected = load_fixture("msvc_sample.avi");
+    write_u32(expected, 112u, kMjpg);
+    expected[186u] = 24u;
+    expected[187u] = 0u;
+    write_u32(expected, 188u, kMjpg);
+    HMC_EXPECT(actual == expected);
+
+    const std::vector<std::uint8_t> msvc = load_fixture("msvc_sample.avi");
+    std::size_t difference_count = 0u;
+    for (std::size_t i = 0u; i < expected.size(); ++i) {
+        if (expected[i] != msvc[i]) {
+            HMC_EXPECT((i >= 112u && i < 116u) ||
+                       i == 186u ||
+                       (i >= 188u && i < 192u));
+            ++difference_count;
+        }
+    }
+    HMC_EXPECT(difference_count == 7u);
+}
