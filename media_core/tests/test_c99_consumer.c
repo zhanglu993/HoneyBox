@@ -51,6 +51,9 @@ typedef char hmc_msv1_decoder_config_v1_size_must_be_frozen[
 typedef char hmc_cinepak_decoder_config_v1_size_must_be_frozen[
     sizeof(hmc_cinepak_decoder_config_t) ==
         HMC_CINEPAK_DECODER_CONFIG_V1_SIZE ? 1 : -1];
+typedef char hmc_cinepak_encoder_config_v1_size_must_be_frozen[
+    sizeof(hmc_cinepak_encoder_config_t) ==
+        HMC_CINEPAK_ENCODER_CONFIG_V1_SIZE ? 1 : -1];
 typedef char hmc_avi_muxer_config_v1_size_must_be_frozen[
     sizeof(hmc_avi_muxer_config_t) == HMC_AVI_MUXER_CONFIG_V1_SIZE ? 1 : -1];
 typedef char hmc_avi_info_v1_size_must_be_frozen[
@@ -60,6 +63,20 @@ typedef char hmc_avi_frame_info_v1_size_must_be_frozen[
 
 void honey_media_core_c99_compile_test(void)
 {
+    hmc_status_t (HMC_CALL *cinepak_encoder_init_fn)(
+        hmc_cinepak_encoder_config_t *, uint32_t) =
+        &hmc_cinepak_encoder_config_init;
+    hmc_status_t (HMC_CALL *cinepak_encoder_create_fn)(
+        const hmc_cinepak_encoder_config_t *, hmc_cinepak_encoder_t **) =
+        &hmc_cinepak_encoder_create;
+    hmc_status_t (HMC_CALL *cinepak_encoder_reset_fn)(hmc_cinepak_encoder_t *) =
+        &hmc_cinepak_encoder_reset;
+    void (HMC_CALL *cinepak_encoder_destroy_fn)(hmc_cinepak_encoder_t *) =
+        &hmc_cinepak_encoder_destroy;
+    hmc_status_t (HMC_CALL *cinepak_encoder_encode_fn)(
+        hmc_cinepak_encoder_t *, const uint8_t *, size_t,
+        hmc_encode_flags_t, hmc_owned_buffer_t *, hmc_frame_flags_t *) =
+        &hmc_cinepak_encoder_encode;
     hmc_owned_buffer_t buffer = {NULL, 0u};
     hmc_bytes_view_t view = {NULL, 0u};
     const uint32_t fourcc = HMC_MEDIA_FOURCC('R', 'G', 'B', 'A');
@@ -71,6 +88,7 @@ void honey_media_core_c99_compile_test(void)
     hmc_msv1_encoder_config_t msv1_encoder_config;
     hmc_msv1_decoder_config_t msv1_decoder_config;
     hmc_cinepak_decoder_config_t cinepak_decoder_config;
+    hmc_cinepak_encoder_config_t cinepak_encoder_config;
     hmc_avi_muxer_config_t muxer_config;
     hmc_avi_info_t avi_info = {HMC_AVI_INFO_V1_SIZE, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
     hmc_avi_frame_info_t avi_frame_info = {
@@ -78,6 +96,7 @@ void honey_media_core_c99_compile_test(void)
     hmc_avi_muxer_t *muxer = NULL;
     hmc_avi_reader_t *reader = NULL;
     hmc_cinepak_decoder_t *cinepak_decoder = NULL;
+    hmc_cinepak_encoder_t *cinepak_encoder = NULL;
 
     (void)view;
     (void)fourcc;
@@ -91,6 +110,12 @@ void honey_media_core_c99_compile_test(void)
     (void)muxer;
     (void)reader;
     (void)cinepak_decoder;
+    (void)cinepak_encoder;
+    (void)cinepak_encoder_init_fn;
+    (void)cinepak_encoder_create_fn;
+    (void)cinepak_encoder_reset_fn;
+    (void)cinepak_encoder_destroy_fn;
+    (void)cinepak_encoder_encode_fn;
     (void)hmc_avi_muxer_config_init(&muxer_config, sizeof(muxer_config));
     (void)hmc_msv1_encoder_config_init(
         &msv1_encoder_config, sizeof(msv1_encoder_config));
@@ -98,6 +123,15 @@ void honey_media_core_c99_compile_test(void)
         &msv1_decoder_config, sizeof(msv1_decoder_config));
     (void)hmc_cinepak_decoder_config_init(
         &cinepak_decoder_config, sizeof(cinepak_decoder_config));
+    (void)hmc_cinepak_encoder_config_init(
+        &cinepak_encoder_config, sizeof(cinepak_encoder_config));
+    (void)hmc_cinepak_encoder_create(
+        &cinepak_encoder_config, &cinepak_encoder);
+    (void)hmc_cinepak_encoder_reset(cinepak_encoder);
+    (void)hmc_cinepak_encoder_encode(
+        cinepak_encoder, NULL, 0u, HMC_ENCODE_FLAG_NONE,
+        &buffer, &frame_flags);
+    hmc_cinepak_encoder_destroy(cinepak_encoder);
     (void)hmc_cinepak_decoder_create(
         &cinepak_decoder_config, &cinepak_decoder);
     (void)hmc_cinepak_decoder_reset(cinepak_decoder);

@@ -314,6 +314,28 @@ decode 先复制持久 reconstruction 到 no-throw candidate，在 candidate 上
 fault 后可以重试同一 frame。encoded、ARGB output、handle 及其 owned state
 之间的 aliasing 不受支持并返回 `INVALID_ARGUMENT`。
 
+### 6.5 Cinepak encoder V1 兼容边界
+
+encoder 输入为 top-down 连续 RGBA8888，容量可以大于
+`width*height*4`，尾部和 alpha 均忽略。宽高为非零 4 的倍数且不超过
+65532；所有 strip、chunk 和 frame 最大尺寸必须能写入 BE24。strip 行数按
+剩余行顺序均分，例如 5 个 macroblock 行分 2 strip 时为 2 行和 3 行。
+
+RGB 到 YUV 对负值显式做向负无穷的 `/2^23`，浮点取整保持 Kotlin
+`floor(x+0.5)`。median-cut 固定最低维度、最早 box 和稳定 equal-key tie；
+Lloyd 固定较低 codebook index、空 cluster 保留 centroid，最后一次更新后不
+重算 labels。实现不并行化，Debug、Release 与独立 encoder 输出必须一致。
+
+inter skip 与上一帧量化重建比较且阈值 inclusive；V4 只在误差改善严格大于
+质量阈值时使用，实际 coded V4 存在才写 V4 codebook。vector flag 每消费
+32 bit 在当前 payload cursor 插入 BE32 word。首帧、force-key 和 key interval
+共同产生实际 normalized frame flags，force-key 重置后续周期 cadence。
+
+reset 不分配并恢复 fresh encoder 状态。create/encode 在 candidate
+reconstruction、codebook 和 frame buffer 中完成，最终才提交；任一参数、
+overflow、BE24 或 OOM 失败都保持 output、flags、重建与 cadence 不变，清除
+fault 后可重试。
+
 ## 7. Android 集成
 
 Android 继续负责：

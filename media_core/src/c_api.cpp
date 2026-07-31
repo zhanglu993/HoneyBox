@@ -3,6 +3,7 @@
 #include "core_types.hpp"
 #include "avi.hpp"
 #include "cinepak_decoder.hpp"
+#include "cinepak_encoder.hpp"
 #include "msv1.hpp"
 
 #include <cstdlib>
@@ -72,6 +73,44 @@ HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_config_init(
     uint32_t config_size)
 {
     return honey::media::cinepak_decoder_config_init(config, config_size);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_config_init(
+    hmc_cinepak_encoder_config_t *config,
+    uint32_t config_size)
+{
+    return honey::media::cinepak_encoder_config_init(config, config_size);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_create(
+    const hmc_cinepak_encoder_config_t *config,
+    hmc_cinepak_encoder_t **encoder)
+{
+    return honey::media::cinepak_encoder_create(config, encoder);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_reset(
+    hmc_cinepak_encoder_t *encoder)
+{
+    return honey::media::cinepak_encoder_reset(encoder);
+}
+
+HMC_API void HMC_CALL hmc_cinepak_encoder_destroy(
+    hmc_cinepak_encoder_t *encoder)
+{
+    honey::media::cinepak_encoder_destroy(encoder);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_encode(
+    hmc_cinepak_encoder_t *encoder,
+    const uint8_t *rgba,
+    size_t rgba_size,
+    hmc_encode_flags_t encode_flags,
+    hmc_owned_buffer_t *output,
+    hmc_frame_flags_t *output_frame_flags)
+{
+    return honey::media::cinepak_encoder_encode(
+        encoder, rgba, rgba_size, encode_flags, output, output_frame_flags);
 }
 
 HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_create(

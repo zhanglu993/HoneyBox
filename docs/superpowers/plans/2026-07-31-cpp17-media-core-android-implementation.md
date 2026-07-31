@@ -613,6 +613,21 @@ HMC_API hmc_status_t HMC_CALL hmc_cinepak_encoder_encode(
     hmc_frame_flags_t *output_frame_flags);
 ```
 
+**Frozen Cinepak encoder V1 semantics:**
+
+- RGBA is top-down with minimum capacity `width*height*4`; alpha and the input
+  tail are ignored. Fixed-point RGB-to-YUV uses portable floor division and
+  Kotlin rounding is `floor(x+0.5)`, including negative halves.
+- Strip rows use sequential remaining-row allocation. Median-cut freezes
+  lowest-dimension, earliest-box and stable equal-key ties. Lloyd freezes lower
+  codebook-index distance ties, empty-centroid retention and final labels.
+- Inter skip compares quantized reconstruction and is inclusive. V4 requires a
+  strict quality-threshold improvement. BE32 flag words are inserted at the
+  live vector cursor every 32 consumed bits.
+- First-frame, force-key and key interval logic return actual normalized flags.
+  Reset allocates nothing. Candidate-only create/encode work makes every
+  failure state-preserving and OOM-retryable.
+
 - [ ] Write failing tests for config init setting `struct_size == config_size`, V1 size/tail-zero rules/defaults, dimensions divisible by four, key-frame fixture equality, inter-frame fixture equality, explicit force-key and unknown flags, actual returned frame flags, `output_frame_flags` unchanged on every failure, key interval, status-returning reset producing the original first frame, NULL-tolerant destroy, deterministic repeated runs, invalid options, short RGBA input, and overflow-sized dimensions.
 - [ ] Run CTest and confirm failures because Cinepak encoder functions are absent.
 - [ ] Port RGB-to-YUV fixed-point conversion, macroblock extraction, median-cut initialization, deterministic Lloyd refinement, V1/V4 decision, codebook emission, key/inter skip decisions, strip construction, frame assembly, and reconstruction state.
