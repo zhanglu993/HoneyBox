@@ -8,8 +8,10 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $androidDirectory = Join-Path $repositoryRoot 'android'
 $javaHome = $env:JAVA_HOME
-if ([string]::IsNullOrWhiteSpace($javaHome) -or -not (Test-Path -LiteralPath (Join-Path $javaHome 'bin\java.exe'))) {
-    throw 'JAVA_HOME must name a usable JDK containing bin\java.exe.'
+if ([string]::IsNullOrWhiteSpace($javaHome) -or
+    -not (Test-Path -LiteralPath (Join-Path $javaHome 'bin\java.exe')) -or
+    -not (Test-Path -LiteralPath (Join-Path $javaHome 'bin\javac.exe'))) {
+    throw 'JAVA_HOME must name a usable JDK containing bin\java.exe and bin\javac.exe.'
 }
 
 $localProperties = Join-Path $androidDirectory 'local.properties'
