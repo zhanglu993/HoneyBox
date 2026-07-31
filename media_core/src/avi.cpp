@@ -263,7 +263,7 @@ hmc_status_t parse_reader(hmc_avi_reader_t *reader) noexcept
         read_u32(bytes + 104u) != 56u ||
         read_u32(bytes + 164u) != kStrf ||
         read_u32(bytes + 168u) != 40u ||
-        read_u32(bytes + 212u) != kList ||
+        read_u32(bytes + kHeaderBytes) != kList ||
         read_u32(bytes + 220u) != kMovi) {
         return HMC_STATUS_MALFORMED_DATA;
     }
@@ -344,7 +344,7 @@ hmc_status_t parse_reader(hmc_avi_reader_t *reader) noexcept
         !span_is_zero(bytes, 36u, 44u) ||
         !span_is_zero(bytes, 52u, 56u) ||
         !span_is_zero(bytes, 72u, 88u) ||
-        !span_is_zero(bytes, 196u, 212u)) {
+        !span_is_zero(bytes, 196u, kHeaderBytes)) {
         return HMC_STATUS_MALFORMED_DATA;
     }
 

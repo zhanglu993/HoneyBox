@@ -8,6 +8,14 @@
 #include <cstring>
 #include <limits>
 
+#if defined(_MSC_VER) && !defined(_M_FP_STRICT)
+#error "Cinepak deterministic floating-point code requires MSVC /fp:strict"
+#endif
+
+#if defined(__FAST_MATH__)
+#error "Cinepak deterministic floating-point code forbids fast-math"
+#endif
+
 namespace honey::media {
 namespace {
 
@@ -455,6 +463,33 @@ void stable_sort_indices(
     std::memcpy(indices + offset, temporary + offset, count * sizeof(*indices));
 }
 
+std::size_t nearest_codebook(
+    const std::int32_t *data,
+    const double *centroids,
+    std::size_t codebook_count,
+    std::int32_t chroma_weight) noexcept
+{
+    std::size_t best = 0u;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (std::size_t c = 0u; c < codebook_count; ++c) {
+        const std::size_t cb = c * kVectorDimensions;
+        double distance = 0.0;
+        for (std::size_t d = 0u; d < 4u; ++d) {
+            const double delta = data[d] - centroids[cb + d];
+            distance += delta * delta;
+        }
+        double delta = data[4] - centroids[cb + 4u];
+        distance += static_cast<double>(chroma_weight) * delta * delta;
+        delta = data[5] - centroids[cb + 5u];
+        distance += static_cast<double>(chroma_weight) * delta * delta;
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = c;
+        }
+    }
+    return best;
+}
+
 void lloyd_refine(
     const std::int32_t *data,
     std::size_t count,
@@ -482,24 +517,11 @@ void lloyd_refine(
             codebook_count * sizeof(*scratch->counts));
         for (std::size_t i = 0u; i < count; ++i) {
             const std::size_t base = i * kVectorDimensions;
-            std::size_t best = 0u;
-            double best_distance = std::numeric_limits<double>::infinity();
-            for (std::size_t c = 0u; c < codebook_count; ++c) {
-                const std::size_t cb = c * kVectorDimensions;
-                double distance = 0.0;
-                for (std::size_t d = 0u; d < 4u; ++d) {
-                    const double delta = data[base + d] - scratch->centroids[cb + d];
-                    distance += delta * delta;
-                }
-                double delta = data[base + 4u] - scratch->centroids[cb + 4u];
-                distance += static_cast<double>(chroma_weight) * delta * delta;
-                delta = data[base + 5u] - scratch->centroids[cb + 5u];
-                distance += static_cast<double>(chroma_weight) * delta * delta;
-                if (distance < best_distance) {
-                    best_distance = distance;
-                    best = c;
-                }
-            }
+            const std::size_t best = nearest_codebook(
+                data + base,
+                scratch->centroids,
+                codebook_count,
+                chroma_weight);
             labels[i] = static_cast<std::uint32_t>(best);
             ++scratch->counts[best];
             const std::size_t sum_base = best * kVectorDimensions;
@@ -1222,6 +1244,15 @@ HMC_API hmc_status_t cinepak_encoder_test_lloyd_refine(
         labels,
         &scratch);
     return HMC_STATUS_OK;
+}
+
+HMC_API std::size_t cinepak_encoder_test_nearest_codebook(
+    const std::int32_t *data,
+    const double *centroids,
+    std::size_t codebook_count,
+    std::int32_t chroma_weight) noexcept
+{
+    return nearest_codebook(data, centroids, codebook_count, chroma_weight);
 }
 
 HMC_API void cinepak_encoder_test_fail_nth_allocation(

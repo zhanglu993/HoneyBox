@@ -41,6 +41,15 @@ else()
     target_compile_options(honey_media_core PRIVATE -Wall -Wextra -Wpedantic -Werror -fno-exceptions -fno-rtti)
 endif()
 
+# Cinepak VQ uses ordered IEEE-754 operations as part of its byte-stream
+# contract. Keep these options after general/global flags so host fast-math or
+# contraction settings cannot change codebook labels across toolchains.
+if(MSVC)
+    target_compile_options(honey_media_core PRIVATE /fp:strict)
+else()
+    target_compile_options(honey_media_core PRIVATE -fno-fast-math -ffp-contract=off)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     target_compile_definitions(honey_media_core PRIVATE HMC_ENABLE_TEST_HOOKS)

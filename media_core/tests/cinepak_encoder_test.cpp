@@ -575,6 +575,20 @@ HMC_TEST(cinepak_encoder_lloyd_keeps_lower_tie_empty_cluster_and_final_labels)
     HMC_EXPECT(labels[0] == 1u);
 }
 
+HMC_TEST(cinepak_encoder_lloyd_near_tie_uses_lower_index_without_contraction)
+{
+    const std::int32_t data[6]{};
+    const double centroids[] = {
+        0x1.ec39220f61c91p-7, 0x1.1354301b7d6c4p+0,
+        0x1.c7b384c7b384cp+0, 0x1.bfcb517df12efp-4, 0.0, 0.0,
+        0x1.1354301b7d6c4p+0, 0x1.bfcb517df12efp-4,
+        0x1.ec39220f61c91p-7, 0x1.c7b384c7b384cp+0, 0.0, 0.0,
+    };
+    HMC_EXPECT(centroids[0] > 0.0 && centroids[0] < 1.0);
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook(
+        data, centroids, 2u, 4) == 0u);
+}
+
 HMC_TEST(cinepak_encoder_quality_boundaries_control_v4_and_strict_zero_threshold)
 {
     const auto a = fixture_bytes("input_8x8_a.rgba");
