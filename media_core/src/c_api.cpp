@@ -2,6 +2,7 @@
 
 #include "core_types.hpp"
 #include "avi.hpp"
+#include "msv1.hpp"
 
 #include <cstdlib>
 
@@ -49,6 +50,52 @@ HMC_API void HMC_CALL hmc_owned_buffer_release(hmc_owned_buffer_t *buffer)
     std::free(buffer->data);
     buffer->data = nullptr;
     buffer->size = 0u;
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_msv1_encoder_config_init(
+    hmc_msv1_encoder_config_t *config,
+    uint32_t config_size)
+{
+    return honey::media::msv1_encoder_config_init(config, config_size);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_msv1_decoder_config_init(
+    hmc_msv1_decoder_config_t *config,
+    uint32_t config_size)
+{
+    return honey::media::msv1_decoder_config_init(config, config_size);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_msv1_encode(
+    const hmc_msv1_encoder_config_t *config,
+    const uint8_t *rgba,
+    size_t rgba_size,
+    const uint8_t *previous_rgba,
+    size_t previous_rgba_size,
+    hmc_encode_flags_t encode_flags,
+    hmc_owned_buffer_t *output,
+    hmc_frame_flags_t *output_frame_flags)
+{
+    return honey::media::msv1_encode(
+        config,
+        rgba,
+        rgba_size,
+        previous_rgba,
+        previous_rgba_size,
+        encode_flags,
+        output,
+        output_frame_flags);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_msv1_decode(
+    const hmc_msv1_decoder_config_t *config,
+    const uint8_t *encoded,
+    size_t encoded_size,
+    uint32_t *argb,
+    size_t argb_pixel_count)
+{
+    return honey::media::msv1_decode(
+        config, encoded, encoded_size, argb, argb_pixel_count);
 }
 
 HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_config_init(

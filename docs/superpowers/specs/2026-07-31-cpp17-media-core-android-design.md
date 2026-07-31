@@ -265,6 +265,29 @@ MSVC/MJPG 的 dimensions、timing、quality、planes 和 image-size 全部一致
 layout/round-trip 测试冻结上述已审计行为；在生成 Kotlin MJPG golden 之前，
 不得声称 MJPG 已完成 Kotlin 逐字节一致性验证。
 
+### 6.3 MSV1 V1 兼容边界
+
+MSV1 输入为 top-down 连续 RGBA8888，宽高必须是非零的 4 倍数。编码按
+block-row 从下到上、每行从左到右处理；RGB555 使用截断量化并忽略 alpha。
+skip 是逐像素比较 RGB555 三通道差值绝对值之和，所有 16 像素都不超过
+`skip_threshold` 才可跳过。skip run 每条最多 `0x3ff` blocks；solid word
+若落入 high-byte `0x84..0x87`，必须改写为 `flags=0,c0=0,c1=color`。
+
+`previous_rgba == NULL` 或 `FORCE_KEY` 是 key mode。`(NULL,0)` 是 previous
+缺席的唯一形式；即使 `FORCE_KEY`，非 NULL previous span 也必须先满足最小
+RGBA 容量，再忽略其内容并关闭 skip。key 成功返回 `KEY|KEY_KNOWN`，普通
+non-NULL previous 成功只返回 `KEY_KNOWN`，不得由 payload 是否出现 skip
+反推关键帧。
+
+decoder 分类顺序固定为 skip、palette、solid，并保留 Kotlin 只用于解码的
+8-color palette 模式。输入必须恰好覆盖配置的 block 数，随后恰好一个
+little-endian `0x0000` terminator，且不得有 trailing bytes/words；zero 或
+overlong skip、奇数字节、截断 palette/word、缺失 terminator 都返回
+`MALFORMED_DATA`。RGBA、previous-RGBA 与 ARGB 参数均是最小容量而非精确
+长度。encode 只在完整成功后发布 owned buffer 和实际 frame flags；decode
+先把 caller ARGB 复制到 malloc-backed scratch（因此 skip 保留旧像素），
+完整成功后才复制 required pixels，任何失败均保持 caller 输出不变。
+
 ## 7. Android 集成
 
 Android 继续负责：

@@ -1,11 +1,8 @@
 #include "avi.hpp"
 
+#include "allocator.hpp"
 #include "core_types.hpp"
 
-#if defined(HMC_ENABLE_TEST_HOOKS)
-#include <atomic>
-#endif
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -29,25 +26,14 @@ constexpr std::uint32_t kMsvc = HMC_MEDIA_FOURCC('M', 'S', 'V', 'C');
 constexpr std::uint32_t kMjpg = HMC_MEDIA_FOURCC('M', 'J', 'P', 'G');
 constexpr std::size_t kHeaderBytes = 212u;
 
-#if defined(HMC_ENABLE_TEST_HOOKS)
-std::atomic<std::size_t> g_fail_allocation{0u};
-std::atomic<std::size_t> g_allocation_count{0u};
-#endif
-
 void *avi_allocate(std::size_t size) noexcept
 {
-#if defined(HMC_ENABLE_TEST_HOOKS)
-    const std::size_t allocation = g_allocation_count.fetch_add(1u) + 1u;
-    if (g_fail_allocation.load() == allocation) {
-        return nullptr;
-    }
-#endif
-    return std::malloc(size);
+    return allocate(size);
 }
 
 void avi_deallocate(void *pointer) noexcept
 {
-    std::free(pointer);
+    deallocate(pointer);
 }
 
 bool span_is_zero(const void *data, std::size_t begin, std::size_t end) noexcept
@@ -930,19 +916,17 @@ void avi_reader_destroy(hmc_avi_reader_t *reader) noexcept
 #if defined(HMC_ENABLE_TEST_HOOKS)
 HMC_API void avi_test_fail_nth_allocation(std::size_t allocation_number) noexcept
 {
-    g_allocation_count.store(0u);
-    g_fail_allocation.store(allocation_number);
+    allocation_test_fail_nth(allocation_number);
 }
 
 HMC_API void avi_test_clear_allocation_failure() noexcept
 {
-    g_fail_allocation.store(0u);
-    g_allocation_count.store(0u);
+    allocation_test_clear_failure();
 }
 
 HMC_API std::size_t avi_test_allocation_count() noexcept
 {
-    return g_allocation_count.load();
+    return allocation_test_count();
 }
 #endif
 

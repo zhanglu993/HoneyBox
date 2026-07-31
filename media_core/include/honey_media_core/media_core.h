@@ -68,6 +68,23 @@ typedef struct hmc_bytes_view {
 typedef struct hmc_avi_muxer hmc_avi_muxer_t;
 typedef struct hmc_avi_reader hmc_avi_reader_t;
 
+typedef struct hmc_msv1_encoder_config {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t skip_threshold;
+} hmc_msv1_encoder_config_t;
+
+#define HMC_MSV1_ENCODER_CONFIG_V1_SIZE UINT32_C(16)
+
+typedef struct hmc_msv1_decoder_config {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+} hmc_msv1_decoder_config_t;
+
+#define HMC_MSV1_DECODER_CONFIG_V1_SIZE UINT32_C(12)
+
 typedef struct hmc_avi_muxer_config {
     uint32_t struct_size;
     uint32_t width;
@@ -108,6 +125,27 @@ typedef struct hmc_avi_frame_info {
 HMC_API uint32_t HMC_CALL hmc_abi_version(void);
 HMC_API const char *HMC_CALL hmc_status_message(hmc_status_t status);
 HMC_API void HMC_CALL hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
+HMC_API hmc_status_t HMC_CALL hmc_msv1_encoder_config_init(
+    hmc_msv1_encoder_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_msv1_decoder_config_init(
+    hmc_msv1_decoder_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_msv1_encode(
+    const hmc_msv1_encoder_config_t *config,
+    const uint8_t *rgba,
+    size_t rgba_size,
+    const uint8_t *previous_rgba,
+    size_t previous_rgba_size,
+    hmc_encode_flags_t encode_flags,
+    hmc_owned_buffer_t *output,
+    hmc_frame_flags_t *output_frame_flags);
+HMC_API hmc_status_t HMC_CALL hmc_msv1_decode(
+    const hmc_msv1_decoder_config_t *config,
+    const uint8_t *encoded,
+    size_t encoded_size,
+    uint32_t *argb,
+    size_t argb_pixel_count);
 HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_config_init(
     hmc_avi_muxer_config_t *config,
     uint32_t config_size);

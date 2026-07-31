@@ -7,8 +7,10 @@ if(MSVC)
 endif()
 
 add_library(honey_media_core
+    src/allocator.cpp
     src/avi.cpp
     src/c_api.cpp
+    src/msv1.cpp
 )
 
 if(BUILD_SHARED_LIBS)

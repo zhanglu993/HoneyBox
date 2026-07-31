@@ -447,6 +447,25 @@ HMC_API hmc_status_t HMC_CALL hmc_msv1_decode(
     size_t argb_pixel_count);
 ```
 
+**Frozen MSV1 V1 semantics:**
+
+- RGBA input is top-down and contiguous; dimensions are nonzero multiples of four.
+  Blocks are emitted bottom row to top row and left to right. RGB555 truncates low
+  bits, alpha is ignored, and skip eligibility compares every pixel's RGB555 channel
+  delta sum against `skip_threshold`.
+- `(NULL, 0)` is the only absent previous-frame form. A supplied previous span is
+  validated even with `HMC_ENCODE_FLAG_FORCE_KEY`; force-key then disables skip.
+  A key encode returns `KEY|KEY_KNOWN`; every normal non-null previous encode returns
+  only `KEY_KNOWN`, regardless of payload contents.
+- Encoder output ends in exactly one little-endian `0x0000` word. Decoder input must
+  contain exactly the configured block count followed by that terminator and no
+  trailing byte or word. Zero/overlong skips, truncation, odd sizes, missing
+  terminators, and trailing data are malformed.
+- RGBA, previous-RGBA, and ARGB counts are minimum capacities (`>= required`).
+  Encode publishes owned bytes and frame flags only after complete success. Decode
+  starts from a scratch copy so valid skip preserves caller pixels, and commits the
+  required ARGB pixels only after complete success.
+
 - [ ] Write failing tests for encoder config init setting `struct_size == config_size`, decoder config init setting `struct_size == config_size`, both V1 sizes/tail-zero rules, solid-color blocks, two-color blocks, key-frame fixture equality, inter-frame fixture equality, force-key and unknown encode flags, returned normalized frame flags, persistent decode output for skipped blocks, dimensions not divisible by four, short RGBA/ARGB buffers, truncated words, malformed skip runs, and size-overflow dimensions.
 - [ ] Run CTest and confirm failures because MSV1 functions are absent.
 - [ ] Port the Kotlin scan order, RGB555 conversion, skip-color collision handling, luminance clustering, mask inversion, bottom-up block order, skip-run splitting at `0x3ff`, and terminating word using fixed-width arithmetic.

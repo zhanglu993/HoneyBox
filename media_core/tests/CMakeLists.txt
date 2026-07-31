@@ -2,6 +2,7 @@ add_executable(honey_media_core_tests
     test_main.cpp
     reference_fixture_test.cpp
     avi_test.cpp
+    msv1_test.cpp
 )
 
 target_link_libraries(honey_media_core_tests PRIVATE honey_media_core)

@@ -44,6 +44,10 @@ typedef char hmc_flag_values_must_be_frozen[
     HMC_FRAME_FLAG_NONE == UINT32_C(0) &&
     HMC_FRAME_FLAG_KEY == UINT32_C(0x00000001) &&
     HMC_FRAME_FLAG_KEY_KNOWN == UINT32_C(0x00000002) ? 1 : -1];
+typedef char hmc_msv1_encoder_config_v1_size_must_be_frozen[
+    sizeof(hmc_msv1_encoder_config_t) == HMC_MSV1_ENCODER_CONFIG_V1_SIZE ? 1 : -1];
+typedef char hmc_msv1_decoder_config_v1_size_must_be_frozen[
+    sizeof(hmc_msv1_decoder_config_t) == HMC_MSV1_DECODER_CONFIG_V1_SIZE ? 1 : -1];
 typedef char hmc_avi_muxer_config_v1_size_must_be_frozen[
     sizeof(hmc_avi_muxer_config_t) == HMC_AVI_MUXER_CONFIG_V1_SIZE ? 1 : -1];
 typedef char hmc_avi_info_v1_size_must_be_frozen[
@@ -61,6 +65,8 @@ void honey_media_core_c99_compile_test(void)
     const uint32_t abi_minor = HMC_ABI_VERSION_GET_MINOR(HMC_ABI_VERSION_CURRENT);
     hmc_encode_flags_t encode_flags = HMC_ENCODE_FLAG_NONE;
     hmc_frame_flags_t frame_flags = HMC_FRAME_FLAG_NONE;
+    hmc_msv1_encoder_config_t msv1_encoder_config;
+    hmc_msv1_decoder_config_t msv1_decoder_config;
     hmc_avi_muxer_config_t muxer_config;
     hmc_avi_info_t avi_info = {HMC_AVI_INFO_V1_SIZE, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
     hmc_avi_frame_info_t avi_frame_info = {
@@ -80,5 +86,9 @@ void honey_media_core_c99_compile_test(void)
     (void)muxer;
     (void)reader;
     (void)hmc_avi_muxer_config_init(&muxer_config, sizeof(muxer_config));
+    (void)hmc_msv1_encoder_config_init(
+        &msv1_encoder_config, sizeof(msv1_encoder_config));
+    (void)hmc_msv1_decoder_config_init(
+        &msv1_decoder_config, sizeof(msv1_decoder_config));
     hmc_owned_buffer_release(&buffer);
 }
