@@ -208,3 +208,6 @@ Every adapter must preserve buffer ownership, explicit frame flags, stateful
 decode order, failure atomicity, and ABI-version checks. Passing native tests
 on one host proves core portability and deterministic fixture behavior only;
 it does not replace platform runtime, device playback, or hardware acceptance.
+
+The first Android and Windows build acceptance record is available in
+`docs/superpowers/reports/2026-07-31-cpp17-media-core-android-verification.md`.
