@@ -118,17 +118,13 @@ class CameraEncoder(
     @Volatile private var software = false
     @Volatile private var streaming = false   // emit frames to Dart
     @Volatile private var recordToFile = false // mux frames into a local file
-    @Volatile private var forceKeyframe = false // re-sync request (drop skip once)
-    // MSV1 periodic key frame so lost-block corruption self-heals (0 = never).
-    private var swKeyIntervalFrames = 0
-    private var swFramesSinceKey = 0
+    private val msv1State = CameraMsv1State()
     private var swMode = "" // "mvs1" | "jpeg"
 
     // Cached H.264 SPS/PPS (CODEC_CONFIG), prepended to each streamed IDR so a
     // late-joining / re-syncing decoder gets the parameter sets.
     private var h264Csd: ByteArray? = null
     private val swFrames = ArrayList<NativeMediaCodec.EncodedFrame>()
-    private var prevRgba: ByteArray? = null
     @Volatile private var swBusy = false
     private var swBytes = 0L
     private var swTruncated = false
@@ -531,15 +527,14 @@ class CameraEncoder(
         software = true
         streaming = cfg.stream
         recordToFile = cfg.recordToFile
-        forceKeyframe = false
         // Insert a key frame every iFrameIntervalSec seconds (MSV1 only) so a
         // dropped block can't corrupt the P-frame chain indefinitely.
-        swKeyIntervalFrames = if (cfg.format == "mvs1") {
+        val keyIntervalFrames = if (cfg.format == "mvs1") {
             Math.max(1, cfg.iFrameIntervalSec) * Math.max(1, cfg.fps)
         } else {
             0
         }
-        swFramesSinceKey = 0
+        msv1State.reset(keyIntervalFrames)
         swMode = cfg.format
         // MSV1 requires 4-aligned dimensions; JPEG just even.
         var w = cfg.width
@@ -557,7 +552,7 @@ class CameraEncoder(
         )
         try {
             swFrames.clear()
-            prevRgba = null; swBusy = false; swBytes = 0L; swTruncated = false
+            swBusy = false; swBytes = 0L; swTruncated = false
             _resetStats()
             if (cfg.recordToFile) prepareSoftwareOutputFile(cfg) else outputFile = null
             startCodecThread()
@@ -593,22 +588,17 @@ class CameraEncoder(
                 if (fmt == "mvs1") {
                     // A key frame is the first frame, a periodic refresh, or a
                     // re-sync request; otherwise a skip (P-)frame when enabled.
-                    val periodic =
-                        swKeyIntervalFrames > 0 && swFramesSinceKey >= swKeyIntervalFrames
-                    val force = forceKeyframe || periodic
-                    val prev = if (cfg?.msv1Skip != false && !force) prevRgba else null
-                    frame = CameraSoftwareMedia.encodeMsv1(
-                        rgba,
-                        w,
-                        h,
-                        prev,
-                        cfg?.msv1SkipThr ?: 0,
-                        force,
-                    )
-                    if (forceKeyframe) forceKeyframe = false
-                    val isKey = CameraSoftwareMedia.isKey(frame)
-                    swFramesSinceKey = if (isKey) 0 else swFramesSinceKey + 1
-                    prevRgba = rgba
+                    frame = msv1State.encode(rgba, cfg?.msv1Skip != false) { previous, forceKey ->
+                        val encoded = CameraSoftwareMedia.encodeMsv1(
+                            rgba,
+                            w,
+                            h,
+                            previous,
+                            cfg?.msv1SkipThr ?: 0,
+                            forceKey,
+                        )
+                        CameraMsv1EncodeResult(encoded, CameraSoftwareMedia.isKey(encoded))
+                    }
                 } else {
                     frame = CameraSoftwareMedia.jpegFrame(
                         JpegCodec.encode(rgba, w, h, cfg?.jpegQuality ?: 80),
@@ -674,7 +664,7 @@ class CameraEncoder(
             }
             if (!(encoding && software)) { encWidth = w; encHeight = h }
             ensureDecodedTexture(encWidth, encHeight)
-            prevRgba = null
+            msv1State.resetPreviousFrame()
             decodedArgb = IntArray(encWidth * encHeight)
         } else {
             releaseDecodedTexture()
@@ -783,7 +773,7 @@ class CameraEncoder(
      *  stream can recover without a full restart. MSV1 drops skip once; H.264
      *  requests an on-demand sync (IDR) frame from MediaCodec. */
     fun requestKeyframe() {
-        forceKeyframe = true
+        msv1State.requestKeyframe()
         val c = codec
         if (!software && c != null) {
             try {
@@ -1058,7 +1048,7 @@ class CameraEncoder(
             software = false
             renderer?.onRgbaFrame = null
             renderer?.clearSoftwareReadback()
-            swFrames.clear(); prevRgba = null
+            swFrames.clear(); msv1State.resetPreviousFrame()
         }
         renderer?.setPaceEncoder(false, 0)
         renderer?.setEncoderSurface(null, 0, 0)
