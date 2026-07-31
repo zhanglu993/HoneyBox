@@ -13,6 +13,52 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class NativeMediaParityTest {
     @Test
+    fun cameraSoftwareMediaPreservesMsv1StateFlagsAndScopedAviProfiles() {
+        val a = asset("input_8x8_a.rgba")
+        val b = asset("input_8x8_b.rgba")
+        val key = CameraSoftwareMedia.encodeMsv1(a, 8, 8, null, 0, false)
+        val allSkip = CameraSoftwareMedia.encodeMsv1(a, 8, 8, a, 0, false)
+        val inter = CameraSoftwareMedia.encodeMsv1(b, 8, 8, a, 0, false)
+        val frames = listOf(key, allSkip, inter)
+
+        assertArrayEquals(asset("msv1_key.bin"), key.bytes)
+        assertArrayEquals(asset("msv1_all_skip.bin"), allSkip.bytes)
+        assertArrayEquals(asset("msv1_inter.bin"), inter.bytes)
+        assertEquals(
+            NativeMediaCodec.FRAME_FLAG_KEY or NativeMediaCodec.FRAME_FLAG_KEY_KNOWN,
+            key.frameFlags,
+        )
+        assertEquals(NativeMediaCodec.FRAME_FLAG_KEY_KNOWN, allSkip.frameFlags)
+        assertEquals(NativeMediaCodec.FRAME_FLAG_KEY_KNOWN, inter.frameFlags)
+
+        val pixels = IntArray(64)
+        CameraSoftwareMedia.decodeMsv1(key.bytes, 8, 8, pixels)
+        assertArrayEquals(argbAsset("msv1_key.argb"), pixels)
+        CameraSoftwareMedia.decodeMsv1(allSkip.bytes, 8, 8, pixels)
+        assertArrayEquals(argbAsset("msv1_all_skip.argb"), pixels)
+        CameraSoftwareMedia.decodeMsv1(inter.bytes, 8, 8, pixels)
+        assertArrayEquals(argbAsset("msv1_inter.argb"), pixels)
+
+        val msvcAvi = CameraSoftwareMedia.finishAvi(frames, 8, 8, 10, "mvs1")
+        assertArrayEquals(asset("msvc_sample.avi"), msvcAvi)
+
+        val jpegA = CameraSoftwareMedia.jpegFrame(byteArrayOf(0xff.toByte(), 0xd8.toByte(), 1, 0xff.toByte(), 0xd9.toByte()))
+        val jpegB = CameraSoftwareMedia.jpegFrame(byteArrayOf(0xff.toByte(), 0xd8.toByte(), 2, 0xff.toByte(), 0xd9.toByte()))
+        val mjpgAvi = CameraSoftwareMedia.finishAvi(listOf(jpegA, jpegB), 8, 8, 5, "jpeg")
+        NativeMediaCodec.AviReader(mjpgAvi).use { reader ->
+            val info = reader.info()
+            assertEquals(NativeMediaCodec.fourcc("MJPG"), info.handlerFourcc)
+            assertEquals(NativeMediaCodec.fourcc("MJPG"), info.compressionFourcc)
+            assertEquals(24, info.bitCount)
+            assertEquals(2, info.frameCount)
+            assertEquals(jpegA.frameFlags, reader.frameInfo(0).frameFlags)
+            assertEquals(jpegB.frameFlags, reader.frameInfo(1).frameFlags)
+            assertArrayEquals(jpegA.bytes, reader.copyFrame(0))
+            assertArrayEquals(jpegB.bytes, reader.copyFrame(1))
+        }
+    }
+
+    @Test
     fun productionCvidSessionMatchesFixtureFlagsAndSequentialDecode() {
         val a = asset("input_8x8_a.rgba")
         val b = asset("input_8x8_b.rgba")
@@ -68,9 +114,6 @@ class NativeMediaParityTest {
         assertArrayEquals(asset("msv1_all_skip.bin"), allSkip.bytes)
         assertArrayEquals(asset("msv1_inter.bin"), inter.bytes)
         assertArrayEquals(asset("msv1_key.bin"), forcedKey.bytes)
-        assertArrayEquals(SoftwareCodec.encodeMsv1(a, 8, 8, null, 0), key.bytes)
-        assertArrayEquals(SoftwareCodec.encodeMsv1(a, 8, 8, a, 0), allSkip.bytes)
-        assertArrayEquals(SoftwareCodec.encodeMsv1(b, 8, 8, a, 0), inter.bytes)
     }
 
     @Test

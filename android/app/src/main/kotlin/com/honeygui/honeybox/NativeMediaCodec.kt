@@ -214,6 +214,16 @@ internal object NativeMediaCodec {
                 fourcc("MSVC"),
                 16,
             )
+
+            fun mjpg(width: Int, height: Int, fps: Int): AviMuxer = AviMuxer(
+                width,
+                height,
+                fps,
+                1,
+                fourcc("MJPG"),
+                fourcc("MJPG"),
+                24,
+            )
         }
     }
 
@@ -318,6 +328,61 @@ internal object NativeMediaCodec {
     private external fun nativeAviReaderFrameInfo(handle: Long, index: Int): IntArray
     private external fun nativeAviReaderCopyFrame(handle: Long, index: Int): ByteArray
     private external fun nativeAviReaderDestroy(handle: Long)
+}
+
+/** Production MSV1/JPEG AVI orchestration shared by camera and parity tests. */
+internal object CameraSoftwareMedia {
+    fun encodeMsv1(
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+        previousRgba: ByteArray?,
+        skipThreshold: Int,
+        forceKey: Boolean,
+    ): NativeMediaCodec.EncodedFrame = NativeMediaCodec.encodeMsv1(
+        rgba,
+        width,
+        height,
+        previousRgba,
+        skipThreshold,
+        forceKey,
+    )
+
+    fun decodeMsv1(
+        encoded: ByteArray,
+        width: Int,
+        height: Int,
+        persistentArgb: IntArray,
+    ) {
+        NativeMediaCodec.decodeMsv1(encoded, width, height, persistentArgb)
+    }
+
+    fun jpegFrame(bytes: ByteArray): NativeMediaCodec.EncodedFrame =
+        NativeMediaCodec.EncodedFrame(
+            bytes,
+            NativeMediaCodec.FRAME_FLAG_KEY or NativeMediaCodec.FRAME_FLAG_KEY_KNOWN,
+        )
+
+    fun isKey(frame: NativeMediaCodec.EncodedFrame): Boolean =
+        frame.frameFlags and NativeMediaCodec.FRAME_FLAG_KEY != 0
+
+    fun finishAvi(
+        frames: List<NativeMediaCodec.EncodedFrame>,
+        width: Int,
+        height: Int,
+        fps: Int,
+        mode: String,
+    ): ByteArray {
+        val muxer = when (mode) {
+            "mvs1" -> NativeMediaCodec.AviMuxer.msvc(width, height, fps)
+            "jpeg" -> NativeMediaCodec.AviMuxer.mjpg(width, height, fps)
+            else -> throw IllegalArgumentException("Unsupported camera software mode: $mode")
+        }
+        return muxer.use {
+            frames.forEach { frame -> it.addFrame(frame.bytes, frame.frameFlags) }
+            it.finish()
+        }
+    }
 }
 
 /** Production Cinepak-to-CVID orchestration shared by every converter path. */

@@ -11,6 +11,34 @@ import java.nio.file.Paths
 
 class MediaReferenceFixturesTest {
     @Test
+    fun cameraProductionUsesSharedNativeSoftwareMediaWithoutLegacyCodecReferences() {
+        val productionRoot = repositoryRoot().resolve("android/app/src/main/kotlin")
+        val legacyFiles = ArrayList<String>()
+        Files.walk(productionRoot).use { paths ->
+            paths.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".kt") }
+                .forEach { path ->
+                    val source = String(Files.readAllBytes(path), Charsets.UTF_8)
+                    if (Regex("\\bSoftwareCodec\\b").containsMatchIn(source)) {
+                        legacyFiles += productionRoot.relativize(path).toString()
+                    }
+                }
+        }
+        assertTrue("Production SoftwareCodec references remain: $legacyFiles", legacyFiles.isEmpty())
+
+        val cameraSource = String(
+            Files.readAllBytes(
+                productionRoot.resolve("com/honeygui/honeybox/CameraEncoder.kt"),
+            ),
+            Charsets.UTF_8,
+        )
+        assertTrue("CameraEncoder must use CameraSoftwareMedia", cameraSource.contains("CameraSoftwareMedia"))
+        assertFalse(
+            "CameraEncoder must not bypass CameraSoftwareMedia",
+            Regex("NativeMediaCodec\\.(encodeMsv1|decodeMsv1|AviMuxer)").containsMatchIn(cameraSource),
+        )
+    }
+
+    @Test
     fun videoConverterHasNoUnqualifiedLegacyCinepakOrCvidReferences() {
         val source = String(
             Files.readAllBytes(
@@ -52,8 +80,8 @@ class MediaReferenceFixturesTest {
         val oneRgb555Step = previous.clone().also { it[0] = 8 }
         val skipFrame = byteArrayOf(1, 0x84.toByte(), 0, 0)
 
-        assertArrayEquals(skipFrame, SoftwareCodec.encodeMsv1(oneRgb555Step, 4, 4, previous, 1))
-        assertFalse(SoftwareCodec.encodeMsv1(oneRgb555Step, 4, 4, previous, 0).contentEquals(skipFrame))
+        assertArrayEquals(skipFrame, LegacyMsv1Codec.encodeMsv1(oneRgb555Step, 4, 4, previous, 1))
+        assertFalse(LegacyMsv1Codec.encodeMsv1(oneRgb555Step, 4, 4, previous, 0).contentEquals(skipFrame))
     }
 
     private fun fixtureDirectory(): Path {
@@ -70,15 +98,15 @@ class MediaReferenceFixturesTest {
         val a = rgbaA()
         val b = rgbaB()
 
-        val msv1Key = SoftwareCodec.encodeMsv1(a, 8, 8, null, 0)
-        val msv1AllSkip = SoftwareCodec.encodeMsv1(a, 8, 8, a, 0)
-        val msv1Inter = SoftwareCodec.encodeMsv1(b, 8, 8, a, 0)
+        val msv1Key = LegacyMsv1Codec.encodeMsv1(a, 8, 8, null, 0)
+        val msv1AllSkip = LegacyMsv1Codec.encodeMsv1(a, 8, 8, a, 0)
+        val msv1Inter = LegacyMsv1Codec.encodeMsv1(b, 8, 8, a, 0)
         val msv1Pixels = IntArray(64)
-        SoftwareCodec.decodeMsv1(msv1Key, 8, 8, msv1Pixels)
+        LegacyMsv1Codec.decodeMsv1(msv1Key, 8, 8, msv1Pixels)
         val msv1KeyArgb = msv1Pixels.toLittleEndianArgb()
-        SoftwareCodec.decodeMsv1(msv1AllSkip, 8, 8, msv1Pixels)
+        LegacyMsv1Codec.decodeMsv1(msv1AllSkip, 8, 8, msv1Pixels)
         val msv1AllSkipArgb = msv1Pixels.toLittleEndianArgb()
-        SoftwareCodec.decodeMsv1(msv1Inter, 8, 8, msv1Pixels)
+        LegacyMsv1Codec.decodeMsv1(msv1Inter, 8, 8, msv1Pixels)
         val msv1InterArgb = msv1Pixels.toLittleEndianArgb()
 
         val cinepakEncoder = CinepakEncoder.Encoder(8, 8, CinepakEncoder.Options())
@@ -99,7 +127,7 @@ class MediaReferenceFixturesTest {
             "msv1_key.argb" to msv1KeyArgb,
             "msv1_all_skip.argb" to msv1AllSkipArgb,
             "msv1_inter.argb" to msv1InterArgb,
-            "msvc_sample.avi" to SoftwareCodec.buildAvi(
+            "msvc_sample.avi" to LegacyMsv1Codec.buildAvi(
                 listOf(msv1Key, msv1AllSkip, msv1Inter), 8, 8, 10, "MSVC", 16,
                 booleanArrayOf(true, false, false),
             ),

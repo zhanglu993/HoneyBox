@@ -127,8 +127,7 @@ class CameraEncoder(
     // Cached H.264 SPS/PPS (CODEC_CONFIG), prepended to each streamed IDR so a
     // late-joining / re-syncing decoder gets the parameter sets.
     private var h264Csd: ByteArray? = null
-    private val swFrames = ArrayList<ByteArray>()
-    private val swKeys = ArrayList<Boolean>()
+    private val swFrames = ArrayList<NativeMediaCodec.EncodedFrame>()
     private var prevRgba: ByteArray? = null
     @Volatile private var swBusy = false
     private var swBytes = 0L
@@ -557,7 +556,7 @@ class CameraEncoder(
             sensorOrientation, facingFront, cfg.width, cfg.height, cfg.cropZoom,
         )
         try {
-            swFrames.clear(); swKeys.clear()
+            swFrames.clear()
             prevRgba = null; swBusy = false; swBytes = 0L; swTruncated = false
             _resetStats()
             if (cfg.recordToFile) prepareSoftwareOutputFile(cfg) else outputFile = null
@@ -590,27 +589,36 @@ class CameraEncoder(
             try {
                 val cfg = config
                 val fmt = cfg?.format ?: "mvs1"
-                val encoded: ByteArray
-                val isKey: Boolean
+                val frame: NativeMediaCodec.EncodedFrame
                 if (fmt == "mvs1") {
                     // A key frame is the first frame, a periodic refresh, or a
                     // re-sync request; otherwise a skip (P-)frame when enabled.
                     val periodic =
                         swKeyIntervalFrames > 0 && swFramesSinceKey >= swKeyIntervalFrames
                     val force = forceKeyframe || periodic
-                    if (forceKeyframe) forceKeyframe = false
                     val prev = if (cfg?.msv1Skip != false && !force) prevRgba else null
-                    encoded = SoftwareCodec.encodeMsv1(rgba, w, h, prev, cfg?.msv1SkipThr ?: 0)
-                    isKey = prev == null
+                    frame = CameraSoftwareMedia.encodeMsv1(
+                        rgba,
+                        w,
+                        h,
+                        prev,
+                        cfg?.msv1SkipThr ?: 0,
+                        force,
+                    )
+                    if (forceKeyframe) forceKeyframe = false
+                    val isKey = CameraSoftwareMedia.isKey(frame)
                     swFramesSinceKey = if (isKey) 0 else swFramesSinceKey + 1
                     prevRgba = rgba
                 } else {
-                    encoded = SoftwareCodec.encodeJpeg(rgba, w, h, cfg?.jpegQuality ?: 80)
-                    isKey = true
+                    frame = CameraSoftwareMedia.jpegFrame(
+                        JpegCodec.encode(rgba, w, h, cfg?.jpegQuality ?: 80),
+                    )
                 }
+                val encoded = frame.bytes
+                val isKey = CameraSoftwareMedia.isKey(frame)
                 if (recording) {
                     countFrame(encoded, isKey, ptsNs)
-                    if (recordToFile) bufferFrame(encoded, isKey)
+                    if (recordToFile) bufferFrame(frame)
                     if (streaming) emitFrame(encoded, isKey)
                 }
                 if (doPreview) drawEncodedPreview(fmt, encoded, w, h)
@@ -627,7 +635,7 @@ class CameraEncoder(
         val bmp: Bitmap = try {
             if (fmt == "mvs1") {
                 val arr = decodedArgb ?: return
-                SoftwareCodec.decodeMsv1(encoded, w, h, arr)
+                CameraSoftwareMedia.decodeMsv1(encoded, w, h, arr)
                 Bitmap.createBitmap(arr, w, h, Bitmap.Config.ARGB_8888)
             } else {
                 BitmapFactory.decodeByteArray(encoded, 0, encoded.size) ?: return
@@ -752,11 +760,10 @@ class CameraEncoder(
     }
 
     /** Buffer one encoded frame for the AVI mux (record-to-file only). */
-    private fun bufferFrame(encoded: ByteArray, isKey: Boolean) {
-        swBytes += encoded.size
+    private fun bufferFrame(frame: NativeMediaCodec.EncodedFrame) {
+        swBytes += frame.bytes.size
         if (swBytes <= swMaxBytes && swFrames.size < swMaxFrames) {
-            swFrames.add(encoded)
-            swKeys.add(isKey)
+            swFrames.add(frame)
         } else if (!swTruncated) {
             swTruncated = true
             emitInfo("帧缓冲已达上限，后续帧不再写入文件（编码继续）")
@@ -837,7 +844,7 @@ class CameraEncoder(
                 }
             }
             mainHandler.post {
-                swFrames.clear(); swKeys.clear()
+                swFrames.clear()
                 updateReadbackState() // stops readback/thread only if preview off
                 _emitStopped(file, frames, keyframes, bytes)
             }
@@ -846,16 +853,13 @@ class CameraEncoder(
 
     private fun writeAvi(file: File?) {
         if (file == null || swFrames.isEmpty()) return
-        val fourcc = if (swMode == "mvs1") "MSVC" else "MJPG"
-        val bitCount = if (swMode == "mvs1") 16 else 24
         val fps = config?.fps ?: 15
-        val keyFlags = if (swMode == "mvs1") {
-            BooleanArray(swKeys.size) { swKeys[it] }
-        } else {
-            null
-        }
-        val avi = SoftwareCodec.buildAvi(
-            swFrames, encWidth, encHeight, fps, fourcc, bitCount, keyFlags,
+        val avi = CameraSoftwareMedia.finishAvi(
+            swFrames,
+            encWidth,
+            encHeight,
+            fps,
+            swMode,
         )
         FileOutputStream(file).use { it.write(avi) }
     }
@@ -1054,7 +1058,7 @@ class CameraEncoder(
             software = false
             renderer?.onRgbaFrame = null
             renderer?.clearSoftwareReadback()
-            swFrames.clear(); swKeys.clear(); prevRgba = null
+            swFrames.clear(); prevRgba = null
         }
         renderer?.setPaceEncoder(false, 0)
         renderer?.setEncoderSurface(null, 0, 0)
