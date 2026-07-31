@@ -13,6 +13,40 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class NativeMediaParityTest {
     @Test
+    fun productionCvidSessionMatchesFixtureFlagsAndSequentialDecode() {
+        val a = asset("input_8x8_a.rgba")
+        val b = asset("input_8x8_b.rgba")
+        val encoded = ArrayList<NativeMediaCodec.EncodedFrame>(3)
+        val avi = CvidAviSession(8, 8, 10, NativeMediaCodec.CinepakOptions()).use { session ->
+            encoded += session.encodeAndAdd(a)
+            encoded += session.encodeAndAdd(a)
+            encoded += session.encodeAndAdd(b)
+            session.finish()
+        }
+
+        assertEquals(
+            NativeMediaCodec.FRAME_FLAG_KEY or NativeMediaCodec.FRAME_FLAG_KEY_KNOWN,
+            encoded[0].frameFlags,
+        )
+        assertEquals(NativeMediaCodec.FRAME_FLAG_KEY_KNOWN, encoded[1].frameFlags)
+        assertEquals(NativeMediaCodec.FRAME_FLAG_KEY_KNOWN, encoded[2].frameFlags)
+        assertArrayEquals(asset("cvid_sample.avi"), avi)
+
+        NativeMediaCodec.AviReader(avi).use { reader ->
+            val info = reader.info()
+            assertEquals(3, info.frameCount)
+            NativeMediaCodec.CinepakDecoder(info.width, info.height).use { decoder ->
+                val pixels = IntArray(info.width * info.height)
+                for (index in 0 until info.frameCount) {
+                    assertEquals(encoded[index].frameFlags, reader.frameInfo(index).frameFlags)
+                    decoder.decode(reader.copyFrame(index), pixels)
+                    assertArrayEquals(argbAsset(arrayOf("cinepak_key.argb", "cinepak_all_skip.argb", "cinepak_inter.argb")[index]), pixels)
+                }
+            }
+        }
+    }
+
+    @Test
     fun abiAndMsv1EncodingMatchCommittedKotlinReference() {
         assertEquals(0x0001_0000, NativeMediaCodec.abiVersion())
 

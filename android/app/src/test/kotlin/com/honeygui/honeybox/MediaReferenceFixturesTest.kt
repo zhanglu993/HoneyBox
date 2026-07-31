@@ -3,12 +3,31 @@ package com.honeygui.honeybox
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
 class MediaReferenceFixturesTest {
+    @Test
+    fun videoConverterHasNoUnqualifiedLegacyCinepakOrCvidReferences() {
+        val source = String(
+            Files.readAllBytes(
+                repositoryRoot().resolve(
+                    "android/app/src/main/kotlin/com/honeygui/honeybox/VideoConverter.kt",
+                ),
+            ),
+            Charsets.UTF_8,
+        )
+        val legacyReference = Regex(
+            "(?<!NativeMediaCodec\\.)\\b(CinepakEncoder|CinepakDecoder|CvidAviMuxer)\\b",
+        ).find(source)
+        if (legacyReference != null) {
+            fail("Legacy Cinepak/CVID reference remains: ${legacyReference.value}")
+        }
+    }
+
     @Test
     fun committedReferenceFixturesMatchKotlinBehavior() {
         val expected = expectedFixtures()
@@ -38,9 +57,13 @@ class MediaReferenceFixturesTest {
     }
 
     private fun fixtureDirectory(): Path {
+        return repositoryRoot().resolve("media_core/tests/fixtures")
+    }
+
+    private fun repositoryRoot(): Path {
         val repositoryRoot = System.getProperty("ebadge.repositoryRoot")
         require(!repositoryRoot.isNullOrBlank()) { "ebadge.repositoryRoot must be set for fixture tests" }
-        return Paths.get(repositoryRoot).resolve("media_core/tests/fixtures")
+        return Paths.get(repositoryRoot)
     }
 
     private fun expectedFixtures(): Map<String, ByteArray> {

@@ -319,3 +319,95 @@ internal object NativeMediaCodec {
     private external fun nativeAviReaderCopyFrame(handle: Long, index: Int): ByteArray
     private external fun nativeAviReaderDestroy(handle: Long)
 }
+
+/** Production Cinepak-to-CVID orchestration shared by every converter path. */
+internal class CvidAviSession(
+    width: Int,
+    height: Int,
+    fps: Int,
+    options: NativeMediaCodec.CinepakOptions,
+) : AutoCloseable {
+    private var encoder: NativeMediaCodec.CinepakEncoder? = null
+    private var muxer: NativeMediaCodec.AviMuxer? = null
+
+    init {
+        val createdEncoder = NativeMediaCodec.CinepakEncoder(width, height, options)
+        try {
+            val createdMuxer = NativeMediaCodec.AviMuxer.cvid(width, height, fps)
+            encoder = createdEncoder
+            muxer = createdMuxer
+        } catch (failure: Throwable) {
+            try {
+                createdEncoder.close()
+            } catch (closeFailure: Throwable) {
+                failure.addSuppressed(closeFailure)
+            }
+            throw failure
+        }
+    }
+
+    @Synchronized
+    fun encodeAndAdd(rgba: ByteArray, forceKey: Boolean = false): NativeMediaCodec.EncodedFrame {
+        try {
+            val frame = openEncoder().encode(rgba, forceKey)
+            openMuxer().addFrame(frame.bytes, frame.frameFlags)
+            return frame
+        } catch (failure: Throwable) {
+            closeAfterFailure(failure)
+        }
+    }
+
+    @Synchronized
+    fun addFrame(frame: NativeMediaCodec.EncodedFrame) {
+        try {
+            openMuxer().addFrame(frame.bytes, frame.frameFlags)
+        } catch (failure: Throwable) {
+            closeAfterFailure(failure)
+        }
+    }
+
+    @Synchronized
+    fun finish(): ByteArray {
+        try {
+            return openMuxer().finish()
+        } catch (failure: Throwable) {
+            closeAfterFailure(failure)
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        val currentMuxer = muxer
+        val currentEncoder = encoder
+        muxer = null
+        encoder = null
+
+        var failure: Throwable? = null
+        try {
+            currentMuxer?.close()
+        } catch (closeFailure: Throwable) {
+            failure = closeFailure
+        }
+        try {
+            currentEncoder?.close()
+        } catch (closeFailure: Throwable) {
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        if (failure != null) throw failure
+    }
+
+    private fun openEncoder(): NativeMediaCodec.CinepakEncoder =
+        checkNotNull(encoder) { "CVID AVI session is closed" }
+
+    private fun openMuxer(): NativeMediaCodec.AviMuxer =
+        checkNotNull(muxer) { "CVID AVI session is closed" }
+
+    private fun closeAfterFailure(failure: Throwable): Nothing {
+        try {
+            close()
+        } catch (closeFailure: Throwable) {
+            failure.addSuppressed(closeFailure)
+        }
+        throw failure
+    }
+}
