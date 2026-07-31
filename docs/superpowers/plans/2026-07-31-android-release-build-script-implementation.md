@@ -8,6 +8,8 @@
 
 **Tech Stack:** Windows PowerShell、Flutter 3.44.x、Dart/Flutter Pub、JDK 17、Android SDK、Git、PowerShell Parser。
 
+**Implementation note:** 执行阶段依据测试规范，将原计划的源码文本检索测试升级为真实行为测试。测试在临时目录运行实际 PowerShell 脚本，只用批处理替身隔离耗时的 Flutter 外部命令；它验证已知 symlink 失败会继续生成 APK、普通依赖失败会停止构建、命令参数正确、成功摘要包含 SHA-256，并防止 stderr 被包装成 `NativeCommandError`。
+
 ## Global Constraints
 
 - 脚本路径固定为 `tool/build-android-release.ps1`，不接收参数。
@@ -20,7 +22,7 @@
 
 ---
 
-### Task 1: 编译脚本及其合约测试
+### Task 1: 编译脚本及其行为测试
 
 **Files:**
 - Create: `tool/build-android-release.ps1`
