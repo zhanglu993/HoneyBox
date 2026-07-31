@@ -1,5 +1,9 @@
 #include "honey_media_core/media_core.h"
 
+#ifndef HMC_MEDIA_CORE_H
+#error "media_core.h must expose the HMC_MEDIA_CORE_H include guard"
+#endif
+
 void honey_media_core_c99_compile_test(void)
 {
     hmc_owned_buffer_t buffer = {NULL, 0u};

@@ -1,5 +1,5 @@
-#ifndef HONEY_MEDIA_CORE_MEDIA_CORE_H
-#define HONEY_MEDIA_CORE_MEDIA_CORE_H
+#ifndef HMC_MEDIA_CORE_H
+#define HMC_MEDIA_CORE_H
 
 #include <stddef.h>
 #include <stdint.h>
