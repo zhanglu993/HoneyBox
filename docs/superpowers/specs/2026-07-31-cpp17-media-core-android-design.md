@@ -1,8 +1,9 @@
 # C++17 eBadge 媒体核心 Android 迁移设计
 
 **日期：** 2026-07-31
-**状态：** 已完成方案讨论，待书面规格复核
+**状态：** 已批准，进入实施
 **目标分支：** `codex/cpp17-media-core-android`
+**实施计划：** `docs/superpowers/plans/2026-07-31-cpp17-media-core-android-implementation.md`
 
 ## 1. 背景
 
