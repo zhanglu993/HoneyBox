@@ -527,6 +527,23 @@ HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_decode(
     size_t argb_pixel_count);
 ```
 
+Task 5 freezes the first decoder as the project-generated CVID subset, not a
+claim of complete Cinepak support. It accepts only full V4/V1 codebooks
+`0x20/0x22` and vector chunks `0x30/0x31/0x32`; selective/gray codebooks
+`0x21/0x23/0x24..0x27` and every unknown chunk return
+`HMC_STATUS_UNSUPPORTED`. Codebooks are local to one strip and are never reused
+across strips or frames. A decode consumes exactly one declared frame, requires
+the configured dimensions and complete strip coverage, and writes exactly
+`width*height` output pixels; extra output capacity is untouched.
+
+The decoder accepts only dimensions `1..65535` divisible by four. An inter frame
+before a successful key (including after reset) returns
+`HMC_STATUS_INVALID_STATE`. Reset is allocation-free and clears reconstruction
+and reference validity. Encoded input, output pixels, the decoder handle, and
+its owned reconstruction storage must not overlap. Every malformed,
+unsupported, invalid-state, invalid-argument, overflow, or allocation failure
+leaves both caller output and all decoder state unchanged.
+
 - [ ] Write failing tests for decoder config init setting `struct_size == config_size`, V1 size/tail-zero rules, decoding the key/inter fixtures in sequence, status-returning reset behavior, NULL-tolerant destroy, incorrect frame dimensions, truncated 10-byte frame headers, truncated strip/chunk payloads, invalid strip counts, invalid codebook indexes, impossible frame/chunk sizes, null/short output buffers, and every failure leaving caller output plus decoder state unchanged.
 - [ ] Run CTest and confirm failures because Cinepak decoder functions are absent.
 - [ ] Port the codebook parsing, V1/V4 vector handling, strip row accumulator, signed U/V conversion, YUV reconstruction, and persistent inter-frame reconstruction.

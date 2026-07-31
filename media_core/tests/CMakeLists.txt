@@ -2,6 +2,7 @@ add_executable(honey_media_core_tests
     test_main.cpp
     reference_fixture_test.cpp
     avi_test.cpp
+    cinepak_decoder_test.cpp
     msv1_test.cpp
 )
 

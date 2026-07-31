@@ -10,6 +10,7 @@ add_library(honey_media_core
     src/allocator.cpp
     src/avi.cpp
     src/c_api.cpp
+    src/cinepak_decoder.cpp
     src/msv1.cpp
 )
 

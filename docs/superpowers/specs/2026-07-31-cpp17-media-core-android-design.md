@@ -288,6 +288,32 @@ overlong skip、奇数字节、截断 palette/word、缺失 terminator 都返回
 先把 caller ARGB 复制到 malloc-backed scratch（因此 skip 保留旧像素），
 完整成功后才复制 required pixels，任何失败均保持 caller 输出不变。
 
+### 6.4 Cinepak decoder V1 兼容边界
+
+首版 Cinepak decoder 只支持本项目 encoder 生成的 CVID 子集：full V4/V1
+codebook `0x20/0x22`，以及 key mixed、inter、all-V1 vector
+`0x30/0x31/0x32`。selective/gray codebook
+`0x21/0x23/0x24..0x27` 和未知 chunk 返回 `UNSUPPORTED`，不能静默忽略，也
+不能对外宣称完整 Cinepak conformance。codebook 只在当前 strip 内有效，
+不得跨 strip 或 frame 复用；vector 实际引用 V1/V4 时，对应本地 codebook
+必须存在。
+
+每次调用恰好消费一个完整 frame：BE24 声明长度必须等于输入长度，宽高必须与
+config 相同，strip band 用跨 strip 的 `topRow` 累加并且最终恰好覆盖 height。
+混合 vector 的 BE32 flag word 与 index byte 按 payload cursor 交错读取；32
+bit 用完后必须从当前 cursor 读取下一 word，最后一个 word 的未使用 bit 可以
+非零，但 payload 不得包含 trailing byte。ARGB 输出是 top-down 数值
+`0xAARRGGBB`，只写 `width*height` 个 pixel，额外 capacity 保持不变。
+
+config 宽高范围为 `1..65535` 且都必须被四整除，所有 plane/output 尺寸乘法
+均先检查。inter 在尚无成功 key reference 时（包括 reset 后）返回
+`INVALID_STATE`。reset 不分配内存并清除 reconstruction/reference validity。
+decode 先复制持久 reconstruction 到 no-throw candidate，在 candidate 上完成
+解析、重建和 ARGB 转换；完整成功后才提交 state 并复制 caller output。
+任何失败保持 caller output 和全部 decoder state 不变，因此清除 allocation
+fault 后可以重试同一 frame。encoded、ARGB output、handle 及其 owned state
+之间的 aliasing 不受支持并返回 `INVALID_ARGUMENT`。
+
 ## 7. Android 集成
 
 Android 继续负责：

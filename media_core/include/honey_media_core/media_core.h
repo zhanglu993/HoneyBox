@@ -67,6 +67,15 @@ typedef struct hmc_bytes_view {
 
 typedef struct hmc_avi_muxer hmc_avi_muxer_t;
 typedef struct hmc_avi_reader hmc_avi_reader_t;
+typedef struct hmc_cinepak_decoder hmc_cinepak_decoder_t;
+
+typedef struct hmc_cinepak_decoder_config {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+} hmc_cinepak_decoder_config_t;
+
+#define HMC_CINEPAK_DECODER_CONFIG_V1_SIZE UINT32_C(12)
 
 typedef struct hmc_msv1_encoder_config {
     uint32_t struct_size;
@@ -131,6 +140,22 @@ HMC_API hmc_status_t HMC_CALL hmc_msv1_encoder_config_init(
 HMC_API hmc_status_t HMC_CALL hmc_msv1_decoder_config_init(
     hmc_msv1_decoder_config_t *config,
     uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_config_init(
+    hmc_cinepak_decoder_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_create(
+    const hmc_cinepak_decoder_config_t *config,
+    hmc_cinepak_decoder_t **decoder);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_reset(
+    hmc_cinepak_decoder_t *decoder);
+HMC_API void HMC_CALL hmc_cinepak_decoder_destroy(
+    hmc_cinepak_decoder_t *decoder);
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_decode(
+    hmc_cinepak_decoder_t *decoder,
+    const uint8_t *encoded,
+    size_t encoded_size,
+    uint32_t *argb,
+    size_t argb_pixel_count);
 HMC_API hmc_status_t HMC_CALL hmc_msv1_encode(
     const hmc_msv1_encoder_config_t *config,
     const uint8_t *rgba,

@@ -2,6 +2,7 @@
 
 #include "core_types.hpp"
 #include "avi.hpp"
+#include "cinepak_decoder.hpp"
 #include "msv1.hpp"
 
 #include <cstdlib>
@@ -64,6 +65,43 @@ HMC_API hmc_status_t HMC_CALL hmc_msv1_decoder_config_init(
     uint32_t config_size)
 {
     return honey::media::msv1_decoder_config_init(config, config_size);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_config_init(
+    hmc_cinepak_decoder_config_t *config,
+    uint32_t config_size)
+{
+    return honey::media::cinepak_decoder_config_init(config, config_size);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_create(
+    const hmc_cinepak_decoder_config_t *config,
+    hmc_cinepak_decoder_t **decoder)
+{
+    return honey::media::cinepak_decoder_create(config, decoder);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_reset(
+    hmc_cinepak_decoder_t *decoder)
+{
+    return honey::media::cinepak_decoder_reset(decoder);
+}
+
+HMC_API void HMC_CALL hmc_cinepak_decoder_destroy(
+    hmc_cinepak_decoder_t *decoder)
+{
+    honey::media::cinepak_decoder_destroy(decoder);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_cinepak_decoder_decode(
+    hmc_cinepak_decoder_t *decoder,
+    const uint8_t *encoded,
+    size_t encoded_size,
+    uint32_t *argb,
+    size_t argb_pixel_count)
+{
+    return honey::media::cinepak_decoder_decode(
+        decoder, encoded, encoded_size, argb, argb_pixel_count);
 }
 
 HMC_API hmc_status_t HMC_CALL hmc_msv1_encode(

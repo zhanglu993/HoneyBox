@@ -48,6 +48,9 @@ typedef char hmc_msv1_encoder_config_v1_size_must_be_frozen[
     sizeof(hmc_msv1_encoder_config_t) == HMC_MSV1_ENCODER_CONFIG_V1_SIZE ? 1 : -1];
 typedef char hmc_msv1_decoder_config_v1_size_must_be_frozen[
     sizeof(hmc_msv1_decoder_config_t) == HMC_MSV1_DECODER_CONFIG_V1_SIZE ? 1 : -1];
+typedef char hmc_cinepak_decoder_config_v1_size_must_be_frozen[
+    sizeof(hmc_cinepak_decoder_config_t) ==
+        HMC_CINEPAK_DECODER_CONFIG_V1_SIZE ? 1 : -1];
 typedef char hmc_avi_muxer_config_v1_size_must_be_frozen[
     sizeof(hmc_avi_muxer_config_t) == HMC_AVI_MUXER_CONFIG_V1_SIZE ? 1 : -1];
 typedef char hmc_avi_info_v1_size_must_be_frozen[
@@ -67,12 +70,14 @@ void honey_media_core_c99_compile_test(void)
     hmc_frame_flags_t frame_flags = HMC_FRAME_FLAG_NONE;
     hmc_msv1_encoder_config_t msv1_encoder_config;
     hmc_msv1_decoder_config_t msv1_decoder_config;
+    hmc_cinepak_decoder_config_t cinepak_decoder_config;
     hmc_avi_muxer_config_t muxer_config;
     hmc_avi_info_t avi_info = {HMC_AVI_INFO_V1_SIZE, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
     hmc_avi_frame_info_t avi_frame_info = {
         HMC_AVI_FRAME_INFO_V1_SIZE, 0u, 0u, 0u};
     hmc_avi_muxer_t *muxer = NULL;
     hmc_avi_reader_t *reader = NULL;
+    hmc_cinepak_decoder_t *cinepak_decoder = NULL;
 
     (void)view;
     (void)fourcc;
@@ -85,10 +90,19 @@ void honey_media_core_c99_compile_test(void)
     (void)avi_frame_info;
     (void)muxer;
     (void)reader;
+    (void)cinepak_decoder;
     (void)hmc_avi_muxer_config_init(&muxer_config, sizeof(muxer_config));
     (void)hmc_msv1_encoder_config_init(
         &msv1_encoder_config, sizeof(msv1_encoder_config));
     (void)hmc_msv1_decoder_config_init(
         &msv1_decoder_config, sizeof(msv1_decoder_config));
+    (void)hmc_cinepak_decoder_config_init(
+        &cinepak_decoder_config, sizeof(cinepak_decoder_config));
+    (void)hmc_cinepak_decoder_create(
+        &cinepak_decoder_config, &cinepak_decoder);
+    (void)hmc_cinepak_decoder_reset(cinepak_decoder);
+    (void)hmc_cinepak_decoder_decode(
+        cinepak_decoder, NULL, 0u, NULL, 0u);
+    hmc_cinepak_decoder_destroy(cinepak_decoder);
     hmc_owned_buffer_release(&buffer);
 }
