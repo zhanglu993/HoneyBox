@@ -45,6 +45,24 @@ data class EncoderConfig(
     val stream: Boolean,       // emit encoded frames to Dart for streaming
 )
 
+internal fun isSoftwareCropOnlyChange(current: EncoderConfig, next: EncoderConfig): Boolean =
+    next.copy(cropZoom = current.cropZoom) == current
+
+internal fun canReuseSoftwarePreviewState(
+    oldArgb: Any?,
+    currentArgb: Any?,
+    oldSurface: Any?,
+    currentSurface: Any?,
+    oldFormat: String,
+    currentFormat: String,
+    oldWidth: Int,
+    oldHeight: Int,
+    currentWidth: Int,
+    currentHeight: Int,
+): Boolean = oldArgb != null && oldArgb === currentArgb &&
+    oldSurface != null && oldSurface === currentSurface &&
+    oldFormat == currentFormat && oldWidth == currentWidth && oldHeight == currentHeight
+
 /** Sink for diagnostic / lifecycle events delivered back to Dart. */
 interface EncoderEvents {
     fun onEvent(payload: Map<String, Any?>)
@@ -118,14 +136,47 @@ class CameraEncoder(
     @Volatile private var software = false
     @Volatile private var streaming = false   // emit frames to Dart
     @Volatile private var recordToFile = false // mux frames into a local file
-    private val msv1State = CameraMsv1State()
-    private var swMode = "" // "mvs1" | "jpeg"
+    private val softwareSessionGate = CameraSoftwareSessionGate()
+
+    private data class SoftwareCodecSession(
+        val token: CameraSoftwareSessionGate.Token,
+        val msv1State: CameraMsv1State,
+        val previewArgb: IntArray?,
+        val previewSurface: Surface?,
+        val width: Int,
+        val height: Int,
+        val format: String,
+    )
+
+    private data class SoftwareFrameSession(
+        val token: CameraSoftwareSessionGate.Token,
+        val config: EncoderConfig,
+        val recording: Boolean,
+        val recordToFile: Boolean,
+        val streaming: Boolean,
+        val preview: Boolean,
+        val width: Int,
+        val height: Int,
+        val msv1State: CameraMsv1State,
+        val previewArgb: IntArray?,
+        val previewSurface: Surface?,
+    )
+
+    private data class SoftwareMuxSession(
+        val token: CameraSoftwareSessionGate.Token,
+        val width: Int,
+        val height: Int,
+        val fps: Int,
+        val mode: String,
+    )
+
+    @Volatile private var softwareMuxSession: SoftwareMuxSession? = null
+    @Volatile private var softwareCodecSession: SoftwareCodecSession? = null
 
     // Cached H.264 SPS/PPS (CODEC_CONFIG), prepended to each streamed IDR so a
     // late-joining / re-syncing decoder gets the parameter sets.
     private var h264Csd: ByteArray? = null
     private val swFrames = ArrayList<NativeMediaCodec.EncodedFrame>()
-    @Volatile private var swBusy = false
     private var swBytes = 0L
     private var swTruncated = false
     private val swMaxFrames = 600
@@ -407,6 +458,13 @@ class CameraEncoder(
 
     /** Update live params (crop/zoom/aspect/fps) without reopening the camera. */
     fun setConfig(cfg: EncoderConfig) {
+        val previous = config
+        if ((finishing || (encoding && software)) && previous != null &&
+            !isSoftwareCropOnlyChange(previous, cfg)
+        ) {
+            emitInfo("软件编码或收尾期间仅支持调整画面缩放；其余参数请等待停止完成后修改")
+            return
+        }
         config = cfg
         renderer?.setParams(
             sensorOrientation, facingFront, cfg.width, cfg.height, cfg.cropZoom,
@@ -435,7 +493,7 @@ class CameraEncoder(
         issueRepeating()
 
         // Re-evaluate encoded preview against the new codec / resolution.
-        if (previewEncoded) setPreviewMode(true)
+        if (previewEncoded && !(encoding && software) && !finishing) setPreviewMode(true)
     }
 
     fun closeCamera() {
@@ -470,6 +528,10 @@ class CameraEncoder(
     // -------------------------------------------------------------------------
 
     fun startEncoding(cfg: EncoderConfig) {
+        if (finishing) {
+            emitError("正在结束上一次编码")
+            return
+        }
         if (encoding) {
             emitError("已在编码中")
             return
@@ -523,6 +585,7 @@ class CameraEncoder(
 
     /** MSV1 / JPEG software encode via GL offscreen readback. */
     private fun startSoftware(cfg: EncoderConfig) {
+        val token = softwareSessionGate.beginSession()
         config = cfg
         software = true
         streaming = cfg.stream
@@ -534,8 +597,7 @@ class CameraEncoder(
         } else {
             0
         }
-        msv1State.reset(keyIntervalFrames)
-        swMode = cfg.format
+        val sessionMsv1State = CameraMsv1State().apply { reset(keyIntervalFrames) }
         // MSV1 requires 4-aligned dimensions; JPEG just even.
         var w = cfg.width
         var h = cfg.height
@@ -547,12 +609,23 @@ class CameraEncoder(
         }
         encWidth = w
         encHeight = h
+        if (previewEncoded) decodedArgb = IntArray(w * h)
+        softwareCodecSession = SoftwareCodecSession(
+            token,
+            sessionMsv1State,
+            decodedArgb.takeIf { previewEncoded },
+            decodedSurface.takeIf { previewEncoded },
+            w,
+            h,
+            cfg.format,
+        )
+        softwareMuxSession = SoftwareMuxSession(token, w, h, cfg.fps, cfg.format)
         renderer?.setParams(
             sensorOrientation, facingFront, cfg.width, cfg.height, cfg.cropZoom,
         )
         try {
             swFrames.clear()
-            swBusy = false; swBytes = 0L; swTruncated = false
+            swBytes = 0L; swTruncated = false
             _resetStats()
             if (cfg.recordToFile) prepareSoftwareOutputFile(cfg) else outputFile = null
             startCodecThread()
@@ -564,6 +637,17 @@ class CameraEncoder(
         } catch (e: Exception) {
             encoding = false
             software = false
+            streaming = false
+            renderer?.onRgbaFrame = null
+            renderer?.clearSoftwareReadback()
+            softwareSessionGate.invalidate()
+            swFrames.clear()
+            softwareMuxSession = null
+            softwareCodecSession = null
+            previewEncoded = false
+            releaseDecodedTexture()
+            stopCodecThread()
+            emitPreview()
             emitError("启动编码失败: ${e.message}")
         }
     }
@@ -573,64 +657,82 @@ class CameraEncoder(
      * busy). Buffers it for the AVI while recording, and/or decodes it back and
      * draws to the decoded-preview texture while encoded preview is on.
      */
-    private fun handleRgbaFrame(rgba: ByteArray, w: Int, h: Int, ptsNs: Long) {
-        if (swBusy) return
+    private fun handleRgbaFrame(
+        session: SoftwareFrameSession,
+        rgba: ByteArray,
+        ptsNs: Long,
+    ) {
         val ch = codecHandler ?: return
-        val recording = encoding && software
-        val doPreview = previewEncoded
-        if (!recording && !doPreview) return
-        swBusy = true
-        ch.post {
-            try {
-                val cfg = config
-                val fmt = cfg?.format ?: "mvs1"
-                val frame: NativeMediaCodec.EncodedFrame
-                if (fmt == "mvs1") {
-                    // A key frame is the first frame, a periodic refresh, or a
-                    // re-sync request; otherwise a skip (P-)frame when enabled.
-                    frame = msv1State.encode(rgba, cfg?.msv1Skip != false) { previous, forceKey ->
-                        val encoded = CameraSoftwareMedia.encodeMsv1(
-                            rgba,
-                            w,
-                            h,
-                            previous,
-                            cfg?.msv1SkipThr ?: 0,
-                            forceKey,
+        if (!session.recording && !session.preview) return
+        softwareSessionGate.tryAcquire(session.token) {
+            ch.post encodeTask@{
+                try {
+                    if (!softwareSessionGate.isCurrent(session.token)) return@encodeTask
+                    val completedFrame = if (session.config.format == "mvs1") {
+                        session.msv1State.encode(rgba, session.config.msv1Skip) { previous, forceKey ->
+                            val encoded = CameraSoftwareMedia.encodeMsv1(
+                                rgba,
+                                session.width,
+                                session.height,
+                                previous,
+                                session.config.msv1SkipThr,
+                                forceKey,
+                            )
+                            CameraMsv1EncodeResult(encoded, CameraSoftwareMedia.isKey(encoded))
+                        }
+                    } else {
+                        CameraSoftwareMedia.jpegFrame(
+                            JpegCodec.encode(
+                                rgba,
+                                session.width,
+                                session.height,
+                                session.config.jpegQuality,
+                            ),
                         )
-                        CameraMsv1EncodeResult(encoded, CameraSoftwareMedia.isKey(encoded))
                     }
-                } else {
-                    frame = CameraSoftwareMedia.jpegFrame(
-                        JpegCodec.encode(rgba, w, h, cfg?.jpegQuality ?: 80),
-                    )
+                    val encoded = completedFrame.bytes
+                    val isKey = CameraSoftwareMedia.isKey(completedFrame)
+                    val committed = softwareSessionGate.commitIfCurrent(session.token) {
+                        if (session.recording) {
+                            countFrame(encoded, isKey, ptsNs, session.token)
+                            if (session.recordToFile) bufferFrame(completedFrame, session.token)
+                            if (session.streaming) emitFrame(encoded, isKey, session.token)
+                        }
+                    }
+                    if (committed && session.preview &&
+                        softwareSessionGate.isCurrent(session.token)
+                    ) {
+                        drawEncodedPreview(session, encoded)
+                    }
+                } catch (e: Exception) {
+                    softwareSessionGate.commitIfCurrent(session.token) {
+                        emitError("软件编码失败: ${e.message}", session.token)
+                    }
+                } finally {
+                    softwareSessionGate.release(session.token)
                 }
-                val encoded = frame.bytes
-                val isKey = CameraSoftwareMedia.isKey(frame)
-                if (recording) {
-                    countFrame(encoded, isKey, ptsNs)
-                    if (recordToFile) bufferFrame(frame)
-                    if (streaming) emitFrame(encoded, isKey)
-                }
-                if (doPreview) drawEncodedPreview(fmt, encoded, w, h)
-            } catch (e: Exception) {
-                emitError("软件编码失败: ${e.message}")
             }
-            swBusy = false
         }
     }
 
     /** Decode the just-encoded frame and blit it to the decoded-preview surface. */
-    private fun drawEncodedPreview(fmt: String, encoded: ByteArray, w: Int, h: Int) {
-        val s = decodedSurface ?: return
+    private fun drawEncodedPreview(session: SoftwareFrameSession, encoded: ByteArray) {
+        val s = session.previewSurface ?: return
+        val w = session.width
+        val h = session.height
         val bmp: Bitmap = try {
-            if (fmt == "mvs1") {
-                val arr = decodedArgb ?: return
+            if (session.config.format == "mvs1") {
+                val arr = session.previewArgb ?: return
                 CameraSoftwareMedia.decodeMsv1(encoded, w, h, arr)
                 Bitmap.createBitmap(arr, w, h, Bitmap.Config.ARGB_8888)
             } else {
                 BitmapFactory.decodeByteArray(encoded, 0, encoded.size) ?: return
             }
         } catch (_: Exception) {
+            return
+        }
+        if (!softwareSessionGate.isCurrent(session.token)) {
+            bmp.recycle()
             return
         }
         try {
@@ -664,10 +766,36 @@ class CameraEncoder(
             }
             if (!(encoding && software)) { encWidth = w; encHeight = h }
             ensureDecodedTexture(encWidth, encHeight)
-            msv1State.resetPreviousFrame()
             decodedArgb = IntArray(encWidth * encHeight)
         } else {
             releaseDecodedTexture()
+        }
+        if (finishing) {
+            // finishSoftware owns the draining generation and will publish the
+            // requested preview mode after its queue barrier completes.
+            emitPreview()
+            return
+        }
+        if ((encoding && software) || previewEncoded) {
+            val token = softwareSessionGate.beginSession()
+            val keyIntervalFrames = if (cfg!!.format == "mvs1") {
+                Math.max(1, cfg.iFrameIntervalSec) * Math.max(1, cfg.fps)
+            } else {
+                0
+            }
+            val state = CameraMsv1State().apply { reset(keyIntervalFrames) }
+            softwareCodecSession = SoftwareCodecSession(
+                token,
+                state,
+                decodedArgb.takeIf { previewEncoded },
+                decodedSurface.takeIf { previewEncoded },
+                encWidth,
+                encHeight,
+                cfg.format,
+            )
+            softwareMuxSession = softwareMuxSession?.copy(token = token)
+        } else {
+            softwareCodecSession = null
         }
         updateReadbackState()
         emitPreview()
@@ -676,21 +804,37 @@ class CameraEncoder(
     /** Turn the GL offscreen readback + encode callback on/off as needed. */
     private fun updateReadbackState() {
         val cfg = config
+        val token = softwareSessionGate.currentToken()
+        val codecSession = softwareCodecSession
         val softwareFmt = cfg != null && (cfg.format == "mvs1" || cfg.format == "jpeg")
-        val wantSw = softwareFmt && ((encoding && software) || previewEncoded)
+        val wantSw = token != null && codecSession?.token == token && softwareFmt &&
+            ((encoding && software) || previewEncoded)
         if (wantSw) {
             startCodecThread()
-            renderer?.onRgbaFrame = { rgba, w, h, pts -> handleRgbaFrame(rgba, w, h, pts) }
+            val session = SoftwareFrameSession(
+                token = token!!,
+                config = cfg!!,
+                recording = encoding && software,
+                recordToFile = recordToFile,
+                streaming = streaming,
+                preview = previewEncoded,
+                width = encWidth,
+                height = encHeight,
+                msv1State = codecSession!!.msv1State,
+                previewArgb = codecSession.previewArgb,
+                previewSurface = codecSession.previewSurface,
+            )
+            renderer?.onRgbaFrame = { rgba, _, _, pts -> handleRgbaFrame(session, rgba, pts) }
             // Throttle the readback feed to the configured fps (mirrors the H.264
             // encoder-surface throttle set in startH264). Without it the software
             // JPEG/MSV1 encoder ran on every camera frame, so the streamed frame
             // rate followed the camera's AE-floor fps rather than the setting.
-            renderer?.setEncoderTargetFps(cfg?.fps ?: 0)
+            renderer?.setEncoderTargetFps(session.config.fps)
             renderer?.setSoftwareReadback(encWidth, encHeight)
         } else {
             renderer?.onRgbaFrame = null
             renderer?.clearSoftwareReadback()
-            if (!encoding) stopCodecThread()
+            if (!encoding && !finishing) stopCodecThread()
         }
     }
 
@@ -735,7 +879,12 @@ class CameraEncoder(
     }
 
     /** Update live stats for one encoded frame (streaming and/or recording). */
-    private fun countFrame(encoded: ByteArray, isKey: Boolean, ptsNs: Long) {
+    private fun countFrame(
+        encoded: ByteArray,
+        isKey: Boolean,
+        ptsNs: Long,
+        token: CameraSoftwareSessionGate.Token,
+    ) {
         frameCount++
         if (isKey) {
             keyframeCount++
@@ -746,23 +895,31 @@ class CameraEncoder(
         val ptsUs = ptsNs / 1000
         if (firstPtsUs < 0) firstPtsUs = ptsUs
         lastPtsUs = ptsUs
-        maybeEmitStats()
+        maybeEmitStats(token)
     }
 
     /** Buffer one encoded frame for the AVI mux (record-to-file only). */
-    private fun bufferFrame(frame: NativeMediaCodec.EncodedFrame) {
+    private fun bufferFrame(
+        frame: NativeMediaCodec.EncodedFrame,
+        token: CameraSoftwareSessionGate.Token,
+    ) {
         swBytes += frame.bytes.size
         if (swBytes <= swMaxBytes && swFrames.size < swMaxFrames) {
             swFrames.add(frame)
         } else if (!swTruncated) {
             swTruncated = true
-            emitInfo("帧缓冲已达上限，后续帧不再写入文件（编码继续）")
+            emitInfo("帧缓冲已达上限，后续帧不再写入文件（编码继续）", token)
         }
     }
 
     /** Hand one encoded frame to Dart for transmission over the stream. */
-    private fun emitFrame(encoded: ByteArray, isKey: Boolean) {
+    private fun emitFrame(
+        encoded: ByteArray,
+        isKey: Boolean,
+        token: CameraSoftwareSessionGate.Token? = null,
+    ) {
         mainHandler.post {
+            if (token != null && !softwareSessionGate.isCurrent(token)) return@post
             events.onEvent(
                 mapOf("event" to "frame", "data" to encoded, "key" to isKey),
             )
@@ -773,7 +930,7 @@ class CameraEncoder(
      *  stream can recover without a full restart. MSV1 drops skip once; H.264
      *  requests an on-demand sync (IDR) frame from MediaCodec. */
     fun requestKeyframe() {
-        msv1State.requestKeyframe()
+        softwareCodecSession?.msv1State?.requestKeyframe()
         val c = codec
         if (!software && c != null) {
             try {
@@ -808,48 +965,170 @@ class CameraEncoder(
         }
     }
 
+    private fun restoredPreviewSession(
+        token: CameraSoftwareSessionGate.Token,
+        old: SoftwareCodecSession?,
+    ): SoftwareCodecSession {
+        val cfg = config
+        val format = cfg?.format ?: "mvs1"
+        val reusable = old != null && canReuseSoftwarePreviewState(
+            old.previewArgb,
+            decodedArgb,
+            old.previewSurface,
+            decodedSurface,
+            old.format,
+            format,
+            old.width,
+            old.height,
+            encWidth,
+            encHeight,
+        )
+        val state = if (reusable) {
+            old!!.msv1State
+        } else {
+            val keyIntervalFrames = if (format == "mvs1" && cfg != null) {
+                Math.max(1, cfg.iFrameIntervalSec) * Math.max(1, cfg.fps)
+            } else {
+                0
+            }
+            CameraMsv1State().apply { reset(keyIntervalFrames) }
+        }
+        return SoftwareCodecSession(
+            token,
+            state,
+            decodedArgb,
+            decodedSurface,
+            encWidth,
+            encHeight,
+            format,
+        )
+    }
+
     /** Stop software encode, mux the buffered frames into an AVI, emit stopped.
      *  Keeps the readback/encode path alive if encoded preview is still on. */
     private fun finishSoftware() {
         software = false
         streaming = false
+        finishing = true
         val record = recordToFile
         val ch = codecHandler
         val file = if (record) outputFile else null
-        val frames = frameCount
-        val keyframes = keyframeCount
-        val bytes = totalBytes
-        if (ch == null) {
+        val token = softwareSessionGate.currentToken()
+        val muxSession = softwareMuxSession?.takeIf { it.token == token }
+        val codecSessionAtStop = softwareCodecSession?.takeIf { it.token == token }
+        // Detach first. stopAccepting and posting the barrier share the gate
+        // monitor, so an old callback either queues before the barrier or is
+        // rejected. No recording result can slip behind the mux task.
+        renderer?.onRgbaFrame = null
+        renderer?.clearSoftwareReadback()
+        if (ch == null || token == null) {
+            val frames = frameCount
+            val keyframes = keyframeCount
+            val bytes = totalBytes
+            if (token == null) {
+                swFrames.clear()
+                softwareMuxSession = null
+            } else {
+                softwareSessionGate.commitIfCurrent(token) {
+                    swFrames.clear()
+                    softwareMuxSession = null
+                }
+            }
+            finishing = false
+            stopCodecThread()
+            if (previewEncoded) {
+                val nextToken = softwareSessionGate.beginSession()
+                softwareCodecSession = restoredPreviewSession(nextToken, codecSessionAtStop)
+            }
             updateReadbackState()
             _emitStopped(file, frames, keyframes, bytes)
             return
         }
-        // Runs after any queued encode tasks so all frames are muxed.
-        ch.post {
-            if (record) {
-                try {
-                    writeAvi(outputFile)
-                } catch (e: Exception) {
-                    emitError("写入 AVI 失败: ${e.message}")
+        val posted = softwareSessionGate.stopAccepting(token) {
+            ch.post {
+                var frames = frameCount
+                var keyframes = keyframeCount
+                var bytes = totalBytes
+                var muxFrames: List<NativeMediaCodec.EncodedFrame> = emptyList()
+                softwareSessionGate.commitIfCurrent(token) {
+                    frames = frameCount
+                    keyframes = keyframeCount
+                    bytes = totalBytes
+                    if (record) muxFrames = swFrames.toList()
+                    swFrames.clear()
+                    softwareMuxSession = null
+                }
+                if (record && muxSession != null && muxFrames.isNotEmpty()) {
+                    try {
+                        writeAvi(file, muxFrames, muxSession)
+                    } catch (e: Exception) {
+                        if (softwareSessionGate.isCurrent(token)) {
+                            emitError("写入 AVI 失败: ${e.message}", token)
+                        }
+                    }
+                }
+                mainHandler.post finishMain@{
+                    if (!softwareSessionGate.isCurrent(token)) return@finishMain
+                    if (previewEncoded) {
+                        // Preserve MSV1/decoded state but rotate callback ownership.
+                        val nextToken = softwareSessionGate.beginSession()
+                        softwareCodecSession = restoredPreviewSession(nextToken, codecSessionAtStop)
+                    } else {
+                        softwareCodecSession = null
+                    }
+                    finishing = false
+                    updateReadbackState() // stops/invalidate only if preview off
+                    _emitStopped(file, frames, keyframes, bytes)
                 }
             }
-            mainHandler.post {
-                swFrames.clear()
-                updateReadbackState() // stops readback/thread only if preview off
+        }
+        if (!posted) {
+            mainHandler.post failedBarrier@{
+                if (!softwareSessionGate.isCurrent(token)) return@failedBarrier
+                // Deliver while this token is still current; cleanup below will
+                // invalidate it, so an ordinary token-guarded async error would
+                // otherwise be suppressed before reaching Dart.
+                events.onEvent(
+                    mapOf(
+                        "event" to "error",
+                        "message" to "软件编码线程已停止，无法完成 AVI 队列",
+                    ),
+                )
+                if (!softwareSessionGate.isCurrent(token)) return@failedBarrier
+                var frames = frameCount
+                var keyframes = keyframeCount
+                var bytes = totalBytes
+                softwareSessionGate.commitIfCurrent(token) {
+                    frames = frameCount
+                    keyframes = keyframeCount
+                    bytes = totalBytes
+                    swFrames.clear()
+                    softwareMuxSession = null
+                }
+                finishing = false
+                stopCodecThread()
+                if (previewEncoded) {
+                    val nextToken = softwareSessionGate.beginSession()
+                    softwareCodecSession = restoredPreviewSession(nextToken, codecSessionAtStop)
+                }
+                updateReadbackState()
                 _emitStopped(file, frames, keyframes, bytes)
             }
         }
     }
 
-    private fun writeAvi(file: File?) {
-        if (file == null || swFrames.isEmpty()) return
-        val fps = config?.fps ?: 15
+    private fun writeAvi(
+        file: File?,
+        frames: List<NativeMediaCodec.EncodedFrame>,
+        session: SoftwareMuxSession,
+    ) {
+        if (file == null || frames.isEmpty()) return
         val avi = CameraSoftwareMedia.finishAvi(
-            swFrames,
-            encWidth,
-            encHeight,
-            fps,
-            swMode,
+            frames,
+            session.width,
+            session.height,
+            session.fps,
+            session.mode,
         )
         FileOutputStream(file).use { it.write(avi) }
     }
@@ -993,7 +1272,7 @@ class CameraEncoder(
         }
     }
 
-    private fun maybeEmitStats() {
+    private fun maybeEmitStats(token: CameraSoftwareSessionGate.Token? = null) {
         if (frameCount % 10 != 0) return
         val durSec = if (firstPtsUs >= 0) (lastPtsUs - firstPtsUs) / 1_000_000.0 else 0.0
         val fps = if (durSec > 0) frameCount / durSec else 0.0
@@ -1003,6 +1282,7 @@ class CameraEncoder(
         val keyBytes = keyframeBytes
         val lastB = lastFrameBytes
         mainHandler.post {
+            if (token != null && !softwareSessionGate.isCurrent(token)) return@post
             events.onEvent(
                 mapOf(
                     "event" to "stats",
@@ -1041,14 +1321,18 @@ class CameraEncoder(
 
     private fun stopEncodingInternal() {
         encoding = false
+        finishing = false
         streaming = false
         // Software encode teardown (abandon any buffered frames — used on
         // error / camera close, not the normal AVI-writing stop path).
-        if (software) {
+        if (software || softwareSessionGate.currentToken() != null) {
             software = false
             renderer?.onRgbaFrame = null
             renderer?.clearSoftwareReadback()
-            swFrames.clear(); msv1State.resetPreviousFrame()
+            softwareSessionGate.invalidate()
+            softwareMuxSession = null
+            softwareCodecSession = null
+            swFrames.clear()
         }
         renderer?.setPaceEncoder(false, 0)
         renderer?.setEncoderSurface(null, 0, 0)
@@ -1119,6 +1403,9 @@ class CameraEncoder(
     }
 
     private fun stopCodecThread() {
+        softwareSessionGate.invalidate()
+        softwareMuxSession = null
+        softwareCodecSession = null
         codecThread?.quitSafely()
         codecThread = null
         codecHandler = null
@@ -1201,14 +1488,22 @@ class CameraEncoder(
         }
     }
 
-    private fun emitError(message: String) {
+    private fun emitError(
+        message: String,
+        token: CameraSoftwareSessionGate.Token? = null,
+    ) {
         mainHandler.post {
+            if (token != null && !softwareSessionGate.isCurrent(token)) return@post
             events.onEvent(mapOf("event" to "error", "message" to message))
         }
     }
 
-    private fun emitInfo(message: String) {
+    private fun emitInfo(
+        message: String,
+        token: CameraSoftwareSessionGate.Token? = null,
+    ) {
         mainHandler.post {
+            if (token != null && !softwareSessionGate.isCurrent(token)) return@post
             events.onEvent(mapOf("event" to "info", "message" to message))
         }
     }
