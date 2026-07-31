@@ -36,9 +36,16 @@ target_include_directories(honey_media_core
 )
 
 if(MSVC)
-    target_compile_options(honey_media_core PRIVATE /W4 /WX /EHs-c- /GR-)
-else()
+    target_compile_options(honey_media_core PRIVATE
+        /W4 /WX /permissive- /EHs-c- /GR-
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
     target_compile_options(honey_media_core PRIVATE -Wall -Wextra -Wpedantic -Werror -fno-exceptions -fno-rtti)
+else()
+    message(WARNING
+        "honey_media_core strict warnings are not configured for "
+        "${CMAKE_CXX_COMPILER_ID}"
+    )
 endif()
 
 # Cinepak VQ uses ordered IEEE-754 operations as part of its byte-stream
@@ -46,7 +53,7 @@ endif()
 # contraction settings cannot change codebook labels across toolchains.
 if(MSVC)
     target_compile_options(honey_media_core PRIVATE /fp:strict)
-else()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
     target_compile_options(honey_media_core PRIVATE -fno-fast-math -ffp-contract=off)
 endif()
 

@@ -489,7 +489,7 @@ HMC_TEST(avi_rejects_serialized_sizes_before_reading_the_caller_span)
     hmc_avi_muxer_config_t config = make_config(kMsvc, 16u, 65535u, 1u);
     HMC_EXPECT(hmc_avi_muxer_create(&config, &muxer) == HMC_STATUS_OK);
     const std::uint8_t byte = 1u;
-    if (sizeof(std::size_t) > sizeof(std::uint32_t)) {
+    if constexpr (sizeof(std::size_t) > sizeof(std::uint32_t)) {
         HMC_EXPECT(hmc_avi_muxer_add_frame(
             muxer,
             &byte,

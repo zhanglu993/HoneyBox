@@ -5,6 +5,7 @@ add_executable(honey_media_core_tests
     cinepak_encoder_test.cpp
     cinepak_decoder_test.cpp
     msv1_test.cpp
+    malformed_corpus_test.cpp
 )
 
 target_link_libraries(honey_media_core_tests PRIVATE honey_media_core)
@@ -17,6 +18,18 @@ target_compile_definitions(honey_media_core_tests PRIVATE
     HMC_FIXTURE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
     HMC_ENABLE_TEST_HOOKS
 )
+
+if(MSVC)
+    target_compile_definitions(honey_media_core_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(honey_media_core_tests PRIVATE /W4 /WX /permissive-)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
+    target_compile_options(honey_media_core_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+else()
+    message(WARNING
+        "honey_media_core_tests strict warnings are not configured for "
+        "${CMAKE_CXX_COMPILER_ID}"
+    )
+endif()
 
 add_test(NAME honey_media_core_tests COMMAND honey_media_core_tests)
 
@@ -44,6 +57,11 @@ endif()
 
 if(MSVC)
     target_compile_options(honey_media_core_c99_consumer PRIVATE /W4 /WX)
-else()
+elseif(CMAKE_C_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
     target_compile_options(honey_media_core_c99_consumer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+else()
+    message(WARNING
+        "honey_media_core_c99_consumer strict warnings are not configured for "
+        "${CMAKE_C_COMPILER_ID}"
+    )
 endif()

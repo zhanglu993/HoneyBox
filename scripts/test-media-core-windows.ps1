@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo', 'MinSizeRel')]
-    [string]$Configuration = 'Debug'
+    [string[]]$Configuration
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,17 +34,44 @@ if (-not (Test-Path -LiteralPath $ctest)) {
 }
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $sourceDirectory = Join-Path $repositoryRoot 'media_core'
-$buildDirectory = Join-Path $repositoryRoot ("build/media-core-" + $Configuration.ToLowerInvariant())
+$buildDirectory = Join-Path $repositoryRoot 'build/media-core-windows-msvc-x64'
+$configurations = if ($PSBoundParameters.ContainsKey('Configuration')) {
+    @($Configuration)
+}
+else {
+    @('Debug', 'Release')
+}
 
-& $cmake -S $sourceDirectory -B $buildDirectory
+& $cmake `
+    -S $sourceDirectory `
+    -B $buildDirectory `
+    -G 'Visual Studio 17 2022' `
+    -A x64 `
+    -DBUILD_TESTING=ON `
+    -DBUILD_SHARED_LIBS=OFF
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-& $cmake --build $buildDirectory --config $Configuration
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+foreach ($currentConfiguration in $configurations) {
+    Write-Host "Building honey_media_core ($currentConfiguration)..."
+    & $cmake `
+        --build $buildDirectory `
+        --config $currentConfiguration `
+        --parallel
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    Write-Host "Testing honey_media_core ($currentConfiguration)..."
+    & $ctest `
+        --test-dir $buildDirectory `
+        -C $currentConfiguration `
+        --output-on-failure `
+        --no-tests=error
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
-& $ctest --test-dir $buildDirectory -C $Configuration --output-on-failure
-exit $LASTEXITCODE
+exit 0

@@ -141,7 +141,7 @@ std::vector<std::uint8_t> frame(
     std::vector<std::uint8_t> result{flags, 0u, 0u, 0u};
     append_be16(result, width);
     append_be16(result, height);
-    append_be16(result, strips.size());
+    append_be16(result, static_cast<std::uint32_t>(strips.size()));
     for (const auto &value : strips) {
         for (std::uint8_t byte : value) {
             result.push_back(byte);
@@ -364,7 +364,7 @@ HMC_TEST(cinepak_v4_uses_quadrant_index_order_and_row_major_luma)
         Entry{13u, 14u, 15u, 16u, 0u, 0u}};
     std::vector<std::uint8_t> vectors;
     append_be32(vectors, UINT32_C(0x80000000));
-    for (std::uint8_t value : {0u, 1u, 2u, 3u}) {
+    for (std::uint8_t value : std::array<std::uint8_t, 4u>{0u, 1u, 2u, 3u}) {
         vectors.push_back(value);
     }
     const std::vector<std::uint8_t> encoded = frame(
