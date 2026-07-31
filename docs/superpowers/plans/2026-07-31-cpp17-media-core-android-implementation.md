@@ -333,6 +333,34 @@ HMC_API hmc_status_t HMC_CALL hmc_avi_reader_copy_frame(
 HMC_API void HMC_CALL hmc_avi_reader_destroy(hmc_avi_reader_t *reader);
 ```
 
+**Audited legacy AVI contract:**
+
+- Supported writer profiles are exactly `cvid/cvid/24`, `MSVC/MSVC/16`, and
+  `MJPG/MJPG/24`. Width and height are `1..65535`; frame rates are non-zero
+  `num/den` rationals and `usecPerFrame` is the rounded reciprocal.
+- CVID writes `strl.size=116`, quality 0, `biSizeImage=width*height*3`, and an
+  empty suggested buffer size of 0. MSVC writes `strl.size=124`, quality
+  `0xffffffff`, `biSizeImage=width*height*2`, and an empty suggested buffer
+  size of 1. MJPG preserves the same legacy MSVC fields, including the
+  historical `width*height*2` image size, while using 24-bit pixels.
+- `idx1` offsets are measured from the `movi` FOURCC to the `00dc` chunk
+  header; the first offset is 4, odd payload padding advances later offsets,
+  and index sizes exclude padding.
+- The reader is strict except for the historical SoftwareCodec
+  `strl.size=124` overstatement. It accepts that cross-parent declaration only
+  for an otherwise exact 192-byte `hdrl` containing `avih(56)` and the physical
+  `strl + strh(56) + strf(40)` sequence ending at `hdrl_end`, with declared
+  `strl_end==hdrl_end+8`, a checked `LIST/movi` at the physical end, and all
+  MSVC/MJPG profile, quality, dimensions, timing, planes, and image-size
+  discriminators matching. A failed discriminator is malformed data; arbitrary
+  child sizes are never clamped.
+- Raw `idx1` flags are limited to 0 and `0x10` and are exposed separately from
+  normalized frame flags. The muxer accepts only `KEY_KNOWN` or
+  `KEY|KEY_KNOWN`; it never inspects codec bytes to infer keyframes.
+- There is no committed Kotlin MJPG golden in Task 2. Task 3 therefore freezes
+  MJPG with an exact synthetic layout/round-trip test; generating a Kotlin
+  golden remains an explicit follow-up before claiming Kotlin MJPG parity.
+
 - [ ] Write failing tests for config init setting `struct_size == config_size`, V1/tail-zero rules, incremental empty/multi-frame muxing, odd-sized frame padding, invalid rational frame rates, CVID/MSVC/MJPG handler/compression/bit-count combinations, `idx1` offsets/flags, original and normalized frame flags, borrowed/copy frame access, round-trip parsing, truncated chunks, oversized chunk lengths, invalid RIFF signatures, null arguments, NULL-tolerant destroy, and out-of-range `uint32_t` indexes.
 - [ ] Run CTest and confirm failures because AVI functions are absent.
 - [ ] Implement little-endian writer/reader helpers with checked `size_t` addition and multiplication plus malloc/realloc/free-backed no-throw buffers. Do not use throwing STL growth. The muxer owns copies/state incrementally; the reader owns a copy of input bytes, borrowed views remain stable until destroy, and Swift/Node bindings default to `hmc_avi_reader_copy_frame`.

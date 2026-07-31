@@ -65,9 +65,84 @@ typedef struct hmc_bytes_view {
     size_t size;
 } hmc_bytes_view_t;
 
+typedef struct hmc_avi_muxer hmc_avi_muxer_t;
+typedef struct hmc_avi_reader hmc_avi_reader_t;
+
+typedef struct hmc_avi_muxer_config {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t frame_rate_num;
+    uint32_t frame_rate_den;
+    uint32_t handler_fourcc;
+    uint32_t compression_fourcc;
+    uint32_t bit_count;
+} hmc_avi_muxer_config_t;
+
+#define HMC_AVI_MUXER_CONFIG_V1_SIZE UINT32_C(32)
+
+typedef struct hmc_avi_info {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t usec_per_frame;
+    uint32_t frame_rate_num;
+    uint32_t frame_rate_den;
+    uint32_t handler_fourcc;
+    uint32_t compression_fourcc;
+    uint32_t bit_count;
+    uint32_t frame_count;
+} hmc_avi_info_t;
+
+#define HMC_AVI_INFO_V1_SIZE UINT32_C(40)
+
+typedef struct hmc_avi_frame_info {
+    uint32_t struct_size;
+    uint32_t chunk_fourcc;
+    uint32_t avi_index_flags;
+    uint32_t frame_flags;
+} hmc_avi_frame_info_t;
+
+#define HMC_AVI_FRAME_INFO_V1_SIZE UINT32_C(16)
+
 HMC_API uint32_t HMC_CALL hmc_abi_version(void);
 HMC_API const char *HMC_CALL hmc_status_message(hmc_status_t status);
 HMC_API void HMC_CALL hmc_owned_buffer_release(hmc_owned_buffer_t *buffer);
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_config_init(
+    hmc_avi_muxer_config_t *config,
+    uint32_t config_size);
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_create(
+    const hmc_avi_muxer_config_t *config,
+    hmc_avi_muxer_t **muxer);
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_add_frame(
+    hmc_avi_muxer_t *muxer,
+    const uint8_t *data,
+    size_t size,
+    hmc_frame_flags_t frame_flags);
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_finish(
+    hmc_avi_muxer_t *muxer,
+    hmc_owned_buffer_t *output);
+HMC_API void HMC_CALL hmc_avi_muxer_destroy(hmc_avi_muxer_t *muxer);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_create_copy(
+    const uint8_t *data,
+    size_t size,
+    hmc_avi_reader_t **reader);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_info(
+    const hmc_avi_reader_t *reader,
+    hmc_avi_info_t *info);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_frame_info(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_avi_frame_info_t *frame_info);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_frame_view(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_bytes_view_t *frame);
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_copy_frame(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_owned_buffer_t *frame);
+HMC_API void HMC_CALL hmc_avi_reader_destroy(hmc_avi_reader_t *reader);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,7 @@ if(MSVC)
 endif()
 
 add_library(honey_media_core
+    src/avi.cpp
     src/c_api.cpp
 )
 
@@ -38,5 +39,6 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    target_compile_definitions(honey_media_core PRIVATE HMC_ENABLE_TEST_HOOKS)
     add_subdirectory(tests)
 endif()

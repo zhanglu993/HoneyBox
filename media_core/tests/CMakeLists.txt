@@ -1,6 +1,7 @@
 add_executable(honey_media_core_tests
     test_main.cpp
     reference_fixture_test.cpp
+    avi_test.cpp
 )
 
 target_link_libraries(honey_media_core_tests PRIVATE honey_media_core)
@@ -11,6 +12,7 @@ target_include_directories(honey_media_core_tests PRIVATE
 
 target_compile_definitions(honey_media_core_tests PRIVATE
     HMC_FIXTURE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+    HMC_ENABLE_TEST_HOOKS
 )
 
 add_test(NAME honey_media_core_tests COMMAND honey_media_core_tests)

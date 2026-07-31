@@ -1,6 +1,7 @@
 #include "honey_media_core/media_core.h"
 
 #include "core_types.hpp"
+#include "avi.hpp"
 
 #include <cstdlib>
 
@@ -48,4 +49,83 @@ HMC_API void HMC_CALL hmc_owned_buffer_release(hmc_owned_buffer_t *buffer)
     std::free(buffer->data);
     buffer->data = nullptr;
     buffer->size = 0u;
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_config_init(
+    hmc_avi_muxer_config_t *config,
+    uint32_t config_size)
+{
+    return honey::media::avi_muxer_config_init(config, config_size);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_create(
+    const hmc_avi_muxer_config_t *config,
+    hmc_avi_muxer_t **muxer)
+{
+    return honey::media::avi_muxer_create(config, muxer);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_add_frame(
+    hmc_avi_muxer_t *muxer,
+    const uint8_t *data,
+    size_t size,
+    hmc_frame_flags_t frame_flags)
+{
+    return honey::media::avi_muxer_add_frame(muxer, data, size, frame_flags);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_muxer_finish(
+    hmc_avi_muxer_t *muxer,
+    hmc_owned_buffer_t *output)
+{
+    return honey::media::avi_muxer_finish(muxer, output);
+}
+
+HMC_API void HMC_CALL hmc_avi_muxer_destroy(hmc_avi_muxer_t *muxer)
+{
+    honey::media::avi_muxer_destroy(muxer);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_create_copy(
+    const uint8_t *data,
+    size_t size,
+    hmc_avi_reader_t **reader)
+{
+    return honey::media::avi_reader_create_copy(data, size, reader);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_info(
+    const hmc_avi_reader_t *reader,
+    hmc_avi_info_t *info)
+{
+    return honey::media::avi_reader_get_info(reader, info);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_frame_info(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_avi_frame_info_t *frame_info)
+{
+    return honey::media::avi_reader_get_frame_info(reader, index, frame_info);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_get_frame_view(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_bytes_view_t *frame)
+{
+    return honey::media::avi_reader_get_frame_view(reader, index, frame);
+}
+
+HMC_API hmc_status_t HMC_CALL hmc_avi_reader_copy_frame(
+    const hmc_avi_reader_t *reader,
+    uint32_t index,
+    hmc_owned_buffer_t *frame)
+{
+    return honey::media::avi_reader_copy_frame(reader, index, frame);
+}
+
+HMC_API void HMC_CALL hmc_avi_reader_destroy(hmc_avi_reader_t *reader)
+{
+    honey::media::avi_reader_destroy(reader);
 }

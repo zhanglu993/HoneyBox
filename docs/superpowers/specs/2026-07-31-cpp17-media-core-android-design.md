@@ -239,6 +239,30 @@ MSV1 编解码和 Cinepak 编解码分别使用带 init 函数的可扩展配置
 key interval 与 force-key 逻辑完成后产生；所有 stateful reset 返回状态，
 只有 destroy/release 返回 `void` 且接受 NULL。
 
+### 6.2 AVI 历史兼容边界
+
+AVI 首版只接受三种精确 profile：`cvid/cvid/24`、`MSVC/MSVC/16` 和
+`MJPG/MJPG/24`。CVID 保持 `strl.size=116`、quality 0、
+`biSizeImage=width*height*3`；MSVC/MJPG 保持 SoftwareCodec 的历史布局：
+`strl.size=124`、quality `0xffffffff`、空流 suggested buffer 1，其中 MJPG
+虽然是 24-bit，`biSizeImage` 仍保持 `width*height*2`。
+
+SoftwareCodec 的 124 声明比物理 `strl` 内容多 8 字节。reader 不做一般化
+clamp，只在 `hdrl.size=192`、物理内容严格为 `avih(56)` 后接
+`strl + strh(56) + strf(40)`、物理 `strf` 结束恰好等于 `hdrl_end`、声明
+`strl_end=hdrl_end+8`、后续字节是边界有效的 `LIST/movi`，并且
+MSVC/MJPG 的 dimensions、timing、quality、planes 和 image-size 全部一致时
+接受该例外。任一判据不满足都返回 malformed data。
+
+`idx1` 只接受原始 flags 0 或 `0x10`，offset 从 `movi` FOURCC 起算并指向
+`00dc` chunk header；首帧 offset 为 4，奇数 payload 的 pad 计入后续 offset，
+但不计入 index size。容器层只消费调用者给出的 `KEY_KNOWN` 或
+`KEY|KEY_KNOWN`，不读取 codec payload 猜关键帧。
+
+当前 Kotlin fixtures 没有 MJPG golden，因此首版用精确 synthetic
+layout/round-trip 测试冻结上述已审计行为；在生成 Kotlin MJPG golden 之前，
+不得声称 MJPG 已完成 Kotlin 逐字节一致性验证。
+
 ## 7. Android 集成
 
 Android 继续负责：
