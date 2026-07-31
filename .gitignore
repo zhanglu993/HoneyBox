@@ -55,6 +55,7 @@ web/
 coverage/
 
 # Misc
+.worktrees/
 .DS_Store
 *.log
 *.key
