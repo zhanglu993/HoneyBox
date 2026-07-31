@@ -271,6 +271,41 @@ HMC_TEST(msv1_block_order_mask_and_threshold_boundaries_are_exact)
     HMC_EXPECT(flags == HMC_FRAME_FLAG_KEY_KNOWN);
 }
 
+HMC_TEST(msv1_skip_threshold_checks_the_sixteenth_pixel)
+{
+    const auto previous = solid_rgba(4u, 4u, 0u, 0u, 0u);
+    auto changed = previous;
+    const std::size_t last = 15u * 4u;
+    changed[last] = 8u;
+    changed[last + 1u] = 8u;
+    changed[last + 2u] = 8u;
+    std::vector<std::uint8_t> bytes;
+    hmc_frame_flags_t flags = UINT32_C(0xdeadbeef);
+
+    HMC_EXPECT(encode(
+                   encoder_config(4u, 4u, 3u),
+                   changed,
+                   &previous,
+                   HMC_ENCODE_FLAG_NONE,
+                   &bytes,
+                   &flags) == HMC_STATUS_OK);
+    HMC_EXPECT(bytes == std::vector<std::uint8_t>({0x01u, 0x84u, 0x00u, 0x00u}));
+    HMC_EXPECT(flags == HMC_FRAME_FLAG_KEY_KNOWN);
+
+    flags = UINT32_C(0xdeadbeef);
+    HMC_EXPECT(encode(
+                   encoder_config(4u, 4u, 2u),
+                   changed,
+                   &previous,
+                   HMC_ENCODE_FLAG_NONE,
+                   &bytes,
+                   &flags) == HMC_STATUS_OK);
+    HMC_EXPECT(bytes == std::vector<std::uint8_t>(
+                            {0x08u, 0x00u, 0x21u, 0x04u,
+                             0x00u, 0x00u, 0x00u, 0x00u}));
+    HMC_EXPECT(flags == HMC_FRAME_FLAG_KEY_KNOWN);
+}
+
 HMC_TEST(msv1_skip_runs_split_at_1023_blocks)
 {
     std::vector<std::uint8_t> bytes;
@@ -439,6 +474,35 @@ HMC_TEST(msv1_decoder_supports_two_color_eight_color_solid_and_skip)
     }));
 }
 
+HMC_TEST(msv1_eight_color_rejects_every_short_prefix_atomically)
+{
+    const auto config = decoder_config(4u, 4u);
+    const std::array<std::uint8_t, 20u> eight_color = {
+        0x00u, 0x00u, 0x00u, 0x80u, 0x01u, 0x00u, 0x02u, 0x00u, 0x03u, 0x00u,
+        0x04u, 0x00u, 0x05u, 0x00u, 0x06u, 0x00u, 0x07u, 0x00u, 0x00u, 0x00u};
+    const std::vector<std::uint32_t> sentinel(16u, UINT32_C(0x10203040));
+
+    for (std::size_t size = 0u; size < eight_color.size(); ++size) {
+        std::vector<std::uint32_t> pixels = sentinel;
+        HMC_EXPECT(hmc_msv1_decode(
+                       &config,
+                       eight_color.data(),
+                       size,
+                       pixels.data(),
+                       pixels.size()) == HMC_STATUS_MALFORMED_DATA);
+        HMC_EXPECT(pixels == sentinel);
+    }
+
+    std::vector<std::uint32_t> pixels = sentinel;
+    HMC_EXPECT(hmc_msv1_decode(
+                   &config,
+                   eight_color.data(),
+                   eight_color.size(),
+                   pixels.data(),
+                   pixels.size()) == HMC_STATUS_OK);
+    HMC_EXPECT(pixels != sentinel);
+}
+
 HMC_TEST(msv1_rgb555_expansion_covers_zero_one_and_thirty_one)
 {
     const auto config = decoder_config(4u, 4u);
@@ -573,18 +637,22 @@ HMC_TEST(msv1_validates_dimensions_spans_struct_tails_and_flags)
                    &output, &frame_flags) == HMC_STATUS_OK);
     hmc_owned_buffer_release(&output);
     config.struct_size = HMC_MSV1_ENCODER_CONFIG_V1_SIZE - 1u;
+    frame_flags = UINT32_C(0x55667788);
     HMC_EXPECT(hmc_msv1_encode(
                    &config, pixels.data(), pixels.size(), nullptr, 0u, 0u,
                    &output, &frame_flags) == HMC_STATUS_BUFFER_TOO_SMALL);
     HMC_EXPECT(output.data == nullptr && output.size == 0u);
+    HMC_EXPECT(frame_flags == UINT32_C(0x55667788));
 
     config = encoder_config(4u, 4u);
     config.width = UINT32_MAX - 3u;
     config.height = UINT32_MAX - 3u;
+    frame_flags = UINT32_C(0x55667788);
     HMC_EXPECT(hmc_msv1_encode(
                    &config, pixels.data(), pixels.size(), nullptr, 0u, 0u,
                    &output, &frame_flags) == HMC_STATUS_OVERFLOW);
     HMC_EXPECT(output.data == nullptr && output.size == 0u);
+    HMC_EXPECT(frame_flags == UINT32_C(0x55667788));
 
     const auto decode_config = decoder_config(4u, 4u);
     const std::array<std::uint8_t, 4u> solid = {0x00u, 0x80u, 0x00u, 0x00u};
