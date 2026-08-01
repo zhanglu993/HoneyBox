@@ -20,6 +20,17 @@ HERE = Path(__file__).resolve().parent
 WIDTH = 64
 HEIGHT = 32
 FRAME_COUNT = 4
+NEGATIVE_PTS_FRAME_RATE = 4
+NEGATIVE_PTS_COLORS = (
+    (255, 0, 0),
+    (0, 255, 0),
+    (0, 0, 255),
+    (255, 255, 0),
+    (255, 0, 255),
+    (0, 255, 255),
+    (128, 128, 128),
+    (255, 255, 255),
+)
 
 
 def find_ffmpeg() -> str:
@@ -117,6 +128,75 @@ def generate_rotated_mov(ffmpeg: str) -> Path:
     return output
 
 
+def generate_negative_pts_mp4(ffmpeg: str) -> Path:
+    output = HERE / "mf_negative_start.mp4"
+    with tempfile.TemporaryDirectory(prefix="hmw-mf-negative-pts-") as temporary:
+        temporary_path = Path(temporary)
+        raw = temporary_path / "colors.rgb"
+        raw.write_bytes(
+            b"".join(bytes(color) * (WIDTH * HEIGHT) for color in NEGATIVE_PTS_COLORS)
+        )
+        encoded = temporary_path / "encoded.mp4"
+        subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "rgb24",
+                "-video_size",
+                f"{WIDTH}x{HEIGHT}",
+                "-framerate",
+                str(NEGATIVE_PTS_FRAME_RATE),
+                "-i",
+                str(raw),
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                str(len(NEGATIVE_PTS_COLORS)),
+                "-bf",
+                "2",
+                "-x264-params",
+                "b-adapt=0:scenecut=0:keyint=8:min-keyint=8",
+                "-threads",
+                "1",
+                "-fflags",
+                "+bitexact",
+                "-flags:v",
+                "+bitexact",
+                "-map_metadata",
+                "-1",
+                "-movflags",
+                "+negative_cts_offsets",
+                "-use_editlist",
+                "0",
+                "-video_track_timescale",
+                "10000000",
+                "-y",
+                str(encoded),
+            ],
+            check=True,
+        )
+
+        contents = bytearray(encoded.read_bytes())
+        ctts = contents.find(b"ctts")
+        if ctts < 4 or contents[ctts + 4] != 1:
+            raise RuntimeError("expected a version 1 signed ctts box")
+        entry_count = struct.unpack_from(">I", contents, ctts + 8)[0]
+        entry = ctts + 12
+        for _ in range(entry_count):
+            sample_count, offset = struct.unpack_from(">Ii", contents, entry)
+            struct.pack_into(">Ii", contents, entry, sample_count, offset - 5_000_000)
+            entry += 8
+        output.write_bytes(contents)
+    return output
+
+
 def generate_audio_only_wav() -> Path:
     output = HERE / "mf_audio_only.wav"
     with wave.open(str(output), "wb") as writer:
@@ -136,6 +216,11 @@ def digest(path: Path) -> str:
 
 
 if __name__ == "__main__":
-    fixtures = (generate_rotated_mov(find_ffmpeg()), generate_audio_only_wav())
+    ffmpeg = find_ffmpeg()
+    fixtures = (
+        generate_rotated_mov(ffmpeg),
+        generate_negative_pts_mp4(ffmpeg),
+        generate_audio_only_wav(),
+    )
     for fixture in fixtures:
         print(f"{fixture.name} {fixture.stat().st_size} {digest(fixture)}")

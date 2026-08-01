@@ -163,6 +163,18 @@ class MediaFoundationFrameSource final : public FrameSource {
 
   const SourceInfo& info() const override { return info_; }
 
+  Outcome PrimeTimeline() {
+    RgbaFrame first_frame{};
+    Result<bool> read = ReadNext(&first_frame);
+    if (!read.ok()) {
+      return Outcome{std::move(read.error)};
+    }
+    if (*read.value) {
+      pending_first_frame_ = std::move(first_frame);
+    }
+    return Outcome{std::nullopt};
+  }
+
   Result<bool> ReadNext(RgbaFrame* frame) override {
     if (frame == nullptr) {
       return Failure<bool>(Status::kInvalidArgument,
@@ -177,6 +189,11 @@ class MediaFoundationFrameSource final : public FrameSource {
     Result<bool> before_read = read_state_.BeforeRead();
     if (!before_read.ok() || !*before_read.value) {
       return before_read;
+    }
+    if (pending_first_frame_.has_value()) {
+      *frame = std::move(*pending_first_frame_);
+      pending_first_frame_.reset();
+      return Result<bool>{true, std::nullopt};
     }
     for (;;) {
       DWORD actual_stream = 0;
@@ -274,6 +291,7 @@ class MediaFoundationFrameSource final : public FrameSource {
     }
     read_state_.ResetAfterSeek();
     timeline_.BeginSeek(*raw_target.value);
+    pending_first_frame_.reset();
     return Outcome{std::nullopt};
   }
 
@@ -404,6 +422,7 @@ class MediaFoundationFrameSource final : public FrameSource {
   SourceInfo info_;
   internal::VideoLayout layout_;
   LONG default_stride_;
+  std::optional<RgbaFrame> pending_first_frame_;
   internal::MediaTimeline timeline_;
   internal::MediaFoundationReadState read_state_;
 };
@@ -545,10 +564,15 @@ Result<std::unique_ptr<FrameSource>> OpenMediaFoundationSource(
         0,
         false,
     };
-    std::unique_ptr<FrameSource> source =
+    std::unique_ptr<MediaFoundationFrameSource> source =
         std::make_unique<MediaFoundationFrameSource>(
             std::move(*runtime.value), std::move(reader), info,
             *layout.value, default_stride);
+    Outcome primed = source->PrimeTimeline();
+    if (!primed.ok()) {
+      return Result<std::unique_ptr<FrameSource>>{
+          std::nullopt, std::move(primed.error)};
+    }
     return Result<std::unique_ptr<FrameSource>>{std::move(source),
                                                 std::nullopt};
   } catch (const std::bad_alloc&) {

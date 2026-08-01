@@ -42,6 +42,11 @@ std::filesystem::path RotationFixturePath() {
          "mf_rotation_90.mov";
 }
 
+std::filesystem::path NegativePtsFixturePath() {
+  return std::filesystem::path(HMW_TEST_SOURCE_DIR) / "fixtures" /
+         "mf_negative_start.mp4";
+}
+
 std::filesystem::path AudioOnlyFixturePath() {
   return std::filesystem::path(HMW_TEST_SOURCE_DIR) / "fixtures" /
          "mf_audio_only.wav";
@@ -335,6 +340,70 @@ HMW_TEST(media_foundation_source_rotates_real_metadata_upright) {
   HMW_EXPECT(PixelIsNear(frame, 29, 2, 255, 255, 0));
   HMW_EXPECT(PixelIsNear(frame, 2, 61, 255, 0, 0));
   HMW_EXPECT(PixelIsNear(frame, 29, 61, 0, 0, 255));
+}
+
+HMW_TEST(media_foundation_source_negative_start_direct_read_rebases_to_zero) {
+  std::unique_ptr<hmw::FrameSource> source =
+      OpenFixture(NegativePtsFixturePath());
+  if (!source) {
+    return;
+  }
+  hmw::RgbaFrame frame{};
+  hmw::Result<bool> read = source->ReadNext(&frame);
+  PrintError(read);
+  HMW_EXPECT(read.ok() && *read.value);
+  if (!read.ok() || !*read.value) {
+    return;
+  }
+  HMW_EXPECT(frame.pts_100ns == 0);
+  HMW_EXPECT(PixelIsNear(frame, 32, 16, 255, 0, 0));
+}
+
+HMW_TEST(media_foundation_source_immediate_seek_zero_preserves_timeline_head) {
+  std::unique_ptr<hmw::FrameSource> source =
+      OpenFixture(NegativePtsFixturePath());
+  if (!source) {
+    return;
+  }
+  hmw::Outcome seek = source->Seek(0);
+  PrintError(seek);
+  HMW_EXPECT(seek.ok());
+  if (!seek.ok()) {
+    return;
+  }
+  hmw::RgbaFrame frame{};
+  hmw::Result<bool> read = source->ReadNext(&frame);
+  PrintError(read);
+  HMW_EXPECT(read.ok() && *read.value);
+  if (!read.ok() || !*read.value) {
+    return;
+  }
+  HMW_EXPECT(frame.pts_100ns == 0);
+  HMW_EXPECT(PixelIsNear(frame, 32, 16, 255, 0, 0));
+}
+
+HMW_TEST(media_foundation_source_immediate_seek_positive_uses_raw_origin) {
+  std::unique_ptr<hmw::FrameSource> source =
+      OpenFixture(NegativePtsFixturePath());
+  if (!source) {
+    return;
+  }
+  constexpr int64_t kPublicTarget100ns = 5000000;
+  hmw::Outcome seek = source->Seek(kPublicTarget100ns);
+  PrintError(seek);
+  HMW_EXPECT(seek.ok());
+  if (!seek.ok()) {
+    return;
+  }
+  hmw::RgbaFrame frame{};
+  hmw::Result<bool> read = source->ReadNext(&frame);
+  PrintError(read);
+  HMW_EXPECT(read.ok() && *read.value);
+  if (!read.ok() || !*read.value) {
+    return;
+  }
+  HMW_EXPECT(frame.pts_100ns == kPublicTarget100ns);
+  HMW_EXPECT(PixelIsNear(frame, 32, 16, 0, 0, 255));
 }
 
 HMW_TEST(media_foundation_source_reports_nonzero_upright_geometry_and_duration) {
