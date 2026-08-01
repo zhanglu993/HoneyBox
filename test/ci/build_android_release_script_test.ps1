@@ -16,13 +16,31 @@ function New-TestSandbox([ValidateSet('symlink', 'failure')][string]$PubMode) {
     New-Item -ItemType Directory -Force -Path (Join-Path $toolRoot 'jdk17'), (Join-Path $toolRoot 'android-sdk') | Out-Null
     Copy-Item -LiteralPath $sourceScript -Destination (Join-Path $scriptDir 'build-android-release.ps1')
     Set-Content -LiteralPath (Join-Path $repoRoot 'pubspec.yaml') -Encoding ASCII -Value "name: test_app`n"
-    Set-Content -LiteralPath (Join-Path $repoRoot 'pubspec.lock') -Encoding ASCII -Value "packages: {}`n"
+    $lockContent = @'
+packages:
+  sample:
+    dependency: transitive
+    description:
+      name: sample
+      sha256: test-hash
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.0"
+'@
+    Set-Content -LiteralPath (Join-Path $repoRoot 'pubspec.lock') -Encoding ASCII -Value $lockContent
 
     if ($PubMode -eq 'symlink') {
         $pubResult = @'
+if not exist "%~dp0..\..\pub-retry.marker" (
+    echo attempted> "%~dp0..\..\pub-retry.marker"
+    echo Got dependencies!
+    echo Building with plugins requires symlink support. 1>&2
+    exit /b 1
+)
+mkdir "android\app\src\main\java\io\flutter\plugins" 2>nul
+echo generated> "android\app\src\main\java\io\flutter\plugins\GeneratedPluginRegistrant.java"
 echo Got dependencies!
-echo Building with plugins requires symlink support. 1>&2
-exit /b 1
+exit /b 0
 '@
     } else {
         $pubResult = @'
@@ -34,10 +52,18 @@ exit /b 1
     $fakeFlutter = @"
 @echo off
 echo %*>> "%~dp0..\..\flutter-calls.log"
-if "%1 %2 %3"=="pub get --enforce-lockfile" (
-$pubResult
+if not "%PUB_HOSTED_URL%"=="https://pub.dev" (
+    echo Lock source mismatch: %PUB_HOSTED_URL% 1>&2
+    exit /b 65
 )
+if not "%1 %2 %3"=="pub get --enforce-lockfile" goto build_command
+$pubResult
+:build_command
 if "%1 %2 %3 %4"=="build apk --release --no-pub" (
+    if not exist "android\app\src\main\java\io\flutter\plugins\GeneratedPluginRegistrant.java" (
+        echo GeneratedPluginRegistrant.java is missing. 1>&2
+        exit /b 66
+    )
     mkdir "build\app\outputs\apk\release" 2>nul
     echo fake-apk> "build\app\outputs\apk\release\HoneyBox-release.apk"
     exit /b 0
@@ -90,8 +116,9 @@ try {
         throw 'Known symlink fallback must produce the release APK.'
     }
     $calls = Get-Content -LiteralPath $successSandbox.Calls -Raw
-    if ($calls -notmatch 'pub get --enforce-lockfile') {
-        throw 'Build script must prepare dependencies with --enforce-lockfile.'
+    $pubCalls = @([regex]::Matches($calls, '(?m)^pub get --enforce-lockfile\s*$'))
+    if ($pubCalls.Count -ne 2) {
+        throw "Known symlink failure must retry dependency preparation once; observed $($pubCalls.Count) calls."
     }
     if ($calls -notmatch 'build apk --release --no-pub') {
         throw 'Build script must run the release build with --no-pub.'

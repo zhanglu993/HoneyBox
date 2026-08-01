@@ -20,8 +20,7 @@ $pubCache = Join-Path $toolRoot 'pub-cache'
 $pubspec = Join-Path $repoRoot 'pubspec.yaml'
 $lockFile = Join-Path $repoRoot 'pubspec.lock'
 $pubLog = Join-Path $repoRoot 'build\flutter-pub-get.log'
-$registrantRelative = 'android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java'
-$registrant = Join-Path $repoRoot $registrantRelative
+$registrant = Join-Path $repoRoot 'android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java'
 $apkPath = Join-Path $repoRoot 'build\app\outputs\apk\release\HoneyBox-release.apk'
 
 Assert-PathExists $flutter 'Flutter'
@@ -33,12 +32,22 @@ Assert-PathExists $lockFile 'pubspec.lock'
 New-Item -ItemType Directory -Force -Path $pubCache | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $pubLog) | Out-Null
 
+$lockContent = Get-Content -LiteralPath $lockFile -Raw
+$lockHostedUrls = @(
+    [regex]::Matches($lockContent, '(?m)^\s+url:\s+"([^"]+)"\s*$') |
+        ForEach-Object { $_.Groups[1].Value } |
+        Sort-Object -Unique
+)
+if ($lockHostedUrls.Count -ne 1) {
+    throw "pubspec.lock 必须包含唯一的 hosted 依赖源，当前发现：$($lockHostedUrls -join ', ')"
+}
+
 $env:JAVA_HOME = $jdkRoot
 $env:ANDROID_HOME = $androidSdk
 $env:ANDROID_SDK_ROOT = $androidSdk
 $env:FLUTTER_ROOT = Join-Path $toolRoot 'flutter'
 $env:PUB_CACHE = $pubCache
-$env:PUB_HOSTED_URL = 'https://pub.flutter-io.cn'
+$env:PUB_HOSTED_URL = $lockHostedUrls[0]
 $env:FLUTTER_STORAGE_BASE_URL = 'https://storage.flutter-io.cn'
 $env:PATH = "$env:FLUTTER_ROOT\bin;$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$env:PATH"
 
@@ -63,17 +72,21 @@ try {
         if (-not $knownSymlinkFailure) {
             throw "flutter pub get 失败，退出码：$pubExit。日志：$pubLog"
         }
-        Write-Warning '依赖已准备完成；跳过 Windows 桌面插件 symlink 创建。'
+        Write-Warning '依赖已解析，但 Windows 桌面插件 symlink 创建失败；正在重试以生成 Android 插件注册文件。'
+        $previousErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $env:ComSpec /d /s /c $pubCommand | Tee-Object -FilePath $pubLog
+            $pubExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
+        if ($pubExit -ne 0) {
+            throw "flutter pub get 重试失败，退出码：$pubExit。请启用 Windows 开发者模式。日志：$pubLog"
+        }
     }
 
-    if (Test-Path -LiteralPath $registrant) {
-        & git -C $repoRoot check-ignore --quiet -- $registrantRelative
-        if ($LASTEXITCODE -ne 0) {
-            throw "发现旧插件注册文件但它未被 Git 忽略，拒绝删除：$registrant"
-        }
-        Remove-Item -LiteralPath $registrant -Force
-        Write-Host "已清理旧插件注册文件：$registrant"
-    }
+    Assert-PathExists $registrant 'Flutter Android 插件注册文件'
 
     Write-Host '正在编译 Android Release APK...'
     & $flutter build apk --release --no-pub
