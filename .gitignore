@@ -60,6 +60,7 @@ coverage/
 /build_output*.txt
 /gh_*.json
 /gh_*.txt
+/.codex-build-tools.path
 
 # One-off local content migration scripts
 /tool/update_flutter_provider.py

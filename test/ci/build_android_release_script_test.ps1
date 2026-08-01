@@ -5,16 +5,27 @@ if (-not (Test-Path -LiteralPath $sourceScript -PathType Leaf)) {
     throw "Build script is missing: $sourceScript"
 }
 
-function New-TestSandbox([ValidateSet('symlink', 'failure')][string]$PubMode) {
+function New-TestSandbox(
+    [ValidateSet('symlink', 'failure')][string]$PubMode,
+    [switch]$UseToolRootFile
+) {
     $sandboxRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("honeybox-build-script-test-" + [guid]::NewGuid().ToString('N'))
-    $repoRoot = Join-Path $sandboxRoot 'hmi_android_apk'
+    if ($UseToolRootFile) {
+        $repoRoot = Join-Path $sandboxRoot 'checkouts\HoneyBox'
+        $toolRoot = Join-Path $sandboxRoot 'shared-build-tools'
+    } else {
+        $repoRoot = Join-Path $sandboxRoot 'hmi_android_apk'
+        $toolRoot = Join-Path $sandboxRoot '.codex-build-tools'
+    }
     $scriptDir = Join-Path $repoRoot 'tool'
-    $toolRoot = Join-Path $sandboxRoot '.codex-build-tools'
     $flutterBin = Join-Path $toolRoot 'flutter\bin'
 
     New-Item -ItemType Directory -Force -Path $scriptDir, $flutterBin | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $toolRoot 'jdk17'), (Join-Path $toolRoot 'android-sdk') | Out-Null
     Copy-Item -LiteralPath $sourceScript -Destination (Join-Path $scriptDir 'build-android-release.ps1')
+    if ($UseToolRootFile) {
+        Set-Content -LiteralPath (Join-Path $repoRoot '.codex-build-tools.path') -Encoding ASCII -Value $toolRoot
+    }
     Set-Content -LiteralPath (Join-Path $repoRoot 'pubspec.yaml') -Encoding ASCII -Value "name: test_app`n"
     $lockContent = @'
 packages:
@@ -106,7 +117,7 @@ function Invoke-BuildScript([string]$Path) {
     }
 }
 
-$successSandbox = New-TestSandbox -PubMode symlink
+$successSandbox = New-TestSandbox -PubMode symlink -UseToolRootFile
 try {
     $successResult = Invoke-BuildScript $successSandbox.Script
     if ($successResult.ExitCode -ne 0) {

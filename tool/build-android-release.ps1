@@ -12,7 +12,20 @@ function Assert-PathExists([string]$Path, [string]$Description) {
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $workspaceRoot = Split-Path -Parent $repoRoot
-$toolRoot = Join-Path $workspaceRoot '.codex-build-tools'
+$toolRootFile = Join-Path $repoRoot '.codex-build-tools.path'
+if (Test-Path -LiteralPath $toolRootFile -PathType Leaf) {
+    $configuredToolRoot = (Get-Content -LiteralPath $toolRootFile -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($configuredToolRoot)) {
+        throw "工具链路径配置为空：$toolRootFile"
+    }
+    if ([System.IO.Path]::IsPathRooted($configuredToolRoot)) {
+        $toolRoot = [System.IO.Path]::GetFullPath($configuredToolRoot)
+    } else {
+        $toolRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $configuredToolRoot))
+    }
+} else {
+    $toolRoot = Join-Path $workspaceRoot '.codex-build-tools'
+}
 $flutter = Join-Path $toolRoot 'flutter\bin\flutter.bat'
 $jdkRoot = Join-Path $toolRoot 'jdk17'
 $androidSdk = Join-Path $toolRoot 'android-sdk'

@@ -2,7 +2,7 @@
 
 ## 目标
 
-在 `tool/build-android-release.ps1` 提供一个可直接执行的 PowerShell 脚本，用当前仓库旁已安装的 Flutter、JDK 17 和 Android SDK 构建 HoneyBox Release APK。脚本必须适配当前 Windows 未开启开发者模式、用户目录包含中文字符的环境，并且不修改任何受 Git 跟踪的项目文件。
+在 `tool/build-android-release.ps1` 提供一个可直接执行的 PowerShell 脚本，用本机已安装的 Flutter、JDK 17 和 Android SDK 构建 HoneyBox Release APK。脚本必须适配仓库移动、当前 Windows 未开启开发者模式、用户目录包含中文字符的环境，并且不修改任何受 Git 跟踪的项目文件。
 
 ## 调用方式
 
@@ -12,11 +12,11 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tool\build-android-release.ps1
 ```
 
-脚本不接收参数，避免同一仓库出现多套未经验证的构建组合。
+脚本不接收参数。工具链不在仓库同级目录时，在仓库根目录创建被 Git 忽略的 `.codex-build-tools.path`，文件内容为本机工具链目录；这样调用命令保持不变，也不会把开发者电脑的绝对路径提交到仓库。
 
 ## 环境配置
 
-脚本根据自身位置确定仓库根目录，并使用仓库同级目录 `F:\sourcecode\8773EWE\.codex-build-tools` 中的工具链。执行前验证以下文件或目录存在：
+脚本根据自身位置确定仓库根目录。默认使用仓库同级 `.codex-build-tools`；如果存在 `.codex-build-tools.path`，则读取其中的绝对路径或相对仓库根目录的路径。执行前验证以下文件或目录存在：
 
 - Flutter：`.codex-build-tools/flutter/bin/flutter.bat`
 - JDK：`.codex-build-tools/jdk17`
