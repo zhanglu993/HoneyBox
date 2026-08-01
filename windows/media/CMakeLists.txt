@@ -16,7 +16,10 @@ add_subdirectory(
 
 add_library(honey_media_windows_core
   src/channel_contract.cpp
+  src/gif_source.cpp
+  src/png_codec.cpp
   src/rgba_transform.cpp
+  src/wic_helpers.cpp
 )
 
 target_compile_features(honey_media_windows_core PUBLIC cxx_std_17)
@@ -26,7 +29,11 @@ target_include_directories(honey_media_windows_core
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
 )
 
-target_link_libraries(honey_media_windows_core PRIVATE honey_media_core)
+target_link_libraries(honey_media_windows_core PRIVATE
+  honey_media_core
+  ole32
+  windowscodecs
+)
 
 if(MSVC)
   target_compile_options(honey_media_windows_core PRIVATE /W4 /WX /permissive- /EHsc)
