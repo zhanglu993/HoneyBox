@@ -16,6 +16,7 @@ add_subdirectory(
 
 add_library(honey_media_windows_core
   src/channel_contract.cpp
+  src/rgba_transform.cpp
 )
 
 target_compile_features(honey_media_windows_core PUBLIC cxx_std_17)
