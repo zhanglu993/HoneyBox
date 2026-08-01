@@ -1,14 +1,17 @@
-package com.honeygui.honeybox
+package com.honeygui.honeybox.reference
 
-import android.graphics.Bitmap
 import java.io.ByteArrayOutputStream
 
 /**
- * Software MSV1 (Microsoft Video 1, RGB555 16bpp) and JPEG encoders, plus a
- * minimal AVI muxer — ported from the w04_web_app reference (verified against
- * libavcodec/msvideo1.c). Input is top-down RGBA8888.
+ * TEST-ONLY IMMUTABLE MIGRATION REFERENCE. Never ship or import from production.
+ * Source: android/app/src/main/kotlin/com/honeygui/honeybox/SoftwareCodec.kt
+ * Git blob: eb9aa919ffcbad6c708f9654a73fea41e7a1baa9 (JPEG portion intentionally omitted).
+ * Behavioral edits require an intentional fixture review.
+ *
+ * Kotlin reference for MSV1 and its minimal AVI muxer, ported from
+ * the w04_web_app reference (verified against libavcodec/msvideo1.c).
  */
-object SoftwareCodec {
+object LegacyMsv1Codec {
 
     // libavcodec scan order for the 2-color mask bits.
     private val SCAN = intArrayOf(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3)
@@ -127,20 +130,6 @@ object SoftwareCodec {
         for (i in 0 until 16) if (grp[SCAN[i]] == 1) mask = mask or (1 shl i)
         if (mask and 0x8000 != 0) { mask = mask xor 0xffff; val t = cA; cA = cB; cB = t }
         words.add(mask and 0xffff); words.add(cA and 0x7fff); words.add(cB and 0x7fff)
-    }
-
-    /** Encode one JPEG frame from top-down RGBA8888. */
-    fun encodeJpeg(rgba: ByteArray, w: Int, h: Int, quality: Int): ByteArray {
-        val pixels = IntArray(w * h)
-        for (i in 0 until w * h) {
-            val r = rb(rgba, i * 4); val g = rb(rgba, i * 4 + 1); val b = rb(rgba, i * 4 + 2)
-            pixels[i] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
-        }
-        val bmp = Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
-        val bos = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(1, 100), bos)
-        bmp.recycle()
-        return bos.toByteArray()
     }
 
     /**

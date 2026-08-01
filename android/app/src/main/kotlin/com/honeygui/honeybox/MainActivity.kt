@@ -270,7 +270,7 @@ class MainActivity : FlutterActivity() {
     }
 
     // Decode a cached CVID/AVI back into downscaled preview frames (Cinepak is
-    // not decodable by any platform player — see [CinepakDecoder]).
+    // not decodable by any platform player — preview uses the native media core decoder.
     private fun handleDecodeCvid(call: MethodCall, result: MethodChannel.Result) {
         val path = call.argument<String>("path")
         if (path == null) {
