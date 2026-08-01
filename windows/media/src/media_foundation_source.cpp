@@ -1,6 +1,7 @@
 #include "honey_media_windows/media_source.h"
 
 #include "media_foundation_runtime.h"
+#include "media_foundation_source_internal.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -13,7 +14,6 @@
 #include <propvarutil.h>
 #include <wrl/client.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -23,14 +23,12 @@
 #include <new>
 #include <optional>
 #include <utility>
-#include <vector>
 
 namespace hmw {
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr int64_t kHundredNanosecondsPerSecond = 10000000;
 constexpr DWORD kAllStreams =
     static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
 constexpr DWORD kFirstVideoStream =
@@ -117,6 +115,7 @@ Status StatusForOpenFailure(HRESULT result) {
   if (result == MF_E_UNSUPPORTED_BYTESTREAM_TYPE ||
       result == MF_E_UNSUPPORTED_SCHEME || result == MF_E_INVALIDMEDIATYPE ||
       result == MF_E_INVALID_FILE_FORMAT ||
+      result == MF_E_INVALIDSTREAMNUMBER ||
       result == MF_E_TOPO_CODEC_NOT_FOUND ||
       result == MF_E_UNSUPPORTED_REPRESENTATION ||
       result == MF_E_NO_MORE_TYPES) {
@@ -142,116 +141,25 @@ Result<T> MediaFoundationFailure(HRESULT result, Status status,
   return Failure<T>(status, message);
 }
 
-bool CheckedPixelByteCount(uint32_t width, uint32_t height,
-                           size_t* byte_count) {
-  if (width == 0 || height == 0 ||
-      static_cast<size_t>(width) >
-          std::numeric_limits<size_t>::max() / static_cast<size_t>(height)) {
-    return false;
-  }
-  const size_t pixels = static_cast<size_t>(width) * height;
-  if (pixels > std::numeric_limits<size_t>::max() / 4U) {
-    return false;
-  }
-  *byte_count = pixels * 4U;
-  return true;
-}
-
-bool IsSupportedRotation(uint32_t rotation) {
-  return rotation == 0 || rotation == 90 || rotation == 180 ||
-         rotation == 270;
-}
-
-HRESULT GetVisibleOrigin(IMFMediaType* media_type, uint32_t buffer_width,
-                         uint32_t buffer_height, uint32_t visible_width,
-                         uint32_t visible_height, uint32_t* left,
-                         uint32_t* top) {
-  *left = 0;
-  *top = 0;
-  const GUID* aperture_attributes[] = {
-      &MF_MT_MINIMUM_DISPLAY_APERTURE,
-      &MF_MT_GEOMETRIC_APERTURE,
-      &MF_MT_PAN_SCAN_APERTURE,
-  };
-  for (const GUID* attribute : aperture_attributes) {
-    MFVideoArea area{};
-    UINT32 bytes = 0;
-    const HRESULT result = media_type->GetBlob(
-        *attribute, reinterpret_cast<UINT8*>(&area), sizeof(area), &bytes);
-    if (result == MF_E_ATTRIBUTENOTFOUND) {
-      continue;
-    }
-    if (FAILED(result)) {
-      return result;
-    }
-    if (bytes != sizeof(area) || area.OffsetX.value < 0 ||
-        area.OffsetY.value < 0 || area.OffsetX.fract != 0 ||
-        area.OffsetY.fract != 0 || area.Area.cx <= 0 || area.Area.cy <= 0 ||
-        static_cast<uint32_t>(area.Area.cx) != visible_width ||
-        static_cast<uint32_t>(area.Area.cy) != visible_height) {
-      return MF_E_INVALIDMEDIATYPE;
-    }
-    const uint32_t candidate_left =
-        static_cast<uint32_t>(area.OffsetX.value);
-    const uint32_t candidate_top = static_cast<uint32_t>(area.OffsetY.value);
-    if (candidate_left > buffer_width || candidate_top > buffer_height ||
-        visible_width > buffer_width - candidate_left ||
-        visible_height > buffer_height - candidate_top) {
-      return MF_E_INVALIDMEDIATYPE;
-    }
-    *left = candidate_left;
-    *top = candidate_top;
-    return S_OK;
-  }
-  return buffer_width == visible_width && buffer_height == visible_height
-             ? S_OK
-             : MF_E_INVALIDMEDIATYPE;
-}
-
-void MapRotatedPixel(uint32_t output_x, uint32_t output_y,
-                     uint32_t source_width, uint32_t source_height,
-                     uint32_t rotation, uint32_t* source_x,
-                     uint32_t* source_y) {
-  switch (rotation) {
-    case 90:
-      *source_x = output_y;
-      *source_y = source_height - 1U - output_x;
-      return;
-    case 180:
-      *source_x = source_width - 1U - output_x;
-      *source_y = source_height - 1U - output_y;
-      return;
-    case 270:
-      *source_x = source_width - 1U - output_y;
-      *source_y = output_x;
-      return;
-    default:
-      *source_x = output_x;
-      *source_y = output_y;
-      return;
-  }
-}
-
 class MediaFoundationFrameSource final : public FrameSource {
  public:
-  MediaFoundationFrameSource(std::unique_ptr<ComApartment> apartment,
-                             std::shared_ptr<internal::MediaFoundationRuntime>
+  MediaFoundationFrameSource(std::shared_ptr<internal::MediaFoundationRuntime>
                                  runtime,
                              ComPtr<IMFSourceReader> reader, SourceInfo info,
-                             uint32_t source_width, uint32_t source_height,
-                             LONG default_stride, uint32_t source_rotation,
-                             int64_t fallback_frame_duration)
-      : apartment_(std::move(apartment)),
-        runtime_(std::move(runtime)),
+                             internal::VideoLayout layout,
+                             LONG default_stride)
+      : runtime_(std::move(runtime)),
         reader_(std::move(reader)),
         info_(info),
-        source_width_(source_width),
-        source_height_(source_height),
-        buffer_width_(source_width),
-        buffer_height_(source_height),
-        default_stride_(default_stride),
-        source_rotation_(source_rotation),
-        fallback_frame_duration_(fallback_frame_duration) {}
+        layout_(layout),
+        default_stride_(default_stride) {}
+
+  ~MediaFoundationFrameSource() override {
+    ComApartment apartment;
+    (void)apartment.result();
+    reader_.Reset();
+    runtime_.reset();
+  }
 
   const SourceInfo& info() const override { return info_; }
 
@@ -260,8 +168,15 @@ class MediaFoundationFrameSource final : public FrameSource {
       return Failure<bool>(Status::kInvalidArgument,
                            "video output frame must not be null");
     }
-    if (end_of_stream_) {
-      return Result<bool>{false, std::nullopt};
+    ComApartment apartment;
+    if (FAILED(apartment.result())) {
+      return MediaFoundationFailure<bool>(
+          apartment.result(), Status::kDecodeFailed,
+          "COM initialization for video reading failed");
+    }
+    Result<bool> before_read = read_state_.BeforeRead();
+    if (!before_read.ok() || !*before_read.value) {
+      return before_read;
     }
     for (;;) {
       DWORD actual_stream = 0;
@@ -272,9 +187,15 @@ class MediaFoundationFrameSource final : public FrameSource {
           kFirstVideoStream, 0, &actual_stream, &flags,
           &timestamp, &sample);
       if (FAILED(read_result)) {
-        return MediaFoundationFailure<bool>(read_result,
-                                            StatusForReadFailure(read_result),
-                                            "video sample read failed");
+        Result<bool> failure = MediaFoundationFailure<bool>(
+            read_result, StatusForReadFailure(read_result),
+            "video sample read failed");
+        read_state_.Fail(*failure.error);
+        return failure;
+      }
+      Result<bool> observed = read_state_.ObserveFlags(flags);
+      if (!observed.ok() || !*observed.value) {
+        return observed;
       }
       if ((flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0) {
         Outcome refreshed = RefreshOutputFormat();
@@ -282,43 +203,57 @@ class MediaFoundationFrameSource final : public FrameSource {
           return Result<bool>{std::nullopt, std::move(refreshed.error)};
         }
       }
-      if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
-        end_of_stream_ = true;
-        return Result<bool>{false, std::nullopt};
-      }
       if (sample == nullptr) {
         continue;
       }
 
-      int64_t pts = std::max<int64_t>(timestamp, 0);
-      if (seek_floor_.has_value() && pts < *seek_floor_) {
+      if (timeline_.IsPreroll(timestamp)) {
         continue;
       }
-      if (last_pts_ >= 0 && pts < last_pts_) {
-        pts = last_pts_;
+      Result<int64_t> pts = timeline_.AcceptTimestamp(timestamp);
+      if (!pts.ok()) {
+        read_state_.Fail(*pts.error);
+        return Result<bool>{std::nullopt, std::move(pts.error)};
       }
       LONGLONG sample_duration = 0;
-      if (FAILED(sample->GetSampleDuration(&sample_duration)) ||
-          sample_duration <= 0) {
-        sample_duration = fallback_frame_duration_;
+      std::optional<int64_t> reported_duration;
+      if (SUCCEEDED(sample->GetSampleDuration(&sample_duration))) {
+        reported_duration = sample_duration;
       }
 
-      Result<RgbaFrame> converted = ConvertSample(sample.Get(), pts,
-                                                   sample_duration);
+      Result<RgbaFrame> converted = ConvertSample(
+          sample.Get(), *pts.value,
+          internal::NormalizeSampleDuration(reported_duration));
       if (!converted.ok()) {
+        if (converted.error) {
+          read_state_.Fail(*converted.error);
+        }
         return Result<bool>{std::nullopt, std::move(converted.error)};
       }
       *frame = std::move(*converted.value);
-      last_pts_ = pts;
-      seek_floor_.reset();
       return Result<bool>{true, std::nullopt};
     }
   }
 
   Outcome Seek(int64_t pts_100ns) override {
-    if (pts_100ns < 0) {
+    Outcome before_seek = read_state_.BeforeSeek();
+    if (!before_seek.ok()) {
+      return before_seek;
+    }
+    if (pts_100ns > info_.duration_100ns) {
       return Outcome{Error{Status::kInvalidArgument,
-                           "video seek timestamp must not be negative"}};
+                           "video seek timestamp exceeds source duration"}};
+    }
+    Result<int64_t> raw_target = timeline_.RawSeekTarget(pts_100ns);
+    if (!raw_target.ok()) {
+      return Outcome{std::move(raw_target.error)};
+    }
+    ComApartment apartment;
+    if (FAILED(apartment.result())) {
+      return Outcome{MediaFoundationFailure<bool>(
+                         apartment.result(), Status::kDecodeFailed,
+                         "COM initialization for video seeking failed")
+                         .error};
     }
     HRESULT result = reader_->Flush(kFirstVideoStream);
     if (FAILED(result)) {
@@ -329,7 +264,7 @@ class MediaFoundationFrameSource final : public FrameSource {
     }
     ScopedPropVariant position;
     position.get()->vt = VT_I8;
-    position.get()->hVal.QuadPart = pts_100ns;
+    position.get()->hVal.QuadPart = *raw_target.value;
     result = reader_->SetCurrentPosition(GUID_NULL, *position.get());
     if (FAILED(result)) {
       return Outcome{MediaFoundationFailure<bool>(
@@ -337,9 +272,8 @@ class MediaFoundationFrameSource final : public FrameSource {
                          "video source seek failed")
                          .error};
     }
-    end_of_stream_ = false;
-    last_pts_ = -1;
-    seek_floor_ = pts_100ns;
+    read_state_.ResetAfterSeek();
+    timeline_.BeginSeek(*raw_target.value);
     return Outcome{std::nullopt};
   }
 
@@ -352,11 +286,11 @@ class MediaFoundationFrameSource final : public FrameSource {
     if (SUCCEEDED(result)) {
       result = media_type->GetGUID(MF_MT_SUBTYPE, &subtype);
     }
-    uint32_t width = 0;
-    uint32_t height = 0;
-    if (SUCCEEDED(result)) {
-      result = MFGetAttributeSize(media_type.Get(), MF_MT_FRAME_SIZE, &width,
-                                  &height);
+    Result<internal::VideoLayout> layout =
+        internal::ParseVideoLayout(media_type.Get(),
+                                   layout_.clockwise_rotation);
+    if (!layout.ok()) {
+      return Outcome{std::move(layout.error)};
     }
     LONG stride = 0;
     if (SUCCEEDED(result)) {
@@ -364,7 +298,8 @@ class MediaFoundationFrameSource final : public FrameSource {
           MF_MT_DEFAULT_STRIDE, reinterpret_cast<UINT32*>(&stride));
       if (result == MF_E_ATTRIBUTENOTFOUND) {
         result = MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.Data1,
-                                                width, &stride);
+                                                layout.value->coded_width,
+                                                &stride);
       }
     }
     if (FAILED(result)) {
@@ -382,20 +317,12 @@ class MediaFoundationFrameSource final : public FrameSource {
       return Outcome{Error{Status::kDecodeFailed,
                            "video output stride changed to zero"}};
     }
-    uint32_t visible_left = 0;
-    uint32_t visible_top = 0;
-    result = GetVisibleOrigin(media_type.Get(), width, height, source_width_,
-                              source_height_, &visible_left, &visible_top);
-    if (FAILED(result)) {
-      return Outcome{MediaFoundationFailure<bool>(
-                         result, Status::kDecodeFailed,
-                         "video output aperture changed incompatibly")
-                         .error};
+    if (layout.value->visible_width != layout_.visible_width ||
+        layout.value->visible_height != layout_.visible_height) {
+      return Outcome{Error{Status::kDecodeFailed,
+                           "video visible rectangle changed unexpectedly"}};
     }
-    buffer_width_ = width;
-    buffer_height_ = height;
-    visible_left_ = visible_left;
-    visible_top_ = visible_top;
+    layout_ = *layout.value;
     default_stride_ = stride;
     return Outcome{std::nullopt};
   }
@@ -430,7 +357,8 @@ class MediaFoundationFrameSource final : public FrameSource {
                     -static_cast<int64_t>(lock_2d->pitch()))
               : static_cast<uint64_t>(lock_2d->pitch());
       if (FAILED(result) ||
-          pitch_magnitude < static_cast<uint64_t>(buffer_width_) * 4U) {
+          pitch_magnitude <
+              static_cast<uint64_t>(layout_.coded_width) * 4U) {
         return MediaFoundationFailure<RgbaFrame>(
             FAILED(result) ? result : MF_E_INVALIDMEDIATYPE,
             Status::kDecodeFailed, "video 2D sample buffer lock failed");
@@ -447,8 +375,9 @@ class MediaFoundationFrameSource final : public FrameSource {
               ? static_cast<uint64_t>(
                     -static_cast<int64_t>(default_stride_))
               : static_cast<uint64_t>(default_stride_);
-      const uint64_t required = stride_magnitude * buffer_height_;
-      if (stride_magnitude < static_cast<uint64_t>(buffer_width_) * 4U ||
+      const uint64_t required = stride_magnitude * layout_.coded_height;
+      if (stride_magnitude <
+              static_cast<uint64_t>(layout_.coded_width) * 4U ||
           required > lock_contiguous->length()) {
         return Failure<RgbaFrame>(Status::kDecodeFailed,
                                   "video sample stride or size is invalid");
@@ -456,68 +385,27 @@ class MediaFoundationFrameSource final : public FrameSource {
       contiguous_data = lock_contiguous->data();
       contiguous_stride = static_cast<size_t>(stride_magnitude);
     }
-
-    size_t byte_count = 0;
-    if (!CheckedPixelByteCount(info_.width, info_.height, &byte_count)) {
-      return Failure<RgbaFrame>(Status::kDecodeFailed,
-                                "video output dimensions are too large");
+    if (lock_2d) {
+      return internal::ConvertBgraFrame(
+          lock_2d->scanline_zero(), lock_2d->pitch(), layout_, pts, duration);
     }
-    try {
-      RgbaFrame output{info_.width, info_.height, pts, duration,
-                       std::vector<uint8_t>(byte_count)};
-      for (uint32_t y = 0; y < info_.height; ++y) {
-        for (uint32_t x = 0; x < info_.width; ++x) {
-          uint32_t source_x = 0;
-          uint32_t source_y = 0;
-          MapRotatedPixel(x, y, source_width_, source_height_,
-                          source_rotation_, &source_x, &source_y);
-          source_x += visible_left_;
-          source_y += visible_top_;
-          const uint8_t* source_row = nullptr;
-          if (lock_2d) {
-            source_row = lock_2d->scanline_zero() +
-                         static_cast<ptrdiff_t>(source_y) *
-                             static_cast<ptrdiff_t>(lock_2d->pitch());
-          } else {
-            const uint32_t memory_y = default_stride_ >= 0
-                                          ? source_y
-                                          : buffer_height_ - 1U - source_y;
-            source_row = contiguous_data +
-                         static_cast<size_t>(memory_y) * contiguous_stride;
-          }
-          const size_t destination_offset =
-              (static_cast<size_t>(y) * info_.width + x) * 4U;
-          const uint8_t* bgra =
-              source_row + static_cast<size_t>(source_x) * 4U;
-          output.pixels[destination_offset] = bgra[2];
-          output.pixels[destination_offset + 1] = bgra[1];
-          output.pixels[destination_offset + 2] = bgra[0];
-          output.pixels[destination_offset + 3] = 255;
-        }
-      }
-      return Result<RgbaFrame>{std::move(output), std::nullopt};
-    } catch (const std::bad_alloc&) {
-      return Failure<RgbaFrame>(Status::kIoError,
-                                "video frame allocation failed");
-    }
+    const uint8_t* scanline_zero =
+        default_stride_ >= 0
+            ? contiguous_data
+            : contiguous_data +
+                  static_cast<size_t>(layout_.coded_height - 1U) *
+                      contiguous_stride;
+    return internal::ConvertBgraFrame(scanline_zero, default_stride_, layout_,
+                                      pts, duration);
   }
 
-  std::unique_ptr<ComApartment> apartment_;
   std::shared_ptr<internal::MediaFoundationRuntime> runtime_;
   ComPtr<IMFSourceReader> reader_;
   SourceInfo info_;
-  uint32_t source_width_;
-  uint32_t source_height_;
-  uint32_t buffer_width_;
-  uint32_t buffer_height_;
-  uint32_t visible_left_ = 0;
-  uint32_t visible_top_ = 0;
+  internal::VideoLayout layout_;
   LONG default_stride_;
-  uint32_t source_rotation_;
-  int64_t fallback_frame_duration_;
-  int64_t last_pts_ = -1;
-  std::optional<int64_t> seek_floor_;
-  bool end_of_stream_ = false;
+  internal::MediaTimeline timeline_;
+  internal::MediaFoundationReadState read_state_;
 };
 
 HRESULT GetRotation(IMFMediaType* native_type, IMFMediaType* output_type,
@@ -539,10 +427,10 @@ HRESULT GetRotation(IMFMediaType* native_type, IMFMediaType* output_type,
 Result<std::unique_ptr<FrameSource>> OpenMediaFoundationSource(
     const std::filesystem::path& path) {
   try {
-    auto apartment = std::make_unique<ComApartment>();
-    if (FAILED(apartment->result())) {
+    ComApartment apartment;
+    if (FAILED(apartment.result())) {
       return MediaFoundationFailure<std::unique_ptr<FrameSource>>(
-          apartment->result(), Status::kDecodeFailed,
+          apartment.result(), Status::kDecodeFailed,
           "COM initialization for video decoding failed");
     }
     Result<std::shared_ptr<internal::MediaFoundationRuntime>> runtime =
@@ -599,11 +487,15 @@ Result<std::unique_ptr<FrameSource>> OpenMediaFoundationSource(
 
     ComPtr<IMFMediaType> output_type;
     result = reader->GetCurrentMediaType(kFirstVideoStream, &output_type);
-    uint32_t source_width = 0;
-    uint32_t source_height = 0;
+    uint32_t rotation = 0;
     if (SUCCEEDED(result)) {
-      result = MFGetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE,
-                                  &source_width, &source_height);
+      result = GetRotation(native_type.Get(), output_type.Get(), &rotation);
+    }
+    Result<internal::VideoLayout> layout =
+        internal::ParseVideoLayout(output_type.Get(), rotation);
+    if (!layout.ok()) {
+      return Result<std::unique_ptr<FrameSource>>{
+          std::nullopt, std::move(layout.error)};
     }
     LONG default_stride = 0;
     if (SUCCEEDED(result)) {
@@ -611,16 +503,11 @@ Result<std::unique_ptr<FrameSource>> OpenMediaFoundationSource(
           MF_MT_DEFAULT_STRIDE, reinterpret_cast<UINT32*>(&default_stride));
       if (result == MF_E_ATTRIBUTENOTFOUND) {
         result = MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.Data1,
-                                                source_width,
+                                                layout.value->coded_width,
                                                 &default_stride);
       }
     }
-    uint32_t rotation = 0;
-    if (SUCCEEDED(result)) {
-      result = GetRotation(native_type.Get(), output_type.Get(), &rotation);
-    }
-    if (FAILED(result) || source_width == 0 || source_height == 0 ||
-        default_stride == 0 || !IsSupportedRotation(rotation)) {
+    if (FAILED(result) || default_stride == 0) {
       return MediaFoundationFailure<std::unique_ptr<FrameSource>>(
           FAILED(result) ? result : MF_E_INVALIDMEDIATYPE,
           Status::kDecodeFailed,
@@ -641,30 +528,15 @@ Result<std::unique_ptr<FrameSource>> OpenMediaFoundationSource(
           "Media Foundation returned invalid video duration");
     }
 
-    uint32_t frame_rate_numerator = 0;
-    uint32_t frame_rate_denominator = 0;
-    result = MFGetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE,
-                                 &frame_rate_numerator,
-                                 &frame_rate_denominator);
-    if (FAILED(result) || frame_rate_numerator == 0 ||
-        frame_rate_denominator == 0) {
-      return MediaFoundationFailure<std::unique_ptr<FrameSource>>(
-          FAILED(result) ? result : MF_E_INVALIDMEDIATYPE,
-          Status::kDecodeFailed,
-          "Media Foundation returned invalid video frame rate");
-    }
-
     const bool swaps_dimensions = rotation == 90 || rotation == 270;
     const uint32_t output_width =
-        swaps_dimensions ? source_height : source_width;
+        swaps_dimensions ? layout.value->visible_height
+                         : layout.value->visible_width;
     const uint32_t output_height =
-        swaps_dimensions ? source_width : source_height;
+        swaps_dimensions ? layout.value->visible_width
+                         : layout.value->visible_height;
     const double nominal_fps =
-        static_cast<double>(frame_rate_numerator) / frame_rate_denominator;
-    const int64_t fallback_frame_duration =
-        std::max<int64_t>(
-            1, static_cast<int64_t>(kHundredNanosecondsPerSecond /
-                                    nominal_fps));
+        internal::ReadNominalFrameRate(output_type.Get());
     const SourceInfo info{
         output_width,
         output_height,
@@ -675,9 +547,8 @@ Result<std::unique_ptr<FrameSource>> OpenMediaFoundationSource(
     };
     std::unique_ptr<FrameSource> source =
         std::make_unique<MediaFoundationFrameSource>(
-            std::move(apartment), std::move(*runtime.value),
-            std::move(reader), info, source_width, source_height,
-            default_stride, rotation, fallback_frame_duration);
+            std::move(*runtime.value), std::move(reader), info,
+            *layout.value, default_stride);
     return Result<std::unique_ptr<FrameSource>>{std::move(source),
                                                 std::nullopt};
   } catch (const std::bad_alloc&) {

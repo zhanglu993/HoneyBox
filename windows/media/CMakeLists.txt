@@ -19,6 +19,7 @@ add_library(honey_media_windows_core
   src/gif_source.cpp
   src/media_foundation_runtime.cpp
   src/media_foundation_source.cpp
+  src/media_foundation_source_internal.cpp
   src/media_source_factory.cpp
   src/png_codec.cpp
   src/rgba_transform.cpp

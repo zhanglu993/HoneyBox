@@ -1,5 +1,7 @@
 #include "honey_media_windows/media_source.h"
 
+#include "media_source_factory_internal.h"
+
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -29,6 +31,31 @@ bool HasGifSignature(const std::array<uint8_t, 6>& signature) {
 
 }  // namespace
 
+namespace internal {
+
+Result<bool> ValidateMediaFileStatus(
+    const std::filesystem::file_status& file_status,
+    const std::error_code& error) {
+  if (error) {
+    return Failure<bool>(
+        error == std::errc::no_such_file_or_directory ? Status::kNotFound
+                                                       : Status::kIoError,
+        error == std::errc::no_such_file_or_directory
+            ? "media source was not found"
+            : "media source status query failed");
+  }
+  if (!std::filesystem::exists(file_status)) {
+    return Failure<bool>(Status::kNotFound, "media source was not found");
+  }
+  if (!std::filesystem::is_regular_file(file_status)) {
+    return Failure<bool>(Status::kUnsupportedMedia,
+                         "media source is not a regular file");
+  }
+  return Result<bool>{true, std::nullopt};
+}
+
+}  // namespace internal
+
 Result<std::unique_ptr<FrameSource>> OpenMediaSource(
     const std::filesystem::path& path) {
   if (path.empty()) {
@@ -38,18 +65,10 @@ Result<std::unique_ptr<FrameSource>> OpenMediaSource(
   std::error_code error;
   const std::filesystem::file_status status =
       std::filesystem::status(path, error);
-  if (error == std::errc::no_such_file_or_directory ||
-      !std::filesystem::exists(status)) {
-    return Failure<std::unique_ptr<FrameSource>>(
-        Status::kNotFound, "media source was not found");
-  }
-  if (error) {
-    return Failure<std::unique_ptr<FrameSource>>(
-        Status::kIoError, "media source status query failed");
-  }
-  if (!std::filesystem::is_regular_file(status)) {
-    return Failure<std::unique_ptr<FrameSource>>(
-        Status::kUnsupportedMedia, "media source is not a regular file");
+  Result<bool> valid_status = internal::ValidateMediaFileStatus(status, error);
+  if (!valid_status.ok()) {
+    return Result<std::unique_ptr<FrameSource>>{
+        std::nullopt, std::move(valid_status.error)};
   }
 
   std::ifstream stream(path, std::ios::binary);

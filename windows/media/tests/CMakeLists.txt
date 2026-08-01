@@ -9,6 +9,7 @@ add_executable(honey_media_windows_tests
 
 target_include_directories(honey_media_windows_tests PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../include"
+  "${CMAKE_CURRENT_LIST_DIR}/../src"
 )
 
 target_compile_features(honey_media_windows_tests PRIVATE cxx_std_17)
@@ -34,4 +35,4 @@ add_test(NAME channel_contract COMMAND honey_media_windows_tests channel_contrac
 add_test(NAME rgba_transform COMMAND honey_media_windows_tests rgba_transform)
 add_test(NAME status_contract COMMAND honey_media_windows_tests status_contract)
 add_test(NAME wic_media COMMAND honey_media_windows_tests wic_media)
-add_test(NAME media_foundation_source COMMAND honey_media_windows_tests source)
+add_test(NAME media_foundation_source COMMAND honey_media_windows_tests media_foundation_source)
