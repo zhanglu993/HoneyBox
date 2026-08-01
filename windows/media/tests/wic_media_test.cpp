@@ -12,6 +12,8 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include "../src/wic_metadata_internal.h"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -185,6 +187,53 @@ hmw::Result<hmw::RgbaFrame> DecodePngWithWic(
 }
 
 }  // namespace
+
+HMW_TEST(wic_media_gif_ui1_metadata_rejects_ui2) {
+  PROPVARIANT correct{};
+  correct.vt = VT_UI1;
+  correct.bVal = 3;
+  uint32_t output = 0;
+  HMW_EXPECT(SUCCEEDED(hmw::internal::GifUnsignedMetadataValue(
+      correct, VT_UI1, &output)));
+  HMW_EXPECT(output == 3);
+
+  PROPVARIANT wrong{};
+  wrong.vt = VT_UI2;
+  wrong.uiVal = 3;
+  HMW_EXPECT(FAILED(hmw::internal::GifUnsignedMetadataValue(
+      wrong, VT_UI1, &output)));
+}
+
+HMW_TEST(wic_media_gif_ui2_metadata_rejects_ui1) {
+  PROPVARIANT correct{};
+  correct.vt = VT_UI2;
+  correct.uiVal = 15;
+  uint32_t output = 0;
+  HMW_EXPECT(SUCCEEDED(hmw::internal::GifUnsignedMetadataValue(
+      correct, VT_UI2, &output)));
+  HMW_EXPECT(output == 15);
+
+  PROPVARIANT wrong{};
+  wrong.vt = VT_UI1;
+  wrong.bVal = 15;
+  HMW_EXPECT(FAILED(hmw::internal::GifUnsignedMetadataValue(
+      wrong, VT_UI2, &output)));
+}
+
+HMW_TEST(wic_media_gif_boolean_metadata_rejects_ui1) {
+  PROPVARIANT correct{};
+  correct.vt = VT_BOOL;
+  correct.boolVal = VARIANT_TRUE;
+  bool output = false;
+  HMW_EXPECT(SUCCEEDED(
+      hmw::internal::GifBooleanMetadataValue(correct, &output)));
+  HMW_EXPECT(output);
+
+  PROPVARIANT wrong{};
+  wrong.vt = VT_UI1;
+  wrong.bVal = 1;
+  HMW_EXPECT(FAILED(hmw::internal::GifBooleanMetadataValue(wrong, &output)));
+}
 
 HMW_TEST(wic_media_png_round_trip_preserves_rgba_and_dimensions) {
   const hmw::RgbaFrame original{2, 2, 0, 0, {

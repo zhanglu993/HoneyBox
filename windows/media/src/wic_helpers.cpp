@@ -8,6 +8,8 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include "wic_metadata_internal.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +22,68 @@
 #include <vector>
 
 namespace hmw::internal {
+
+HRESULT GifUnsignedMetadataValue(const PROPVARIANT& value,
+                                 VARTYPE expected_type, uint32_t* output) {
+  if (value.vt != expected_type) {
+    return WINCODEC_ERR_UNEXPECTEDMETADATATYPE;
+  }
+  switch (value.vt) {
+    case VT_UI1:
+      *output = value.bVal;
+      return S_OK;
+    case VT_UI2:
+      *output = value.uiVal;
+      return S_OK;
+    case VT_UI4:
+      *output = value.ulVal;
+      return S_OK;
+    case VT_UI8:
+      if (value.uhVal.QuadPart <= std::numeric_limits<uint32_t>::max()) {
+        *output = static_cast<uint32_t>(value.uhVal.QuadPart);
+        return S_OK;
+      }
+      return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+    case VT_I1:
+      if (value.cVal >= 0) {
+        *output = static_cast<uint32_t>(value.cVal);
+        return S_OK;
+      }
+      break;
+    case VT_I2:
+      if (value.iVal >= 0) {
+        *output = static_cast<uint32_t>(value.iVal);
+        return S_OK;
+      }
+      break;
+    case VT_I4:
+      if (value.lVal >= 0) {
+        *output = static_cast<uint32_t>(value.lVal);
+        return S_OK;
+      }
+      break;
+    case VT_I8:
+      if (value.hVal.QuadPart >= 0 &&
+          static_cast<uint64_t>(value.hVal.QuadPart) <=
+              std::numeric_limits<uint32_t>::max()) {
+        *output = static_cast<uint32_t>(value.hVal.QuadPart);
+        return S_OK;
+      }
+      break;
+    default:
+      break;
+  }
+  return WINCODEC_ERR_UNEXPECTEDMETADATATYPE;
+}
+
+HRESULT GifBooleanMetadataValue(const PROPVARIANT& value, bool* output) {
+  if (value.vt != VT_BOOL) {
+    return WINCODEC_ERR_UNEXPECTEDMETADATATYPE;
+  }
+  *output = value.boolVal != VARIANT_FALSE;
+  return S_OK;
+}
+
 namespace {
 
 using Microsoft::WRL::ComPtr;
@@ -111,56 +175,8 @@ HRESULT CreateFactory(ComPtr<IWICImagingFactory>* factory) {
                               factory->ReleaseAndGetAddressOf()));
 }
 
-HRESULT UnsignedValue(const PROPVARIANT& value, uint32_t* output) {
-  switch (value.vt) {
-    case VT_UI1:
-      *output = value.bVal;
-      return S_OK;
-    case VT_UI2:
-      *output = value.uiVal;
-      return S_OK;
-    case VT_UI4:
-      *output = value.ulVal;
-      return S_OK;
-    case VT_UI8:
-      if (value.uhVal.QuadPart <= std::numeric_limits<uint32_t>::max()) {
-        *output = static_cast<uint32_t>(value.uhVal.QuadPart);
-        return S_OK;
-      }
-      return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-    case VT_I1:
-      if (value.cVal >= 0) {
-        *output = static_cast<uint32_t>(value.cVal);
-        return S_OK;
-      }
-      break;
-    case VT_I2:
-      if (value.iVal >= 0) {
-        *output = static_cast<uint32_t>(value.iVal);
-        return S_OK;
-      }
-      break;
-    case VT_I4:
-      if (value.lVal >= 0) {
-        *output = static_cast<uint32_t>(value.lVal);
-        return S_OK;
-      }
-      break;
-    case VT_I8:
-      if (value.hVal.QuadPart >= 0 &&
-          static_cast<uint64_t>(value.hVal.QuadPart) <=
-              std::numeric_limits<uint32_t>::max()) {
-        *output = static_cast<uint32_t>(value.hVal.QuadPart);
-        return S_OK;
-      }
-      break;
-    default:
-      break;
-  }
-  return WINCODEC_ERR_UNEXPECTEDMETADATATYPE;
-}
-
 HRESULT QueryUnsigned(IWICMetadataQueryReader* reader, const wchar_t* name,
+                      VARTYPE expected_type,
                       std::optional<uint32_t>* output) {
   output->reset();
   ScopedPropVariant value;
@@ -173,7 +189,8 @@ HRESULT QueryUnsigned(IWICMetadataQueryReader* reader, const wchar_t* name,
     return result;
   }
   uint32_t converted = 0;
-  const HRESULT conversion = UnsignedValue(value.value(), &converted);
+  const HRESULT conversion =
+      GifUnsignedMetadataValue(value.value(), expected_type, &converted);
   if (SUCCEEDED(conversion)) {
     *output = converted;
   }
@@ -192,22 +209,13 @@ HRESULT QueryBoolean(IWICMetadataQueryReader* reader, const wchar_t* name,
   if (FAILED(result)) {
     return result;
   }
-  if (value.value().vt == VT_BOOL) {
-    *output = value.value().boolVal != VARIANT_FALSE;
-    return S_OK;
-  }
-  uint32_t converted = 0;
-  const HRESULT conversion = UnsignedValue(value.value(), &converted);
-  if (SUCCEEDED(conversion)) {
-    *output = converted != 0;
-  }
-  return conversion;
+  return GifBooleanMetadataValue(value.value(), output);
 }
 
 HRESULT RequiredUnsigned(IWICMetadataQueryReader* reader, const wchar_t* name,
-                         uint32_t* output) {
+                         VARTYPE expected_type, uint32_t* output) {
   std::optional<uint32_t> value;
-  const HRESULT result = QueryUnsigned(reader, name, &value);
+  const HRESULT result = QueryUnsigned(reader, name, expected_type, &value);
   if (FAILED(result)) {
     return result;
   }
@@ -454,11 +462,11 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
     uint32_t canvas_height = 0;
     if (SUCCEEDED(result)) {
       result = RequiredUnsigned(logical_reader.Get(), L"/logscrdesc/Width",
-                                &canvas_width);
+                                VT_UI2, &canvas_width);
     }
     if (SUCCEEDED(result)) {
       result = RequiredUnsigned(logical_reader.Get(), L"/logscrdesc/Height",
-                                &canvas_height);
+                                VT_UI2, &canvas_height);
     }
     size_t canvas_bytes = 0;
     if (FAILED(result) || canvas_width == 0 || canvas_height == 0 ||
@@ -476,6 +484,7 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
     if (SUCCEEDED(result)) {
       result = QueryUnsigned(logical_reader.Get(),
                              L"/logscrdesc/BackgroundColorIndex",
+                             VT_UI1,
                              &background_index);
     }
     if (FAILED(result)) {
@@ -530,16 +539,20 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
       uint32_t width = 0;
       uint32_t height = 0;
       if (SUCCEEDED(result)) {
-        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Left", &left);
+        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Left", VT_UI2,
+                                  &left);
       }
       if (SUCCEEDED(result)) {
-        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Top", &top);
+        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Top", VT_UI2,
+                                  &top);
       }
       if (SUCCEEDED(result)) {
-        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Width", &width);
+        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Width", VT_UI2,
+                                  &width);
       }
       if (SUCCEEDED(result)) {
-        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Height", &height);
+        result = RequiredUnsigned(frame_reader.Get(), L"/imgdesc/Height", VT_UI2,
+                                  &height);
       }
       if (FAILED(result) || width == 0 || height == 0 ||
           left > canvas_width || top > canvas_height ||
@@ -559,9 +572,11 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
       std::optional<uint32_t> disposal;
       std::optional<uint32_t> transparent_index;
       bool has_transparency = false;
-      result = QueryUnsigned(frame_reader.Get(), L"/grctlext/Delay", &delay);
+      result = QueryUnsigned(frame_reader.Get(), L"/grctlext/Delay", VT_UI2,
+                             &delay);
       if (SUCCEEDED(result)) {
         result = QueryUnsigned(frame_reader.Get(), L"/grctlext/Disposal",
+                               VT_UI1,
                                &disposal);
       }
       if (SUCCEEDED(result)) {
@@ -572,6 +587,7 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
       if (SUCCEEDED(result)) {
         result = QueryUnsigned(frame_reader.Get(),
                                L"/grctlext/TransparentColorIndex",
+                               VT_UI1,
                                &transparent_index);
       }
       if (FAILED(result)) {
