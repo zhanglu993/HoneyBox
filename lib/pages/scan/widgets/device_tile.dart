@@ -11,6 +11,9 @@ class DeviceTile extends StatelessWidget {
   final bool isConnecting;
   final VoidCallback? onConnect;
 
+  /// 虚拟调试设备:在标签行额外显示一枚橙色"调试"徽标以示区分。
+  final bool debug;
+
   const DeviceTile({
     super.key,
     required this.deviceId,
@@ -19,6 +22,7 @@ class DeviceTile extends StatelessWidget {
     this.connectable = true,
     this.isConnecting = false,
     this.onConnect,
+    this.debug = false,
   });
 
   @override
@@ -70,6 +74,13 @@ class DeviceTile extends StatelessWidget {
                           label: connectable ? '可连接' : '不可连接',
                           color: connectable ? cs.secondary : cs.outline,
                         ),
+                        if (debug) ...[
+                          const SizedBox(width: 6),
+                          const _Tag(
+                            label: '调试',
+                            color: Color(0xFFF57C00), // Colors.orange[700]
+                          ),
+                        ],
                       ],
                     ),
                   ],

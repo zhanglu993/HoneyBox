@@ -391,6 +391,19 @@ class EncoderService {
   Future<void> setPreviewMode(bool encoded) =>
       _method.invokeMethod('setPreviewMode', {'encoded': encoded});
 
+  /// Snapshot the current GL frame (post crop/zoom/rotation) and return the
+  /// JPEG bytes. Independent of the streaming pipeline — works whether or not
+  /// encoding is active. Returns null if the native side signals an error.
+  Future<Uint8List?> takePicture() async {
+    try {
+      final result = await _method.invokeMethod<Uint8List>('takePicture');
+      return result;
+    } on PlatformException catch (e) {
+      onError?.call(e.message ?? '拍照失败');
+      return null;
+    }
+  }
+
   /// Release the native camera and stop listening for events.
   Future<void> dispose() async {
     await _eventSub?.cancel();

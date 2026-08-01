@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import 'ble_cmd_registry.dart';
+
 /// L2 real-time video-stream protocol (CMD_STREAM = 0x0E).
 ///
 /// Ported from the w04_web_app reference implementation. Runs over a separate
@@ -13,15 +15,10 @@ import 'package:flutter/foundation.dart' show debugPrint;
 /// This layer is transport-agnostic: it sends via a [SendL2] callback and is
 /// fed inbound notifications through [onNotify], so it works over BLE today and
 /// any future transport (e.g. WiFi) unchanged.
-
-// ── Command / key constants ────────────────────────────────────────────────
-const int cmdStream = 0x0E;
-const int ksOpen = 0x01; // App → Dev  open session
-const int ksAck = 0x02; // Dev → App  open ack (+ initial credits)
-const int ksFrame = 0x03; // App → Dev  frame data chunk (consumes 1 credit)
-const int ksClose = 0x04; // App → Dev  close session
-const int ksCredit = 0x05; // Dev → App  credit top-up (flow control)
-const int ksReport = 0x06; // Dev → App  frame gap report / completion
+///
+/// CMD / key 值集中定义在 `ble_cmd_registry.dart`:CMD 字节走 [BleCmd.stream],
+/// 子命令 key 走 [BleCmdStreamKey](顶层类,能用于 switch case 的 const 表达式)。
+/// 本文件只保留编码语义常量([StreamCodec])。
 
 /// Stream codec identifiers (negotiated in KS_OPEN).
 class StreamCodec {
@@ -49,7 +46,7 @@ Uint8List buildL2Cmd(int cmd, int key, List<int> value) {
 
 /// KS_OPEN value: `sid u8, codec u8, width u16LE, height u16LE, fps u8`.
 Uint8List buildStreamOpen(int sid, int codec, int w, int h, int fps) {
-  return buildL2Cmd(cmdStream, ksOpen, [
+  return buildL2Cmd(BleCmd.stream, BleCmdStreamKey.open, [
     sid & 0xFF,
     codec & 0xFF,
     w & 0xFF,
@@ -61,7 +58,7 @@ Uint8List buildStreamOpen(int sid, int codec, int w, int h, int fps) {
 }
 
 Uint8List buildStreamClose(int sid) =>
-    buildL2Cmd(cmdStream, ksClose, [sid & 0xFF]);
+    buildL2Cmd(BleCmd.stream, BleCmdStreamKey.close, [sid & 0xFF]);
 
 /// KS_FRAME value: `frame_seq u16BE, byte_offset u24BE, total_len u24BE, data`.
 Uint8List buildStreamChunk(int seq, int off, int total, Uint8List data) {
@@ -75,7 +72,7 @@ Uint8List buildStreamChunk(int seq, int off, int total, Uint8List data) {
   out[6] = (total >> 8) & 0xFF;
   out[7] = total & 0xFF;
   out.setRange(8, 8 + data.length, data);
-  return buildL2Cmd(cmdStream, ksFrame, out);
+  return buildL2Cmd(BleCmd.stream, BleCmdStreamKey.frame, out);
 }
 
 /// Sends a complete raw L2 message over the active transport.
@@ -248,16 +245,16 @@ class StreamSession {
 
   /// Feed a raw inbound L2 notification (from FFC5).
   void onNotify(Uint8List l2) {
-    if (l2.length < 5 || l2[0] != cmdStream) return;
+    if (l2.length < 5 || l2[0] != BleCmd.stream) return;
     final key = l2[2];
     final vlen = _u16be(l2[3], l2[4]);
     final v = Uint8List.sublistView(l2, 5, (5 + vlen).clamp(5, l2.length));
 
-    if (key == ksAck && _state == StreamState.opening) {
+    if (key == BleCmdStreamKey.ack && _state == StreamState.opening) {
       _onAck(v, vlen);
-    } else if (key == ksCredit) {
+    } else if (key == BleCmdStreamKey.credit) {
       _onCredit(v);
-    } else if (key == ksReport) {
+    } else if (key == BleCmdStreamKey.report) {
       _onReport(v);
     } else {
       debugPrint('流/收到未知下行 key=0x${key.toRadixString(16)} vlen=$vlen');

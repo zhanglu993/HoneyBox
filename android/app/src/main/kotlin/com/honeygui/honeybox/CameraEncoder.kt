@@ -390,6 +390,57 @@ class CameraEncoder(
         )
     }
 
+    /**
+     * Snapshot the current GL frame (post crop / zoom / rotation), JPEG-encode
+     * it at the preview resolution, and hand the bytes back on [callback] on
+     * the main thread. Independent of the streaming pipeline — safe to invoke
+     * whether or not encoding is active.
+     */
+    fun takePicture(callback: (ByteArray?, String?) -> Unit) {
+        val gl = renderer
+        if (gl == null || cameraDevice == null) {
+            mainHandler.post { callback(null, "相机未打开") }
+            return
+        }
+        val w = previewSize.width
+        val h = previewSize.height
+        // Time out on the main thread if no GL frame arrives (e.g. camera stall
+        // right after open). The snapshot request lives on the GL handler; if
+        // the callback fires later we just ignore it (already handled).
+        val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
+        val timeout = Runnable {
+            if (delivered.compareAndSet(false, true)) callback(null, "拍照超时")
+        }
+        mainHandler.postDelayed(timeout, 1500)
+        gl.snapshotRgba(w, h) { rgba, rw, rh ->
+            if (!delivered.compareAndSet(false, true)) return@snapshotRgba
+            mainHandler.removeCallbacks(timeout)
+            try {
+                val ints = IntArray(rw * rh)
+                var i = 0
+                var p = 0
+                while (i < rw * rh) {
+                    val r = rgba[p].toInt() and 0xFF
+                    val g = rgba[p + 1].toInt() and 0xFF
+                    val b = rgba[p + 2].toInt() and 0xFF
+                    val a = rgba[p + 3].toInt() and 0xFF
+                    // Bitmap.Config.ARGB_8888 int layout: 0xAARRGGBB.
+                    ints[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+                    i++
+                    p += 4
+                }
+                val bmp = Bitmap.createBitmap(ints, rw, rh, Bitmap.Config.ARGB_8888)
+                val bos = java.io.ByteArrayOutputStream(rw * rh)
+                bmp.compress(Bitmap.CompressFormat.JPEG, 90, bos)
+                bmp.recycle()
+                val bytes = bos.toByteArray()
+                mainHandler.post { callback(bytes, null) }
+            } catch (e: Exception) {
+                mainHandler.post { callback(null, "JPEG 编码失败: ${e.message}") }
+            }
+        }
+    }
+
     /** Display-space visible width/height fractions after crop + zoom. */
     private fun visibleFraction(): Pair<Double, Double> {
         val cfg = config ?: return 1.0 to 1.0

@@ -1,5 +1,11 @@
 import 'dart:typed_data';
 
+import 'ble_cmd_registry.dart';
+
+/// Watch time sync (CMD 0x02) frame builder.
+///
+/// CMD / key 值集中在 `ble_cmd_registry.dart`:CMD 字节走 [BleCmd.watchTime],
+/// 子命令 key 走 [BleCmdWatchTimeKey]。
 class WatchTimeProtocol {
   WatchTimeProtocol._();
 
@@ -23,9 +29,9 @@ class WatchTimeProtocol {
         localTime.second;
 
     return Uint8List.fromList([
-      0x02,
+      BleCmd.watchTime,
       0x00,
-      0x01,
+      BleCmdWatchTimeKey.setTime,
       0x00,
       0x04,
       (packed >> 24) & 0xFF,

@@ -1,14 +1,15 @@
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'ble_cmd_registry.dart';
+
 enum WatchBindResult { success, failed }
 
 class WatchBindProtocol {
   WatchBindProtocol._();
 
-  static const int command = 0x03;
-  static const int bindRequestKey = 0x01;
-  static const int bindResponseKey = 0x02;
+  // CMD / key 值集中在 `ble_cmd_registry.dart`:CMD 字节走 [BleCmd.watchBind],
+  // 子命令 key 走 [BleCmdWatchBindKey]。
   static const int userIdLength = 32;
 
   static final Uint8List processUserId = generateUserId();
@@ -30,9 +31,9 @@ class WatchBindProtocol {
     }
 
     final frame = Uint8List(5 + userIdLength);
-    frame[0] = command;
+    frame[0] = BleCmd.watchBind;
     frame[1] = 0x00;
-    frame[2] = bindRequestKey;
+    frame[2] = BleCmdWatchBindKey.bindRequest;
     frame[3] = 0x00;
     frame[4] = userIdLength;
     frame.setRange(5, frame.length, userId);
@@ -41,9 +42,9 @@ class WatchBindProtocol {
 
   static WatchBindResult? parseResponse(Uint8List frame) {
     if (frame.length != 6 ||
-        frame[0] != command ||
+        frame[0] != BleCmd.watchBind ||
         frame[1] != 0x00 ||
-        frame[2] != bindResponseKey ||
+        frame[2] != BleCmdWatchBindKey.bindResponse ||
         frame[3] != 0x00 ||
         frame[4] != 0x01) {
       return null;

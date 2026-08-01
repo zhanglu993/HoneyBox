@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../providers/ble_provider.dart';
+import '../../../services/watch_health_repository.dart';
 import 'watch_health_data.dart';
 
 enum WatchHealthSyncPhase { idle, syncing, success, failure }
@@ -17,7 +19,7 @@ class WatchHealthState {
     this.errorMessage,
   });
 
-  WatchHealthTrend? get trend => snapshot?.trends[period];
+  WatchHealthTrend? get trend => snapshot?.trend(period);
 
   WatchHealthState copyWith({
     WatchHealthSyncPhase? phase,
@@ -74,7 +76,12 @@ class WatchHealthNotifier extends StateNotifier<WatchHealthState> {
 }
 
 final watchHealthRepositoryProvider = Provider<WatchHealthRepository>((ref) {
-  return const MockWatchHealthRepository();
+  final bleManager = ref.read(bleManagerProvider);
+  return WatchHealthBleRepository(
+    commandAvailable: () => bleManager.commandAvailable,
+    sendCommand: bleManager.sendCommand,
+    notifications: bleManager.commandNotifications,
+  );
 });
 
 final watchHealthProvider = StateNotifierProvider.autoDispose

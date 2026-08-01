@@ -130,6 +130,21 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
 
+                "takePicture" -> {
+                    val enc = encoder
+                    if (enc == null) {
+                        result.error("no_camera", "相机未打开", null)
+                    } else {
+                        enc.takePicture { bytes, err ->
+                            if (bytes != null) {
+                                result.success(bytes)
+                            } else {
+                                result.error("capture_failed", err ?: "拍照失败", null)
+                            }
+                        }
+                    }
+                }
+
                 else -> result.notImplemented()
             }
         }

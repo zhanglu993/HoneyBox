@@ -55,7 +55,7 @@ class AppDrawer extends StatelessWidget {
             ),
           ),
           Divider(height: 1, color: cs.outline.withValues(alpha: 0.3)),
-          // ── Bottom: check Gitee for a newer release, then the app version
+          // ── Bottom: check GitHub for a newer release, then the app version
           // (kept clear of the nav-gesture inset) ──
           SafeArea(
             top: false,

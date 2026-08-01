@@ -53,6 +53,22 @@ web/
 
 # Testing
 coverage/
+/.playwright-cli/
+
+# Local build and CI inspection output
+/output/
+/build_output*.txt
+/gh_*.json
+/gh_*.txt
+
+# One-off local content migration scripts
+/tool/update_flutter_provider.py
+/tool/update_html.py
+/tool/update_notification_html.py
+/tool/update_samples.py
+
+# Local design and implementation notes
+/docs/superpowers/
 
 # Misc
 .worktrees/

@@ -88,6 +88,15 @@ class GlRenderer(
     private var rbBuffer: ByteBuffer? = null
     var onRgbaFrame: ((ByteArray, Int, Int, Long) -> Unit)? = null
 
+    // One-shot snapshot request. When non-null, the next drawFrame() renders the
+    // current camera frame to a temporary pbuffer of size [snapW]×[snapH], reads
+    // it back top-down, invokes the callback with the RGBA bytes, then clears
+    // the request. Independent of [softwareMode] so single-shot capture works
+    // regardless of whether streaming is on.
+    private var pendingSnapshot: ((ByteArray, Int, Int) -> Unit)? = null
+    private var snapW = 0
+    private var snapH = 0
+
     // Render params (output aspect / crop / rotation), updated via setParams.
     @Volatile private var sensorOrientation = 90
     @Volatile private var mirror = false
@@ -243,6 +252,25 @@ class GlRenderer(
         }
     }
 
+    /**
+     * One-shot snapshot: on the next drawn camera frame, render at [w]×[h] into
+     * a temporary offscreen pbuffer, read back top-down RGBA, and invoke
+     * [callback] on the GL thread with (rgba, w, h). The pbuffer is released
+     * before the callback returns. Overwrites any pending snapshot.
+     *
+     * Independent of [softwareMode] — safe to call whether or not streaming is
+     * active. If no camera frame arrives within a reasonable window, the caller
+     * should time out on its side (this method does not schedule its own timer).
+     */
+    fun snapshotRgba(w: Int, h: Int, callback: (ByteArray, Int, Int) -> Unit) {
+        val hh = handler ?: return
+        hh.post {
+            pendingSnapshot = callback
+            snapW = w
+            snapH = h
+        }
+    }
+
     fun release() {
         val h = handler
         val t = thread
@@ -314,6 +342,10 @@ class GlRenderer(
                     renderReadback(core, ts)
                 }
             }
+            pendingSnapshot?.let { cb ->
+                pendingSnapshot = null
+                runSnapshot(core, cb, snapW, snapH)
+            }
         } catch (e: Exception) {
             onError("渲染失败: ${e.message}")
         }
@@ -339,6 +371,41 @@ class GlRenderer(
             System.arraycopy(bottomUp, (rbH - 1 - y) * stride, topDown, y * stride, stride)
         }
         cb(topDown, rbW, rbH, presentNs)
+    }
+
+    /**
+     * One-shot snapshot render. Creates a temp pbuffer at [w]×[h], renders the
+     * current OES texture through the same crop/scale/rotation transform, reads
+     * back top-down RGBA, releases the pbuffer, and invokes [cb]. Errors are
+     * swallowed silently (the caller's timeout handles the miss).
+     */
+    private fun runSnapshot(
+        core: EglCore,
+        cb: (ByteArray, Int, Int) -> Unit,
+        w: Int,
+        h: Int,
+    ) {
+        if (w <= 0 || h <= 0) return
+        var target: EGLSurface? = null
+        try {
+            target = core.createOffscreenSurface(w, h)
+            renderTo(core, target, w, h, presentNs = 0L, swap = false)
+            val stride = w * 4
+            val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
+            GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
+            val bottomUp = ByteArray(w * h * 4)
+            buf.position(0)
+            buf.get(bottomUp)
+            val topDown = ByteArray(w * h * 4)
+            for (y in 0 until h) {
+                System.arraycopy(bottomUp, (h - 1 - y) * stride, topDown, y * stride, stride)
+            }
+            cb(topDown, w, h)
+        } catch (e: Exception) {
+            onError("拍照失败: ${e.message}")
+        } finally {
+            target?.let { egl?.releaseSurface(it) }
+        }
     }
 
     private fun renderTo(

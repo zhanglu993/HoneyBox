@@ -38,7 +38,7 @@ class UpdateInfo {
   });
 }
 
-/// Checks the project's **public** GitHub repository for a newer release APK and
+/// Checks the project's **public** Gitee repository for a newer release APK and
 /// downloads it. The repo is public, so the Releases API is read anonymously —
 /// no access token is embedded in the shipped app.
 class UpdateService {
@@ -47,9 +47,22 @@ class UpdateService {
   static const String _owner = 'realmcu';
   static const String _repo = 'HoneyBox';
 
-  /// GitHub Releases API — latest release of the repo.
+  /// Gitee Releases API — latest release of the repo.
   static const String _latestReleaseApi =
-      'https://api.github.com/repos/$_owner/$_repo/releases/latest';
+      'https://gitee.com/api/v5/repos/$_owner/$_repo/releases/latest';
+
+  /// Selects the download URL of the first asset whose name ends with `.apk`
+  /// (case-insensitive) and has a non-empty URL. Ignores Gitee's auto-attached
+  /// source archives (`.zip` / `.tar.gz`). Returns '' when none qualifies.
+  static String pickApkUrl(List<dynamic> assets) {
+    for (final asset in assets) {
+      if (asset is! Map) continue;
+      final name = (asset['name'] as String? ?? '').toLowerCase();
+      final url = asset['browser_download_url'] as String? ?? '';
+      if (name.endsWith('.apk') && url.isNotEmpty) return url;
+    }
+    return '';
+  }
 
   /// Queries the latest release and compares it with [currentVersion].
   /// Throws on network / parse errors so the caller can surface them.
@@ -61,7 +74,7 @@ class UpdateService {
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final resp = await req.close();
       if (resp.statusCode != 200) {
-        throw HttpException('GitHub 返回状态码 ${resp.statusCode}');
+        throw HttpException('Gitee 返回状态码 ${resp.statusCode}');
       }
       final body = await resp.transform(utf8.decoder).join();
       final json = jsonDecode(body) as Map<String, dynamic>;
@@ -70,16 +83,7 @@ class UpdateService {
       final latest = tag.replaceFirst(RegExp(r'^[vV]'), '');
       final notes = (json['body'] as String? ?? '').trim();
 
-      String apkUrl = '';
-      for (final asset in (json['assets'] as List<dynamic>? ?? const [])) {
-        if (asset is! Map) continue;
-        final name = (asset['name'] as String? ?? '').toLowerCase();
-        final url = asset['browser_download_url'] as String? ?? '';
-        if (name == 'honeybox.apk' && url.isNotEmpty) {
-          apkUrl = url;
-          break;
-        }
-      }
+      final apkUrl = pickApkUrl(json['assets'] as List<dynamic>? ?? const []);
 
       return UpdateInfo(
         latestVersion: latest.isEmpty ? currentVersion : latest,

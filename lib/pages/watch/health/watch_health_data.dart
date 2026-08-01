@@ -1,163 +1,267 @@
 enum WatchHealthPeriod { day, week, month }
 
-class WatchHealthTrend {
-  final String label;
-  final String summary;
-  final List<String> labels;
-  final List<int> steps;
-  final List<int> heartRates;
-
-  const WatchHealthTrend({
-    required this.label,
-    required this.summary,
-    required this.labels,
+class WatchSportRecord {
+  const WatchSportRecord({
+    required this.date,
+    required this.offset,
+    required this.mode,
     required this.steps,
-    required this.heartRates,
+    required this.activeMinutes,
+    required this.caloriesMilliKcal,
+    required this.distanceMeters,
   });
 
-  int get averageHeartRate =>
-      (heartRates.reduce((sum, value) => sum + value) / heartRates.length)
-          .round();
+  final DateTime date;
+  final int offset;
+  final int mode;
+  final int steps;
+  final int activeMinutes;
+  final int caloriesMilliKcal;
+  final int distanceMeters;
+
+  DateTime get timestamp => date.add(Duration(minutes: offset * 15));
+}
+
+class WatchSleepRecord {
+  const WatchSleepRecord({
+    required this.date,
+    required this.minutes,
+    required this.mode,
+  });
+
+  final DateTime date;
+  final int minutes;
+  final int mode;
+
+  DateTime get timestamp => date.add(Duration(minutes: minutes));
+}
+
+class WatchHeartRateRecord {
+  const WatchHeartRateRecord({
+    required this.date,
+    required this.seconds,
+    required this.bpm,
+  });
+
+  final DateTime date;
+  final int seconds;
+  final int bpm;
+
+  DateTime get timestamp => date.add(Duration(seconds: seconds));
 }
 
 class WatchSleepStage {
+  const WatchSleepStage({
+    required this.mode,
+    required this.name,
+    required this.minutes,
+  });
+
+  final int mode;
   final String name;
   final int minutes;
-
-  const WatchSleepStage(this.name, this.minutes);
 }
 
-class WatchHealthRecord {
-  final WatchHealthRecordType type;
-  final String title;
-  final String subtitle;
-  final String value;
-
-  const WatchHealthRecord({
-    required this.type,
-    required this.title,
-    required this.subtitle,
-    required this.value,
+class WatchHealthTrendPoint {
+  const WatchHealthTrendPoint({
+    required this.label,
+    required this.steps,
+    required this.heartRate,
   });
+
+  final String label;
+  final int steps;
+  final int? heartRate;
 }
 
-enum WatchHealthRecordType { heartRate, activity, milestone }
+class WatchHealthTrend {
+  const WatchHealthTrend({
+    required this.label,
+    required this.summary,
+    required this.points,
+  });
+
+  final String label;
+  final String summary;
+  final List<WatchHealthTrendPoint> points;
+}
 
 class WatchHealthSnapshot {
-  final int batteryPercent;
-  final DateTime syncedAt;
-  final int steps;
-  final int stepGoal;
-  final int heartRate;
-  final int minimumHeartRate;
-  final int maximumHeartRate;
-  final int sleepMinutes;
-  final int activeMinutes;
-  final int vigorousMinutes;
-  final String sleepRange;
-  final List<WatchSleepStage> sleepStages;
-  final Map<WatchHealthPeriod, WatchHealthTrend> trends;
-  final List<WatchHealthRecord> records;
-
-  const WatchHealthSnapshot({
-    required this.batteryPercent,
+  WatchHealthSnapshot.fromRecords({
     required this.syncedAt,
-    required this.steps,
-    required this.stepGoal,
-    required this.heartRate,
-    required this.minimumHeartRate,
-    required this.maximumHeartRate,
-    required this.sleepMinutes,
-    required this.activeMinutes,
-    required this.vigorousMinutes,
-    required this.sleepRange,
-    required this.sleepStages,
-    required this.trends,
-    required this.records,
-  });
+    required List<WatchSportRecord> sportRecords,
+    required List<WatchSleepRecord> sleepRecords,
+    required List<WatchHeartRateRecord> heartRateRecords,
+  })  : sportRecords = List.unmodifiable(sportRecords),
+        sleepRecords = List.unmodifiable(sleepRecords),
+        heartRateRecords = List.unmodifiable(heartRateRecords);
+
+  final DateTime syncedAt;
+  final List<WatchSportRecord> sportRecords;
+  final List<WatchSleepRecord> sleepRecords;
+  final List<WatchHeartRateRecord> heartRateRecords;
+
+  DateTime get _today => DateTime(syncedAt.year, syncedAt.month, syncedAt.day);
+
+  Iterable<WatchSportRecord> get _todaySport =>
+      sportRecords.where((record) => _sameDate(record.date, _today));
+
+  List<WatchHeartRateRecord> get _todayHeartRates => heartRateRecords
+      .where((record) => _sameDate(record.date, _today) && record.bpm > 0)
+      .toList()
+    ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+  int get steps => _todaySport.fold(0, (sum, record) => sum + record.steps);
+
+  int get distanceMeters =>
+      _todaySport.fold(0, (sum, record) => sum + record.distanceMeters);
+
+  double get caloriesKcal => _todaySport.fold(
+        0,
+        (sum, record) => sum + record.caloriesMilliKcal / 1000,
+      );
+
+  int get activeMinutes =>
+      _todaySport.fold(0, (sum, record) => sum + record.activeMinutes);
+
+  int? get latestHeartRate =>
+      _todayHeartRates.isEmpty ? null : _todayHeartRates.last.bpm;
+
+  int? get minimumHeartRate => _todayHeartRates.isEmpty
+      ? null
+      : _todayHeartRates.map((record) => record.bpm).reduce(_min);
+
+  int? get maximumHeartRate => _todayHeartRates.isEmpty
+      ? null
+      : _todayHeartRates.map((record) => record.bpm).reduce(_max);
+
+  List<WatchSleepStage> get sleepStages {
+    final records = _sortedSleepRecords();
+    final totals = <int, int>{};
+    for (var i = 0; i + 1 < records.length; i++) {
+      final current = records[i];
+      final duration = records[i + 1].timestamp.difference(current.timestamp);
+      if ((current.mode == 1 || current.mode == 2) && duration.inMinutes > 0) {
+        totals.update(
+          current.mode,
+          (value) => value + duration.inMinutes,
+          ifAbsent: () => duration.inMinutes,
+        );
+      }
+    }
+    return [
+      if ((totals[1] ?? 0) > 0)
+        WatchSleepStage(mode: 1, name: '深睡', minutes: totals[1]!),
+      if ((totals[2] ?? 0) > 0)
+        WatchSleepStage(mode: 2, name: '浅睡', minutes: totals[2]!),
+    ];
+  }
+
+  int get sleepMinutes =>
+      sleepStages.fold(0, (sum, stage) => sum + stage.minutes);
+
+  String? get sleepRange {
+    final records = _sortedSleepRecords();
+    final startIndex =
+        records.indexWhere((record) => record.mode == 1 || record.mode == 2);
+    if (startIndex < 0) return null;
+    final endIndex = records.indexWhere(
+      (record) => record.mode == 3,
+      startIndex + 1,
+    );
+    if (endIndex < 0) return null;
+    return '${_time(records[startIndex].timestamp)} - ${_time(records[endIndex].timestamp)}';
+  }
+
+  WatchHealthTrend trend(WatchHealthPeriod period) {
+    return switch (period) {
+      WatchHealthPeriod.day => _dayTrend(),
+      WatchHealthPeriod.week => _dailyTrend(7, '近 7 天'),
+      WatchHealthPeriod.month => _dailyTrend(30, '近 30 天'),
+    };
+  }
+
+  WatchHealthTrend _dayTrend() {
+    final points = <WatchHealthTrendPoint>[];
+    for (var slot = 0; slot < 6; slot++) {
+      final startHour = slot * 4;
+      final endHour = startHour + 4;
+      final steps = _todaySport
+          .where((record) =>
+              record.offset >= startHour * 4 && record.offset < endHour * 4)
+          .fold(0, (sum, record) => sum + record.steps);
+      final heartRates = _todayHeartRates
+          .where((record) =>
+              record.timestamp.hour >= startHour &&
+              record.timestamp.hour < endHour)
+          .map((record) => record.bpm)
+          .toList();
+      points.add(WatchHealthTrendPoint(
+        label: '$startHour时',
+        steps: steps,
+        heartRate: _average(heartRates),
+      ));
+    }
+    return WatchHealthTrend(
+      label: '今天 · 分时趋势',
+      summary: '今日累计 ${_number(steps)} 步',
+      points: List.unmodifiable(points),
+    );
+  }
+
+  WatchHealthTrend _dailyTrend(int days, String label) {
+    final firstDay = _today.subtract(Duration(days: days - 1));
+    final points = <WatchHealthTrendPoint>[];
+    for (var i = 0; i < days; i++) {
+      final date = firstDay.add(Duration(days: i));
+      final daySteps = sportRecords
+          .where((record) => _sameDate(record.date, date))
+          .fold(0, (sum, record) => sum + record.steps);
+      final heartRates = heartRateRecords
+          .where((record) => _sameDate(record.date, date) && record.bpm > 0)
+          .map((record) => record.bpm)
+          .toList();
+      points.add(WatchHealthTrendPoint(
+        label: '${date.month}/${date.day}',
+        steps: daySteps,
+        heartRate: _average(heartRates),
+      ));
+    }
+    final totalSteps = points.fold(0, (sum, point) => sum + point.steps);
+    return WatchHealthTrend(
+      label: label,
+      summary: '日均 ${_number((totalSteps / days).round())} 步',
+      points: List.unmodifiable(points),
+    );
+  }
+
+  List<WatchSleepRecord> _sortedSleepRecords() =>
+      [...sleepRecords]..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+  static bool _sameDate(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  static int _min(int a, int b) => a < b ? a : b;
+  static int _max(int a, int b) => a > b ? a : b;
+
+  static int? _average(List<int> values) => values.isEmpty
+      ? null
+      : (values.reduce((a, b) => a + b) / values.length).round();
+
+  static String _time(DateTime date) =>
+      '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+
+  static String _number(int value) {
+    final text = value.toString();
+    final buffer = StringBuffer();
+    for (var i = 0; i < text.length; i++) {
+      if (i > 0 && (text.length - i) % 3 == 0) buffer.write(',');
+      buffer.write(text[i]);
+    }
+    return buffer.toString();
+  }
 }
 
 abstract interface class WatchHealthRepository {
   Future<WatchHealthSnapshot> sync(String deviceId);
-}
-
-class MockWatchHealthRepository implements WatchHealthRepository {
-  const MockWatchHealthRepository({
-    this.delay = const Duration(milliseconds: 1400),
-  });
-
-  final Duration delay;
-
-  @override
-  Future<WatchHealthSnapshot> sync(String deviceId) async {
-    await Future<void>.delayed(delay);
-    return WatchHealthSamples.snapshot;
-  }
-}
-
-class WatchHealthSamples {
-  WatchHealthSamples._();
-
-  static WatchHealthSnapshot get snapshot => WatchHealthSnapshot(
-        batteryPercent: 78,
-        syncedAt: DateTime.now(),
-        steps: 8426,
-        stepGoal: 10000,
-        heartRate: 72,
-        minimumHeartRate: 58,
-        maximumHeartRate: 126,
-        sleepMinutes: 438,
-        activeMinutes: 48,
-        vigorousMinutes: 23,
-        sleepRange: '23:18 - 06:52',
-        sleepStages: const [
-          WatchSleepStage('深睡', 96),
-          WatchSleepStage('浅睡', 211),
-          WatchSleepStage('快速眼动', 101),
-          WatchSleepStage('清醒', 30),
-        ],
-        trends: const {
-          WatchHealthPeriod.day: WatchHealthTrend(
-            label: '今天 · 分时趋势',
-            summary: '今日累计 8,426 步',
-            labels: ['0时', '4时', '8时', '12时', '16时', '20时'],
-            steps: [2, 5, 48, 72, 56, 31],
-            heartRates: [56, 54, 78, 72, 83, 68],
-          ),
-          WatchHealthPeriod.week: WatchHealthTrend(
-            label: '7月21日 - 7月27日',
-            summary: '本周日均 7,680 步',
-            labels: ['一', '二', '三', '四', '五', '六', '日'],
-            steps: [62, 79, 54, 88, 67, 93, 74],
-            heartRates: [68, 72, 66, 75, 70, 82, 72],
-          ),
-          WatchHealthPeriod.month: WatchHealthTrend(
-            label: '2026年7月',
-            summary: '本月日均 7,324 步',
-            labels: ['1日', '6日', '11日', '16日', '21日', '26日'],
-            steps: [55, 71, 64, 82, 76, 68],
-            heartRates: [69, 73, 68, 77, 71, 72],
-          ),
-        },
-        records: const [
-          WatchHealthRecord(
-            type: WatchHealthRecordType.heartRate,
-            title: '心率',
-            subtitle: '10:18 · 静息状态',
-            value: '72 次/分',
-          ),
-          WatchHealthRecord(
-            type: WatchHealthRecordType.activity,
-            title: '活跃时段',
-            subtitle: '08:42-09:05 · 快走',
-            value: '23 分钟',
-          ),
-          WatchHealthRecord(
-            type: WatchHealthRecordType.milestone,
-            title: '步数里程碑',
-            subtitle: '08:56',
-            value: '5,000 步',
-          ),
-        ],
-      );
 }

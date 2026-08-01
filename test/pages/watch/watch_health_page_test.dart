@@ -6,10 +6,12 @@ import 'package:honeybox/pages/watch/health/watch_health_provider.dart';
 import 'package:honeybox/pages/watch/pages/watch_health_page.dart';
 import 'package:honeybox/theme/app_theme.dart';
 
+import '../../helpers/watch_health_fixture.dart';
+
 class _ImmediateRepository implements WatchHealthRepository {
   @override
   Future<WatchHealthSnapshot> sync(String deviceId) async {
-    return WatchHealthSamples.snapshot;
+    return watchHealthFixture();
   }
 }
 
@@ -35,7 +37,7 @@ void main() {
     expect(find.text('HoneyBox Watch S1'), findsOneWidget);
     expect(find.text('尚未同步健康数据'), findsOneWidget);
     expect(find.text('同步手表后即可查看'), findsOneWidget);
-    expect(find.text('8,426'), findsNothing);
+    expect(find.text('1,000'), findsNothing);
   });
 
   testWidgets('synchronizes and renders the health dashboard', (tester) async {
@@ -44,11 +46,14 @@ void main() {
     await tester.tap(find.byKey(const Key('watch-health-sync')));
     await tester.pumpAndSettle();
 
-    expect(find.text('8,426'), findsOneWidget);
-    expect(find.text('72'), findsOneWidget);
-    expect(find.text('7:18'), findsOneWidget);
-    expect(find.text('最近同步：刚刚'), findsOneWidget);
-    expect(find.text('平均 69 次/分'), findsOneWidget);
+    expect(find.text('1,000'), findsOneWidget);
+    expect(find.text('78'), findsOneWidget);
+    expect(find.text('4:00'), findsOneWidget);
+    expect(find.text('最近同步：12:00'), findsOneWidget);
+
+    await tester.drag(find.byType(ListView), const Offset(0, -1000));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('10:10:00'), findsOneWidget);
   });
 
   testWidgets('switches to the weekly trend without another sync',
@@ -57,11 +62,12 @@ void main() {
     await tester.tap(find.byKey(const Key('watch-health-sync')));
     await tester.pumpAndSettle();
 
+    await tester.drag(find.byType(ListView), const Offset(0, -320));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('周'));
     await tester.pumpAndSettle();
 
-    expect(find.text('本周日均 7,680 步'), findsOneWidget);
-    expect(find.text('平均 72 次/分'), findsOneWidget);
+    expect(find.text('日均 143 步'), findsOneWidget);
   });
 
   testWidgets('fits a narrow Android-sized viewport', (tester) async {

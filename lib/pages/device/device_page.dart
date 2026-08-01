@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/ble_provider.dart';
 import '../shared/app_drawer.dart';
+import '../shared/disconnect_dialog.dart';
 import 'widgets/action_card.dart';
 
 class DevicePage extends ConsumerStatefulWidget {
@@ -43,55 +44,13 @@ class _DevicePageState extends ConsumerState<DevicePage>
     super.dispose();
   }
 
-  void _onDisconnectTap() {
-    final cs = Theme.of(context).colorScheme;
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('断开连接', textAlign: TextAlign.center),
-        content: const Text('确认断开设备连接？'),
-        // Two full-width buttons stacked vertically — identical style, distinct
-        // colors (destructive on top, neutral cancel below).
-        actionsOverflowDirection: VerticalDirection.down,
-        actions: [
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: () {
-                    Navigator.of(ctx).pop();
-                    // Clearing the connection makes the root gate fall back to
-                    // the scanner automatically.
-                    ref.read(bleNotifierProvider.notifier).disconnect();
-                  },
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(48),
-                    backgroundColor: cs.error,
-                    foregroundColor: cs.onError,
-                  ),
-                  child: const Text('断开'),
-                ),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(48),
-                    backgroundColor: cs.surfaceContainerHighest,
-                    foregroundColor: cs.onSurface,
-                  ),
-                  child: const Text('取消'),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
+  void _onDisconnectTap() async {
+    // 复用共享确认对话框(EBadgeAppRoot 的返回键拦截也走同一份 UI)。
+    final confirmed = await showDisconnectConfirmDialog(context);
+    if (!confirmed || !mounted) return;
+    // Clearing the connection makes the root gate fall back to the scanner
+    // automatically.
+    ref.read(bleNotifierProvider.notifier).disconnect();
   }
 
   void _open(String route) {

@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'ble_cmd_registry.dart';
+
 /// L2 WiFi provisioning protocol (CMD 0x0D) — ported from desk-mate's
 /// `protocols/l2_wifi_provisioning.py`.
 ///
@@ -10,16 +12,12 @@ import 'dart:typed_data';
 /// can open the WiFi streaming transport.
 ///
 /// L2 frame format: `[cmd(1), 0x00, key(1), vlen_hi(1), vlen_lo(1)] + value`.
+///
+/// CMD / key 值集中在 `ble_cmd_registry.dart`:CMD 字节走 [BleCmd.wifiProv],
+/// 子命令 key 走顶层类 [BleCmdWifiProvKey](能用于 switch case 的 const 表达式);
+/// 本文件保留载荷语义常量(result/error/state/flag)。
 class WifiProv {
   WifiProv._();
-
-  static const int cmd = 0x0D;
-
-  // Keys
-  static const int kConfigSet = 0x01; // App → Device: push SSID/password
-  static const int kConfigAck = 0x02; // Device → App: accept/reject
-  static const int kStatusReq = 0x03; // App → Device: poll status
-  static const int kStatus = 0x04; // Device → App: connection status / IP
 
   // CONFIG_ACK result codes
   static const int resultAccepted = 0x00;
@@ -87,7 +85,7 @@ class WifiProv {
   /// Build a CMD_WIFI_PROVISIONING L2 frame with the given [key] and [value].
   static Uint8List buildFrame(int key, Uint8List value) {
     final frame = Uint8List(5 + value.length);
-    frame[0] = cmd;
+    frame[0] = BleCmd.wifiProv;
     frame[1] = 0x00;
     frame[2] = key;
     frame[3] = (value.length >> 8) & 0xFF;
@@ -126,7 +124,7 @@ class WifiProv {
     o += ssidBytes.length;
     value[o++] = pwdBytes.length & 0xFF;
     value.setRange(o, o + pwdBytes.length, pwdBytes);
-    return buildFrame(kConfigSet, value);
+    return buildFrame(BleCmdWifiProvKey.configSet, value);
   }
 
   // ── STATUS_REQ ───────────────────────────────────────────────────────────
@@ -135,7 +133,7 @@ class WifiProv {
     final value = Uint8List(2);
     value[0] = (requestId >> 8) & 0xFF;
     value[1] = requestId & 0xFF;
-    return buildFrame(kStatusReq, value);
+    return buildFrame(BleCmdWifiProvKey.statusReq, value);
   }
 
   // ── Parsers (device → app) ─────────────────────────────────────────────────
@@ -144,7 +142,7 @@ class WifiProv {
   /// it isn't one (wrong cmd / malformed).
   static WifiProvFrame? parse(Uint8List data) {
     if (data.length < 5) return null;
-    if (data[0] != cmd) return null;
+    if (data[0] != BleCmd.wifiProv) return null;
     final key = data[2];
     final vlen = (data[3] << 8) | data[4];
     if (data.length < 5 + vlen) return null;

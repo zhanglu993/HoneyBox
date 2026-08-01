@@ -7,12 +7,23 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../providers/ble_provider.dart';
+import '../../services/app_settings.dart';
 import '../../services/system_settings.dart';
 import '../shared/app_drawer.dart';
 import 'widgets/device_tile.dart';
 
 /// Fallback device-name filter used when a caller doesn't specify one.
 const String _kFallbackFilter = 'eBadge';
+
+/// 调试模式下注入到扫描列表首行的虚拟设备。id 前缀 `DEBUG:` 触发
+/// [BleNotifier.connect] 的旁路(不调用真实 BLE 栈)。
+final ScanDevice _kDebugDevice = ScanDevice(
+  deviceId: '${kDebugDeviceIdPrefix}ebadge-debug',
+  name: 'eBadge-debug',
+  rssi: -42,
+  connectable: true,
+  debug: true,
+);
 
 class ScanPage extends ConsumerStatefulWidget {
   /// BLE-name prefix filter applied by default when the page opens.
@@ -178,7 +189,11 @@ class _ScanPageState extends ConsumerState<ScanPage>
 
     final bleState = ref.watch(bleNotifierProvider);
     final all = ref.watch(scannedDevicesProvider);
-    final devices = _applyFilter(all);
+    // 调试模式:首行注入虚拟 eBadge-debug,让它也走 _applyFilter,
+    // 语义上和真实设备一致(输入不匹配的过滤词一并被隐藏)。
+    final debugOn = ref.watch(appSettingsProvider).debugMode;
+    final base = debugOn ? <ScanDevice>[_kDebugDevice, ...all] : all;
+    final devices = _applyFilter(base);
     final scanning = bleState == BleState.scanning;
 
     return Scaffold(
@@ -230,6 +245,7 @@ class _ScanPageState extends ConsumerState<ScanPage>
                           name: device.name,
                           rssi: device.rssi,
                           connectable: device.connectable,
+                          debug: device.debug,
                           isConnecting: _connectingId == device.deviceId,
                           onConnect: _connectingId == null
                               ? () => _onConnect(device)

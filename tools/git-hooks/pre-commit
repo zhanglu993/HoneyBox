@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# HoneyBox pre-commit hook — 严格对齐 CI 的 lint & analyze 步骤。
+#
+# 启用一次(每台机器):
+#   git config core.hooksPath tools/git-hooks
+#
+# 见 tools/git-hooks/README.md。
+#
+# 步骤:
+#   1. dart format lib/ test/ —— 有改动则重写文件并把「原本已 staged」的
+#      路径 re-add 进本次 commit;绝不把未 stage 的路径顺手带进来。
+#   2. flutter analyze —— 有告警直接拒 commit(analyze 不自动修)。
+#
+# 想临时绕过(不推荐,CI 一样会检):git commit --no-verify
+
+set -e
+
+# ── 只对 Dart / Flutter 项目工作,别在其它仓库误触 ────────────────────
+if [ ! -f pubspec.yaml ]; then
+  exit 0
+fi
+
+# 首次告知开发者别忘了同步一次 hooksPath;`core.hooksPath` 是用户级别的
+# config,新 clone 的仓库默认走 .git/hooks/(此文件那时不生效),此提醒
+# 只有把 hooksPath 指过来之后才会看到,不算噪音。
+echo "─ pre-commit ─ dart format (lib/ test/) + flutter analyze"
+
+# ── Stage 1: dart format ─────────────────────────────────────────────
+# 记录 dart format 之前 staged 的 dart 文件列表 —— 只有它们才能被 re-add。
+staged_dart_before=$(git diff --cached --name-only --diff-filter=ACMR -- 'lib/*.dart' 'test/*.dart' || true)
+
+# 直接跑格式化;若二进制不在 PATH,退回到 `flutter format`(等价,老工具链)。
+if command -v dart >/dev/null 2>&1; then
+  dart format lib/ test/
+elif command -v flutter >/dev/null 2>&1; then
+  flutter format lib/ test/
+else
+  echo "  ✗ 找不到 dart 或 flutter 命令,跳过 format"
+  exit 1
+fi
+
+# 找出被格式化过、且是本次 commit 已 staged 的文件 —— 这些才 re-add。
+# 其它未 stage 的格式化改动留在工作区,由开发者自己决定何时 commit。
+if [ -n "$staged_dart_before" ]; then
+  # 用 xargs 逐个 git diff 检测「未 staged 但已改」,再交集 staged_dart_before。
+  reformatted=""
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    if ! git diff --quiet -- "$path"; then
+      reformatted="$reformatted $path"
+    fi
+  done <<< "$staged_dart_before"
+
+  if [ -n "$reformatted" ]; then
+    echo "  ✎ 自动 re-add 被格式化的 staged 文件:$reformatted"
+    # shellcheck disable=SC2086 -- 有意用 word-splitting 把多个路径展开
+    git add $reformatted
+  fi
+fi
+
+# ── Stage 2: flutter analyze ────────────────────────────────────────
+if command -v flutter >/dev/null 2>&1; then
+  # analyze 输出很啰嗦;有错才回显,无错就一行提示。
+  if ! analyze_out=$(flutter analyze 2>&1); then
+    echo "$analyze_out"
+    echo "  ✗ flutter analyze 未通过,拒绝 commit(--no-verify 可临时绕过)"
+    exit 1
+  fi
+  echo "  ✓ flutter analyze 通过"
+else
+  echo "  ⚠ 找不到 flutter,跳过 analyze(建议装上以对齐 CI)"
+fi

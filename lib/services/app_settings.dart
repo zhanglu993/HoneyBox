@@ -5,23 +5,38 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// App-wide user preferences (persisted to a small JSON file in the app support
-/// directory). Currently just the local-cache size cap; more knobs can be added
-/// alongside [cacheLimitMB] without touching the persistence plumbing.
+/// directory). Currently: local-cache size cap and the eBadge debug-mode
+/// switch. More knobs can be added alongside these without touching the
+/// persistence plumbing.
 class AppSettings {
   /// Upper bound on the total size of the local send-cache, in megabytes.
   final int cacheLimitMB;
 
-  const AppSettings({this.cacheLimitMB = kDefaultCacheLimitMB});
+  /// eBadge 无实物调试模式:开启后扫描列表首行注入虚拟设备
+  /// `eBadge-debug`,供 UI/交互走查(不发起真实 BLE 连接、不发送数据)。
+  /// 见 docs/superpowers/specs/2026-07-29-debug-mode-fake-device-design.md
+  final bool debugMode;
 
-  AppSettings copyWith({int? cacheLimitMB}) =>
-      AppSettings(cacheLimitMB: cacheLimitMB ?? this.cacheLimitMB);
+  const AppSettings({
+    this.cacheLimitMB = kDefaultCacheLimitMB,
+    this.debugMode = false,
+  });
 
-  Map<String, dynamic> toJson() => {'cacheLimitMB': cacheLimitMB};
+  AppSettings copyWith({int? cacheLimitMB, bool? debugMode}) => AppSettings(
+        cacheLimitMB: cacheLimitMB ?? this.cacheLimitMB,
+        debugMode: debugMode ?? this.debugMode,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'cacheLimitMB': cacheLimitMB,
+        'debugMode': debugMode,
+      };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
         cacheLimitMB:
             ((json['cacheLimitMB'] as num?)?.toInt() ?? kDefaultCacheLimitMB)
                 .clamp(kMinCacheLimitMB, kMaxCacheLimitMB),
+        debugMode: json['debugMode'] as bool? ?? false,
       );
 }
 
@@ -69,6 +84,13 @@ class AppSettingsNotifier extends StateNotifier<AppSettings> {
     final clamped = mb.clamp(kMinCacheLimitMB, kMaxCacheLimitMB);
     if (clamped == state.cacheLimitMB) return;
     state = state.copyWith(cacheLimitMB: clamped);
+    _save();
+  }
+
+  /// Toggle eBadge 无实物调试模式(see [AppSettings.debugMode]).
+  void setDebugMode(bool value) {
+    if (value == state.debugMode) return;
+    state = state.copyWith(debugMode: value);
     _save();
   }
 }

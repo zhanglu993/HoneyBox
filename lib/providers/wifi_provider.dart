@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../services/ble_cmd_registry.dart';
 import '../services/ble_manager.dart' as ble;
 import '../services/hotspot.dart';
 import '../services/wifi_provisioning.dart';
@@ -127,13 +128,13 @@ class WifiManager extends ChangeNotifier {
     final frame = WifiProv.parse(payload);
     if (frame == null) return;
     switch (frame.key) {
-      case WifiProv.kConfigAck:
+      case BleCmdWifiProvKey.configAck:
         final ack = WifiProv.parseConfigAck(frame.value);
         if (ack != null && !(_ackCompleter?.isCompleted ?? true)) {
           _ackCompleter!.complete(ack);
         }
         break;
-      case WifiProv.kStatus:
+      case BleCmdWifiProvKey.status:
         final st = WifiProv.parseStatus(frame.value);
         if (st == null) return;
         debugPrint('WiFi/配网 STATUS state=${WifiProv.stateText(st.state)} '

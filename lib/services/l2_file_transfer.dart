@@ -2,6 +2,8 @@ import 'dart:async' as async_;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'ble_cmd_registry.dart';
+
 // ---------------------------------------------------------------------------
 // CRC-32 (polynomial 0xEDB88320, reflected)
 // ---------------------------------------------------------------------------
@@ -33,20 +35,11 @@ int crc32(Uint8List data) {
 // ---------------------------------------------------------------------------
 // Protocol constants
 // ---------------------------------------------------------------------------
-
-/// The command byte for all L2 file-transfer frames.
-const int l2Cmd = 0x10;
-
-/// L2 sub-command keys.
-class K {
-  K._();
-  static const int beginReq = 0x01;
-  static const int beginRsp = 0x02;
-  static const int data = 0x03;
-  static const int endReq = 0x05;
-  static const int endRsp = 0x06;
-  static const int abort = 0x07;
-}
+//
+// CMD 字节和子命令 key 集中在 `ble_cmd_registry.dart`:
+//   CMD:  [BleCmd.fileTransfer]
+//   key:  [BleCmdFileTransferKey] (顶层 abstract class — 能用于 switch case)
+// 本文件保留载荷语义常量([TYPE] 文件类型 / [L2State] 状态机)。
 
 /// File type identifiers.
 class TYPE {
@@ -123,7 +116,7 @@ class L2Frame {
 Uint8List buildL2Frame(int key, Uint8List value) {
   final len = value.length;
   final frame = Uint8List(5 + len);
-  frame[0] = l2Cmd;
+  frame[0] = BleCmd.fileTransfer;
   frame[1] = 0x00;
   frame[2] = key;
   frame[3] = (len >> 8) & 0xFF;
@@ -151,7 +144,7 @@ Uint8List buildBeginReq(
   _writeU16(value, 5, chunkSize);
   value[7] = nameBytes.length & 0xFF;
   value.setRange(8, 8 + nameBytes.length, nameBytes);
-  return buildL2Frame(K.beginReq, value);
+  return buildL2Frame(BleCmdFileTransferKey.beginReq, value);
 }
 
 /// Build a DATA frame.
@@ -161,7 +154,7 @@ Uint8List buildDataFrame(int seq, Uint8List chunk) {
   final value = Uint8List(2 + chunk.length);
   _writeU16(value, 0, seq);
   value.setRange(2, 2 + chunk.length, chunk);
-  return buildL2Frame(K.data, value);
+  return buildL2Frame(BleCmdFileTransferKey.data, value);
 }
 
 /// Build an END_REQ frame.
@@ -170,7 +163,7 @@ Uint8List buildDataFrame(int seq, Uint8List chunk) {
 Uint8List buildEndReq(int crc32Val) {
   final value = Uint8List(4);
   _writeU32(value, 0, crc32Val);
-  return buildL2Frame(K.endReq, value);
+  return buildL2Frame(BleCmdFileTransferKey.endReq, value);
 }
 
 /// Build an ABORT frame.
@@ -179,14 +172,14 @@ Uint8List buildEndReq(int crc32Val) {
 Uint8List buildAbort(int reason) {
   final value = Uint8List(1);
   value[0] = reason & 0xFF;
-  return buildL2Frame(K.abort, value);
+  return buildL2Frame(BleCmdFileTransferKey.abort, value);
 }
 
 /// Parse a raw L2 payload (already stripped of the L1 header) into an
 /// [L2Frame]. Returns `null` on malformed input.
 L2Frame? parseL2Frame(Uint8List data) {
   if (data.length < 5) return null;
-  if (data[0] != l2Cmd) return null;
+  if (data[0] != BleCmd.fileTransfer) return null;
 
   final key = data[2];
   final valLen = (data[3] << 8) | data[4];
@@ -377,13 +370,13 @@ class FileTransferSession {
     }
 
     switch (frame.key) {
-      case K.beginRsp:
+      case BleCmdFileTransferKey.beginRsp:
         _onBeginRsp(frame.value);
         break;
-      case K.endRsp:
+      case BleCmdFileTransferKey.endRsp:
         _onEndRsp(frame.value);
         break;
-      case K.abort:
+      case BleCmdFileTransferKey.abort:
         _log('← ABORT (peer, reason='
             '${frame.value.isNotEmpty ? _hex(frame.value[0], 2) : "?"})');
         _fail('Peer aborted');

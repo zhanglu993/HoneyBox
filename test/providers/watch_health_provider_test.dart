@@ -2,6 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:honeybox/pages/watch/health/watch_health_data.dart';
 import 'package:honeybox/pages/watch/health/watch_health_provider.dart';
 
+import '../helpers/watch_health_fixture.dart';
+
 class _Repository implements WatchHealthRepository {
   _Repository({required this.result, this.error});
 
@@ -19,7 +21,7 @@ class _Repository implements WatchHealthRepository {
 
 void main() {
   test('starts empty and stores a synchronized snapshot', () async {
-    final repository = _Repository(result: WatchHealthSamples.snapshot);
+    final repository = _Repository(result: watchHealthFixture());
     final notifier = WatchHealthNotifier(
       repository: repository,
       deviceId: 'watch-01',
@@ -34,13 +36,13 @@ void main() {
 
     expect(repository.requestedDeviceIds, ['watch-01']);
     expect(notifier.state.phase, WatchHealthSyncPhase.success);
-    expect(notifier.state.snapshot?.steps, 8426);
+    expect(notifier.state.snapshot?.steps, 1000);
     expect(notifier.state.errorMessage, isNull);
   });
 
   test('exposes a retryable failure without inventing data', () async {
     final repository = _Repository(
-      result: WatchHealthSamples.snapshot,
+      result: watchHealthFixture(),
       error: StateError('transport unavailable'),
     );
     final notifier = WatchHealthNotifier(
@@ -56,7 +58,7 @@ void main() {
   });
 
   test('changes trend period without synchronizing again', () async {
-    final repository = _Repository(result: WatchHealthSamples.snapshot);
+    final repository = _Repository(result: watchHealthFixture());
     final notifier = WatchHealthNotifier(
       repository: repository,
       deviceId: 'watch-03',
@@ -66,7 +68,7 @@ void main() {
     notifier.selectPeriod(WatchHealthPeriod.week);
 
     expect(notifier.state.period, WatchHealthPeriod.week);
-    expect(notifier.state.trend?.summary, '本周日均 7,680 步');
+    expect(notifier.state.trend?.summary, '日均 143 步');
     expect(repository.requestedDeviceIds, hasLength(1));
   });
 }

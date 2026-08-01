@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../providers/current_app_provider.dart';
 import '../../services/app_settings.dart';
 import '../../services/file_cache.dart';
+import '../launcher/app_catalog.dart';
 import '../shared/file_send_layout.dart';
 
 /// 设置 — application preferences. Currently the local send-cache: a size cap
@@ -34,6 +36,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final settings = ref.watch(appSettingsProvider);
+    final currentApp = ref.watch(currentAppProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
@@ -48,6 +51,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           _cacheLimitCard(theme, cs, settings),
           const SizedBox(height: 12),
           _manageCard(theme, cs),
+          if (currentApp == AppId.ebadge) ...[
+            const SizedBox(height: 20),
+            Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 8),
+              child: Text('调试',
+                  style:
+                      theme.textTheme.titleSmall?.copyWith(color: cs.primary)),
+            ),
+            _debugModeCard(theme, cs, settings),
+          ],
         ],
       ),
     );
@@ -139,6 +152,27 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           await Navigator.of(context).pushNamed('/cache');
           _refreshUsage(); // deletions there change usage
         },
+      ),
+    );
+  }
+
+  /// 「调试模式」开关卡片。打开后扫描列表首行注入虚拟 eBadge-debug 设备,
+  /// 便于无实物调试 UI/交互;虚拟连接不会发送任何真实数据。
+  Widget _debugModeCard(ThemeData theme, ColorScheme cs, AppSettings settings) {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: SwitchListTile(
+        secondary: const Icon(Icons.bug_report_outlined),
+        title: const Text('调试模式'),
+        subtitle: Text(
+          '扫描列表首行会出现虚拟设备 eBadge-debug,用于无实物调试 UI 及交互。'
+          '虚拟连接不会发送任何真实数据。',
+          style:
+              theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+        ),
+        value: settings.debugMode,
+        onChanged: (v) =>
+            ref.read(appSettingsProvider.notifier).setDebugMode(v),
       ),
     );
   }
