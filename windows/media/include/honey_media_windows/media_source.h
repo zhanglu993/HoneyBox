@@ -29,4 +29,7 @@ class FrameSource {
 Result<std::unique_ptr<FrameSource>> OpenGifSource(
     const std::filesystem::path& path);
 
+Result<std::unique_ptr<FrameSource>> OpenMediaSource(
+    const std::filesystem::path& path);
+
 }  // namespace hmw

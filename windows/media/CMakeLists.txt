@@ -17,6 +17,9 @@ add_subdirectory(
 add_library(honey_media_windows_core
   src/channel_contract.cpp
   src/gif_source.cpp
+  src/media_foundation_runtime.cpp
+  src/media_foundation_source.cpp
+  src/media_source_factory.cpp
   src/png_codec.cpp
   src/rgba_transform.cpp
   src/wic_helpers.cpp
@@ -31,6 +34,9 @@ target_include_directories(honey_media_windows_core
 
 target_link_libraries(honey_media_windows_core PRIVATE
   honey_media_core
+  mfplat
+  mfreadwrite
+  mfuuid
   ole32
   windowscodecs
 )
