@@ -1,6 +1,8 @@
 #include "honey_media_windows/media_source.h"
 #include "honey_media_windows/png_codec.h"
 
+#include "../src/wic_helpers.h"
+
 #include "test_support.h"
 
 #ifndef NOMINMAX
@@ -15,6 +17,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <system_error>
@@ -67,6 +70,11 @@ std::filesystem::path FixturePath() {
          "animated_disposal.gif";
 }
 
+std::filesystem::path BackgroundFixturePath() {
+  return std::filesystem::path(HMW_TEST_SOURCE_DIR) / "fixtures" /
+         "background_keep_local_palette.gif";
+}
+
 std::vector<uint8_t> Pixel(const hmw::RgbaFrame& frame, uint32_t x,
                            uint32_t y) {
   const size_t offset =
@@ -87,6 +95,32 @@ std::vector<hmw::RgbaFrame> ReadAll(hmw::FrameSource* source) {
     frames.push_back(std::move(frame));
   }
   return frames;
+}
+
+std::vector<uint8_t> SinglePixelGifWithDelay(uint16_t centiseconds) {
+  return {
+      'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0x80, 0, 0,
+      0, 0, 0, 255, 255, 255,
+      0x21, 0xf9, 4, 0x04,
+      static_cast<uint8_t>(centiseconds & 0xffU),
+      static_cast<uint8_t>((centiseconds >> 8) & 0xffU), 0, 0,
+      0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0,
+      2, 2, 0x44, 0x01, 0, 0x3b,
+  };
+}
+
+int64_t GifDuration(const std::vector<uint8_t>& bytes) {
+  const TemporaryFile file(".gif", bytes);
+  hmw::Result<std::unique_ptr<hmw::FrameSource>> opened =
+      hmw::OpenGifSource(file.path());
+  HMW_EXPECT(opened.ok());
+  return opened.ok() ? (*opened.value)->info().duration_100ns : -1;
+}
+
+std::vector<uint8_t> ReadFile(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  return std::vector<uint8_t>(std::istreambuf_iterator<char>(input),
+                              std::istreambuf_iterator<char>());
 }
 
 hmw::Result<hmw::RgbaFrame> DecodePngWithWic(
@@ -259,6 +293,105 @@ HMW_TEST(wic_media_gif_applies_background_and_previous_disposal) {
   }
 }
 
+HMW_TEST(wic_media_gif_disposal_restores_opaque_logical_background) {
+  hmw::Result<std::unique_ptr<hmw::FrameSource>> opened =
+      hmw::OpenGifSource(BackgroundFixturePath());
+  HMW_EXPECT(opened.ok());
+  if (!opened.ok()) {
+    return;
+  }
+
+  const std::vector<hmw::RgbaFrame> frames = ReadAll(opened.value->get());
+  HMW_EXPECT(frames.size() == 3);
+  if (frames.size() == 3) {
+    HMW_EXPECT(Pixel(frames[1], 1, 1) ==
+               std::vector<uint8_t>({10, 20, 30, 255}));
+  }
+}
+
+HMW_TEST(wic_media_gif_invalid_background_index_falls_back_to_transparent) {
+  std::vector<uint8_t> malformed = ReadFile(BackgroundFixturePath());
+  HMW_EXPECT(malformed.size() > 11);
+  if (malformed.size() <= 11) {
+    return;
+  }
+  malformed[11] = 7;  // Four-entry global table: index 7 is invalid.
+  const TemporaryFile file(".gif", malformed);
+  hmw::Result<std::unique_ptr<hmw::FrameSource>> opened =
+      hmw::OpenGifSource(file.path());
+  HMW_EXPECT(opened.ok());
+  if (!opened.ok()) {
+    return;
+  }
+
+  const std::vector<hmw::RgbaFrame> frames = ReadAll(opened.value->get());
+  HMW_EXPECT(frames.size() == 3);
+  if (frames.size() == 3) {
+    HMW_EXPECT(Pixel(frames[1], 1, 1) ==
+               std::vector<uint8_t>({0, 0, 0, 0}));
+  }
+}
+
+HMW_TEST(wic_media_gif_decodes_frame_local_palette) {
+  hmw::Result<std::unique_ptr<hmw::FrameSource>> opened =
+      hmw::OpenGifSource(BackgroundFixturePath());
+  HMW_EXPECT(opened.ok());
+  if (!opened.ok()) {
+    return;
+  }
+
+  const std::vector<hmw::RgbaFrame> frames = ReadAll(opened.value->get());
+  HMW_EXPECT(frames.size() == 3);
+  if (frames.size() == 3) {
+    HMW_EXPECT(Pixel(frames[1], 0, 0) ==
+               std::vector<uint8_t>({255, 0, 255, 255}));
+  }
+}
+
+HMW_TEST(wic_media_gif_keep_preserves_pixels_for_next_frame) {
+  hmw::Result<std::unique_ptr<hmw::FrameSource>> opened =
+      hmw::OpenGifSource(BackgroundFixturePath());
+  HMW_EXPECT(opened.ok());
+  if (!opened.ok()) {
+    return;
+  }
+
+  const std::vector<hmw::RgbaFrame> frames = ReadAll(opened.value->get());
+  HMW_EXPECT(frames.size() == 3);
+  if (frames.size() == 3) {
+    HMW_EXPECT(Pixel(frames[2], 0, 0) ==
+               std::vector<uint8_t>({255, 0, 255, 255}));
+    HMW_EXPECT(Pixel(frames[2], 2, 0) ==
+               std::vector<uint8_t>({0, 0, 255, 255}));
+  }
+}
+
+HMW_TEST(wic_media_gif_seek_end_and_invalid_contract) {
+  hmw::Result<std::unique_ptr<hmw::FrameSource>> opened =
+      hmw::OpenGifSource(FixturePath());
+  HMW_EXPECT(opened.ok());
+  if (!opened.ok()) {
+    return;
+  }
+
+  hmw::RgbaFrame frame{};
+  const int64_t total_duration = (*opened.value)->info().duration_100ns;
+  HMW_EXPECT((*opened.value)->Seek(total_duration).ok());
+  hmw::Result<bool> read = (*opened.value)->ReadNext(&frame);
+  HMW_EXPECT(read.ok() && !*read.value);
+
+  HMW_EXPECT((*opened.value)->Seek(total_duration + 1).ok());
+  read = (*opened.value)->ReadNext(&frame);
+  HMW_EXPECT(read.ok() && !*read.value);
+
+  const hmw::Outcome negative = (*opened.value)->Seek(-1);
+  HMW_EXPECT(!negative.ok());
+  HMW_EXPECT(negative.error.has_value());
+  if (negative.error.has_value()) {
+    HMW_EXPECT(negative.error->status == hmw::Status::kInvalidArgument);
+  }
+}
+
 HMW_TEST(wic_media_gif_missing_delay_uses_bounded_fallback) {
   const std::vector<uint8_t> without_delay{
       'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0x80, 0, 0,
@@ -280,6 +413,16 @@ HMW_TEST(wic_media_gif_missing_delay_uses_bounded_fallback) {
   if (read.ok() && *read.value) {
     HMW_EXPECT(frame.duration_100ns == 1000000);
   }
+}
+
+HMW_TEST(wic_media_gif_zero_delay_uses_fallback) {
+  HMW_EXPECT(GifDuration(SinglePixelGifWithDelay(0)) == 1000000);
+}
+
+HMW_TEST(wic_media_gif_delay_is_clamped_to_ten_ms_through_ten_seconds) {
+  HMW_EXPECT(hmw::internal::NormalizeGifDelay100ns(50000) == 100000);
+  HMW_EXPECT(GifDuration(SinglePixelGifWithDelay(1)) == 100000);
+  HMW_EXPECT(GifDuration(SinglePixelGifWithDelay(2000)) == 100000000);
 }
 
 HMW_TEST(wic_media_wic_rejects_non_gif_without_partial_frames) {

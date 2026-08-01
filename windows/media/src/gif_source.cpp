@@ -25,12 +25,14 @@ size_t PixelOffset(uint32_t x, uint32_t y, uint32_t width) {
 }
 
 void ClearRectangle(const internal::GifFrameData& frame, uint32_t canvas_width,
+                    const std::array<uint8_t, 4>& background_rgba,
                     std::vector<uint8_t>* canvas) {
   for (uint32_t y = 0; y < frame.height; ++y) {
     for (uint32_t x = 0; x < frame.width; ++x) {
       const size_t destination =
           PixelOffset(frame.left + x, frame.top + y, canvas_width);
-      std::fill_n(canvas->begin() + destination, 4, static_cast<uint8_t>(0));
+      std::copy(background_rgba.begin(), background_rgba.end(),
+                canvas->begin() + destination);
     }
   }
 }
@@ -118,7 +120,8 @@ Result<std::unique_ptr<FrameSource>> OpenGifSource(
     for (const internal::GifFrameData& raw : decoded.value->frames) {
       if (previous_frame != nullptr) {
         if (previous_frame->disposal == 2) {
-          ClearRectangle(*previous_frame, decoded.value->width, &canvas);
+          ClearRectangle(*previous_frame, decoded.value->width,
+                         decoded.value->background_rgba, &canvas);
         } else if (previous_frame->disposal == 3) {
           canvas = restore_previous;
         }

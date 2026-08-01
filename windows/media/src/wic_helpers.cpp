@@ -25,9 +25,9 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr int64_t kHundredNanosecondsPerCentisecond = 100000;
-constexpr uint32_t kFallbackDelayCentiseconds = 10;
-constexpr uint32_t kMinimumDelayCentiseconds = 1;
-constexpr uint32_t kMaximumDelayCentiseconds = 1000;
+constexpr int64_t kFallbackDelay100ns = 1000000;
+constexpr int64_t kMinimumDelay100ns = 100000;
+constexpr int64_t kMaximumDelay100ns = 100000000;
 
 class ComApartment {
  public:
@@ -304,6 +304,13 @@ HRESULT ReadIndexedPixels(IWICImagingFactory* factory,
 
 }  // namespace
 
+int64_t NormalizeGifDelay100ns(std::optional<int64_t> delay_100ns) {
+  if (!delay_100ns.has_value() || *delay_100ns <= 0) {
+    return kFallbackDelay100ns;
+  }
+  return std::clamp(*delay_100ns, kMinimumDelay100ns, kMaximumDelay100ns);
+}
+
 Result<std::vector<uint8_t>> EncodePngWithWic(const RgbaFrame& frame) {
   size_t byte_count = 0;
   if (frame.width == 0 || frame.height == 0 ||
@@ -460,13 +467,56 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
                                  "GIF logical screen is invalid");
     }
 
+    std::array<uint8_t, 4> background_rgba{0, 0, 0, 0};
+    bool has_global_color_table = false;
+    std::optional<uint32_t> background_index;
+    result = QueryBoolean(logical_reader.Get(),
+                          L"/logscrdesc/GlobalColorTableFlag",
+                          &has_global_color_table);
+    if (SUCCEEDED(result)) {
+      result = QueryUnsigned(logical_reader.Get(),
+                             L"/logscrdesc/BackgroundColorIndex",
+                             &background_index);
+    }
+    if (FAILED(result)) {
+      return Failure<DecodedGif>(Status::kDecodeFailed,
+                                 "GIF logical background metadata is invalid");
+    }
+    if (has_global_color_table && background_index.has_value()) {
+      ComPtr<IWICPalette> global_palette;
+      HRESULT palette_result = factory->CreatePalette(&global_palette);
+      if (SUCCEEDED(palette_result)) {
+        palette_result = decoder->CopyPalette(global_palette.Get());
+      }
+      UINT color_count = 0;
+      if (SUCCEEDED(palette_result)) {
+        palette_result = global_palette->GetColorCount(&color_count);
+      }
+      if (SUCCEEDED(palette_result) && color_count > 0 && color_count <= 256 &&
+          *background_index < color_count) {
+        std::vector<WICColor> colors(color_count);
+        UINT copied_colors = 0;
+        palette_result = global_palette->GetColors(
+            color_count, colors.data(), &copied_colors);
+        if (SUCCEEDED(palette_result) && copied_colors == color_count) {
+          const WICColor color = colors[*background_index];
+          background_rgba = {
+              static_cast<uint8_t>((color >> 16) & 0xffU),
+              static_cast<uint8_t>((color >> 8) & 0xffU),
+              static_cast<uint8_t>(color & 0xffU),
+              static_cast<uint8_t>(255),
+          };
+        }
+      }
+    }
+
     UINT frame_count = 0;
     result = decoder->GetFrameCount(&frame_count);
     if (FAILED(result) || frame_count == 0) {
       return Failure<DecodedGif>(Status::kDecodeFailed,
                                  "GIF contains no decodable frames");
     }
-    DecodedGif decoded{canvas_width, canvas_height, {}};
+    DecodedGif decoded{canvas_width, canvas_height, background_rgba, {}};
     decoded.frames.reserve(frame_count);
     for (UINT index = 0; index < frame_count; ++index) {
       ComPtr<IWICBitmapFrameDecode> frame;
@@ -528,13 +578,11 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
         return Failure<DecodedGif>(Status::kDecodeFailed,
                                    "GIF frame metadata is invalid");
       }
-      uint32_t delay_centiseconds = delay.value_or(kFallbackDelayCentiseconds);
-      if (delay_centiseconds == 0) {
-        delay_centiseconds = kFallbackDelayCentiseconds;
+      std::optional<int64_t> delay_100ns;
+      if (delay.has_value()) {
+        delay_100ns = static_cast<int64_t>(*delay) *
+                      kHundredNanosecondsPerCentisecond;
       }
-      delay_centiseconds = std::clamp(delay_centiseconds,
-                                      kMinimumDelayCentiseconds,
-                                      kMaximumDelayCentiseconds);
       const uint32_t transparent = transparent_index.value_or(0);
       std::vector<uint8_t> pixels;
       result = ReadIndexedPixels(factory.Get(), frame.Get(), transparent,
@@ -545,8 +593,7 @@ Result<DecodedGif> DecodeGifWithWic(const std::filesystem::path& path) {
       }
       decoded.frames.push_back(GifFrameData{
           left, top, width, height, disposal.value_or(0),
-          static_cast<int64_t>(delay_centiseconds) *
-              kHundredNanosecondsPerCentisecond,
+          NormalizeGifDelay100ns(delay_100ns),
           std::move(pixels)});
     }
     return Result<DecodedGif>{std::move(decoded), std::nullopt};
