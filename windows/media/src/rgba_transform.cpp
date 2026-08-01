@@ -1,5 +1,7 @@
 #include "honey_media_windows/rgba_transform.h"
 
+#include "rgba_transform_internal.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -9,6 +11,22 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace hmw::internal {
+
+SamplingBounds SamplingBoundsForCrop(double crop_start, double crop_extent,
+                                     uint32_t source_length) {
+  if (source_length == 0) {
+    return SamplingBounds{0.0, 0.0};
+  }
+  const double source_maximum = static_cast<double>(source_length) - 1.0;
+  const double minimum = std::clamp(crop_start, 0.0, source_maximum);
+  const double maximum = std::max(
+      minimum, std::clamp(crop_start + crop_extent - 1.0, 0.0, source_maximum));
+  return SamplingBounds{minimum, maximum};
+}
+
+}  // namespace hmw::internal
 
 namespace hmw {
 namespace {
@@ -172,14 +190,10 @@ void BilinearScale(const std::vector<uint8_t>& source_pixels,
                    uint32_t destination_y, uint32_t destination_width,
                    uint32_t destination_height, uint32_t destination_canvas_width,
                    std::vector<uint8_t>* destination) {
-  const double source_max_x = static_cast<double>(source_width) - 1.0;
-  const double source_max_y = static_cast<double>(source_height) - 1.0;
-  const double min_x = std::clamp(crop.x, 0.0, source_max_x);
-  const double min_y = std::clamp(crop.y, 0.0, source_max_y);
-  const double max_x = std::max(
-      min_x, std::clamp(crop.x + crop.width - 1.0, 0.0, source_max_x));
-  const double max_y = std::max(
-      min_y, std::clamp(crop.y + crop.height - 1.0, 0.0, source_max_y));
+  const internal::SamplingBounds horizontal_bounds =
+      internal::SamplingBoundsForCrop(crop.x, crop.width, source_width);
+  const internal::SamplingBounds vertical_bounds =
+      internal::SamplingBoundsForCrop(crop.y, crop.height, source_height);
   const size_t source_width_size = static_cast<size_t>(source_width);
   const size_t destination_width_size = static_cast<size_t>(destination_width);
   for (size_t output_y = 0; output_y < static_cast<size_t>(destination_height);
@@ -187,7 +201,8 @@ void BilinearScale(const std::vector<uint8_t>& source_pixels,
     const double mapped_y = crop.y +
         ((static_cast<double>(output_y) + 0.5) * crop.height /
          static_cast<double>(destination_height) - 0.5);
-    const double sample_y = std::clamp(mapped_y, crop.y, max_y);
+    const double sample_y = std::clamp(
+        mapped_y, vertical_bounds.minimum, vertical_bounds.maximum);
     const size_t y0 = static_cast<size_t>(std::floor(sample_y));
     const size_t y1 = static_cast<size_t>(std::ceil(sample_y));
     const double y_fraction = sample_y - static_cast<double>(y0);
@@ -195,7 +210,8 @@ void BilinearScale(const std::vector<uint8_t>& source_pixels,
       const double mapped_x = crop.x +
           ((static_cast<double>(output_x) + 0.5) * crop.width /
            static_cast<double>(destination_width) - 0.5);
-      const double sample_x = std::clamp(mapped_x, crop.x, max_x);
+      const double sample_x = std::clamp(
+          mapped_x, horizontal_bounds.minimum, horizontal_bounds.maximum);
       const size_t x0 = static_cast<size_t>(std::floor(sample_x));
       const size_t x1 = static_cast<size_t>(std::ceil(sample_x));
       const double x_fraction = sample_x - static_cast<double>(x0);

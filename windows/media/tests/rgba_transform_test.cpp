@@ -1,5 +1,7 @@
 #include "honey_media_windows/rgba_transform.h"
 
+#include "../src/rgba_transform_internal.h"
+
 #include "test_support.h"
 
 #include <optional>
@@ -28,6 +30,18 @@ hmw::RgbaFrame FourByFourSource() {
 }
 
 }  // namespace
+
+HMW_TEST(transform_subpixel_crop_uses_ordered_sampling_bounds) {
+  const hmw::internal::SamplingBounds horizontal =
+      hmw::internal::SamplingBoundsForCrop(0.25, 0.5, 1);
+  const hmw::internal::SamplingBounds vertical =
+      hmw::internal::SamplingBoundsForCrop(0.25, 0.5, 1);
+
+  HMW_EXPECT(horizontal.minimum == 0.0);
+  HMW_EXPECT(horizontal.maximum == 0.0);
+  HMW_EXPECT(vertical.minimum == 0.0);
+  HMW_EXPECT(vertical.maximum == 0.0);
+}
 
 HMW_TEST(transform_rejects_empty_or_non_four_aligned_output) {
   const hmw::RgbaFrame source = Frame(2, 2, {
