@@ -1,6 +1,7 @@
 add_executable(honey_media_windows_tests
   test_main.cpp
   channel_contract_test.cpp
+  status_contract_test.cpp
 )
 
 target_include_directories(honey_media_windows_tests PRIVATE
@@ -20,3 +21,4 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
 endif()
 
 add_test(NAME channel_contract COMMAND honey_media_windows_tests)
+add_test(NAME status_contract COMMAND honey_media_windows_tests)

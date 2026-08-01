@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(honey_media_windows LANGUAGES CXX)
 
+# When this adapter is embedded by the Flutter Windows project, keep its tests
+# opt-in. The standalone test script explicitly sets BUILD_TESTING=ON.
+if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  option(BUILD_TESTING "Build tests" OFF)
+endif()
+
 include(CTest)
 
 add_subdirectory(
