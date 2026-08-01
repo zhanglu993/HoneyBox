@@ -18,6 +18,15 @@ hmw::TransformRequest Request(uint32_t width = 4, uint32_t height = 4) {
                                std::nullopt, 0xff000000, 0};
 }
 
+hmw::RgbaFrame FourByFourSource() {
+  return Frame(4, 4, {
+      10, 0, 0, 255, 11, 0, 0, 255, 12, 0, 0, 255, 13, 0, 0, 255,
+      30, 0, 0, 255, 31, 0, 0, 255, 32, 0, 0, 255, 33, 0, 0, 255,
+      50, 0, 0, 255, 51, 0, 0, 255, 52, 0, 0, 255, 53, 0, 0, 255,
+      70, 0, 0, 255, 71, 0, 0, 255, 72, 0, 0, 255, 73, 0, 0, 255,
+  });
+}
+
 }  // namespace
 
 HMW_TEST(transform_rejects_empty_or_non_four_aligned_output) {
@@ -71,12 +80,31 @@ HMW_TEST(transform_cover_center_crops_wide_source) {
       hmw::TransformRgba(source, Request());
 
   HMW_EXPECT(result.ok());
-  HMW_EXPECT(result.value->pixels[0] == 20);
-  HMW_EXPECT(result.value->pixels[4] == 23);
-  HMW_EXPECT(result.value->pixels[8] == 28);
-  HMW_EXPECT(result.value->pixels[12] == 30);
-  HMW_EXPECT(result.value->pixels[48] == 20);
-  HMW_EXPECT(result.value->pixels[49] == 1);
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      20, 0, 0, 255, 23, 0, 0, 255, 28, 0, 0, 255, 30, 0, 0, 255,
+      20, 0, 0, 255, 23, 0, 0, 255, 28, 0, 0, 255, 30, 0, 0, 255,
+      20, 1, 0, 255, 23, 1, 0, 255, 28, 1, 0, 255, 30, 1, 0, 255,
+      20, 1, 0, 255, 23, 1, 0, 255, 28, 1, 0, 255, 30, 1, 0, 255,
+  });
+}
+
+HMW_TEST(transform_cover_scales_one_pixel_wide_source_safely) {
+  const hmw::RgbaFrame source = Frame(1, 1, {7, 8, 9, 10});
+
+  const hmw::Result<hmw::RgbaFrame> result =
+      hmw::TransformRgba(source, Request(4, 8));
+
+  HMW_EXPECT(result.ok());
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+      7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10, 7, 8, 9, 10,
+  });
 }
 
 HMW_TEST(transform_contain_uses_requested_argb_background) {
@@ -99,13 +127,31 @@ HMW_TEST(transform_contain_uses_requested_argb_background) {
   });
 }
 
-HMW_TEST(transform_rotates_before_crop_coordinates) {
-  const hmw::RgbaFrame source = Frame(4, 4, {
-      10, 0, 0, 255, 11, 0, 0, 255, 12, 0, 0, 255, 13, 0, 0, 255,
-      30, 0, 0, 255, 31, 0, 0, 255, 32, 0, 0, 255, 33, 0, 0, 255,
-      50, 0, 0, 255, 51, 0, 0, 255, 52, 0, 0, 255, 53, 0, 0, 255,
-      70, 0, 0, 255, 71, 0, 0, 255, 72, 0, 0, 255, 73, 0, 0, 255,
+HMW_TEST(transform_contain_keeps_each_row_after_horizontal_letterboxing) {
+  const hmw::RgbaFrame source = Frame(2, 4, {
+      10, 1, 2, 255, 20, 1, 2, 255,
+      30, 3, 4, 255, 40, 3, 4, 255,
+      50, 5, 6, 255, 60, 5, 6, 255,
+      70, 7, 8, 255, 80, 7, 8, 255,
   });
+  hmw::TransformRequest request = Request(8, 4);
+  request.fit = hmw::FitMode::kContain;
+  request.background_argb = 0xaabbccdd;
+
+  const hmw::Result<hmw::RgbaFrame> result =
+      hmw::TransformRgba(source, request);
+
+  HMW_EXPECT(result.ok());
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170, 10, 1, 2, 255, 20, 1, 2, 255, 187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170,
+      187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170, 30, 3, 4, 255, 40, 3, 4, 255, 187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170,
+      187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170, 50, 5, 6, 255, 60, 5, 6, 255, 187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170,
+      187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170, 70, 7, 8, 255, 80, 7, 8, 255, 187, 204, 221, 170, 187, 204, 221, 170, 187, 204, 221, 170,
+  });
+}
+
+HMW_TEST(transform_rotates_before_crop_coordinates) {
+  const hmw::RgbaFrame source = FourByFourSource();
   hmw::TransformRequest request = Request();
   request.clockwise_rotation = 90;
   request.crop = hmw::CropRect{0.0, 0.0, 0.5, 1.0};
@@ -114,11 +160,44 @@ HMW_TEST(transform_rotates_before_crop_coordinates) {
       hmw::TransformRgba(source, request);
 
   HMW_EXPECT(result.ok());
-  HMW_EXPECT(result.value->pixels[0] == 70);
-  HMW_EXPECT(result.value->pixels[4] == 65);
-  HMW_EXPECT(result.value->pixels[8] == 55);
-  HMW_EXPECT(result.value->pixels[12] == 50);
-  HMW_EXPECT(result.value->pixels[48] == 73);
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      70, 0, 0, 255, 65, 0, 0, 255, 55, 0, 0, 255, 50, 0, 0, 255,
+      71, 0, 0, 255, 66, 0, 0, 255, 56, 0, 0, 255, 51, 0, 0, 255,
+      72, 0, 0, 255, 67, 0, 0, 255, 57, 0, 0, 255, 52, 0, 0, 255,
+      73, 0, 0, 255, 68, 0, 0, 255, 58, 0, 0, 255, 53, 0, 0, 255,
+  });
+}
+
+HMW_TEST(transform_rotates_180_degrees_with_full_byte_mapping) {
+  hmw::TransformRequest request = Request();
+  request.clockwise_rotation = 180;
+
+  const hmw::Result<hmw::RgbaFrame> result =
+      hmw::TransformRgba(FourByFourSource(), request);
+
+  HMW_EXPECT(result.ok());
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      73, 0, 0, 255, 72, 0, 0, 255, 71, 0, 0, 255, 70, 0, 0, 255,
+      53, 0, 0, 255, 52, 0, 0, 255, 51, 0, 0, 255, 50, 0, 0, 255,
+      33, 0, 0, 255, 32, 0, 0, 255, 31, 0, 0, 255, 30, 0, 0, 255,
+      13, 0, 0, 255, 12, 0, 0, 255, 11, 0, 0, 255, 10, 0, 0, 255,
+  });
+}
+
+HMW_TEST(transform_rotates_270_degrees_with_full_byte_mapping) {
+  hmw::TransformRequest request = Request();
+  request.clockwise_rotation = 270;
+
+  const hmw::Result<hmw::RgbaFrame> result =
+      hmw::TransformRgba(FourByFourSource(), request);
+
+  HMW_EXPECT(result.ok());
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      13, 0, 0, 255, 33, 0, 0, 255, 53, 0, 0, 255, 73, 0, 0, 255,
+      12, 0, 0, 255, 32, 0, 0, 255, 52, 0, 0, 255, 72, 0, 0, 255,
+      11, 0, 0, 255, 31, 0, 0, 255, 51, 0, 0, 255, 71, 0, 0, 255,
+      10, 0, 0, 255, 30, 0, 0, 255, 50, 0, 0, 255, 70, 0, 0, 255,
+  });
 }
 
 HMW_TEST(transform_bilinear_result_is_deterministic) {

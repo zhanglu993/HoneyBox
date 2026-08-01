@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <string_view>
 
 namespace hmw::test {
 
@@ -40,9 +41,13 @@ inline void Expect(bool condition, const char* expression, const char* file,
   }
 }
 
-inline int RunAllTests() {
+inline int RunAllTests(std::string_view filter = {}) {
   failures = 0;
   for (TestCase* test = RegisteredTests(); test != nullptr; test = test->next) {
+    if (!filter.empty() &&
+        std::string_view(test->name).find(filter) == std::string_view::npos) {
+      continue;
+    }
     const int failures_before = failures;
     std::printf("[ RUN      ] %s\n", test->name);
     test->function();

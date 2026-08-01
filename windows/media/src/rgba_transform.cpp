@@ -170,12 +170,18 @@ void BilinearScale(const std::vector<uint8_t>& source_pixels,
                    uint32_t source_width, uint32_t source_height,
                    const PixelRect& crop, uint32_t destination_x,
                    uint32_t destination_y, uint32_t destination_width,
-                   uint32_t destination_height, std::vector<uint8_t>* destination) {
-  const double max_x = crop.x + crop.width - 1.0;
-  const double max_y = crop.y + crop.height - 1.0;
+                   uint32_t destination_height, uint32_t destination_canvas_width,
+                   std::vector<uint8_t>* destination) {
+  const double source_max_x = static_cast<double>(source_width) - 1.0;
+  const double source_max_y = static_cast<double>(source_height) - 1.0;
+  const double min_x = std::clamp(crop.x, 0.0, source_max_x);
+  const double min_y = std::clamp(crop.y, 0.0, source_max_y);
+  const double max_x = std::max(
+      min_x, std::clamp(crop.x + crop.width - 1.0, 0.0, source_max_x));
+  const double max_y = std::max(
+      min_y, std::clamp(crop.y + crop.height - 1.0, 0.0, source_max_y));
   const size_t source_width_size = static_cast<size_t>(source_width);
   const size_t destination_width_size = static_cast<size_t>(destination_width);
-  (void)source_height;
   for (size_t output_y = 0; output_y < static_cast<size_t>(destination_height);
        ++output_y) {
     const double mapped_y = crop.y +
@@ -200,7 +206,7 @@ void BilinearScale(const std::vector<uint8_t>& source_pixels,
       const size_t output_offset = PixelOffset(
           static_cast<size_t>(destination_x) + output_x,
           static_cast<size_t>(destination_y) + output_y,
-          static_cast<size_t>(destination_width));
+          static_cast<size_t>(destination_canvas_width));
       for (size_t channel = 0; channel < 4; ++channel) {
         const double top = static_cast<double>(source_pixels[top_left + channel]) +
             (static_cast<double>(source_pixels[top_right + channel]) -
@@ -283,7 +289,7 @@ Result<RgbaFrame> TransformRgba(const RgbaFrame& source,
     }
     BilinearScale(upright_pixels, upright_width, upright_height, crop,
                   destination_x, destination_y, scaled_width, scaled_height,
-                  &destination);
+                  request.output_width, &destination);
     return Result<RgbaFrame>{
         RgbaFrame{request.output_width, request.output_height, source.pts_100ns,
                   source.duration_100ns, std::move(destination)},
