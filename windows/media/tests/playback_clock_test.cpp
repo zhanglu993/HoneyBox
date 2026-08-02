@@ -57,5 +57,6 @@ HMW_TEST(clock_loops_at_duration) {
 
   const int64_t looped_position_ms = clock.Position();
 
+  HMW_EXPECT(looped_position_ms >= 10);
   HMW_EXPECT(looped_position_ms < 50);
 }

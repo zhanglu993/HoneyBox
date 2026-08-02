@@ -12,12 +12,19 @@
 namespace hmw {
 namespace {
 
+int64_t DurationMilliseconds(int64_t duration_100ns) {
+  const int64_t whole_ms = duration_100ns / 10'000;
+  return whole_ms +
+         (duration_100ns % 10'000 == 0 ? 0 : 1);
+}
+
 template <typename T>
 Result<T> Failure(Status status, const char* message) {
   return Result<T>{std::nullopt, Error{status, message}};
 }
 
-Result<std::vector<uint8_t>> ConvertToBgra(const RgbaFrame& frame) {
+Result<std::vector<uint8_t>> ConvertToBgra(
+    const RgbaFrame& frame, const VideoPlayerDependencies& dependencies) {
   if (frame.width == 0 || frame.height == 0 ||
       frame.width > (std::numeric_limits<size_t>::max)() / 4U /
                         frame.height) {
@@ -31,21 +38,33 @@ Result<std::vector<uint8_t>> ConvertToBgra(const RgbaFrame& frame) {
                                          "video frame RGBA size is invalid");
   }
 
-  std::vector<uint8_t> bgra(byte_count);
-  for (size_t offset = 0; offset < byte_count; offset += 4U) {
-    bgra[offset] = frame.pixels[offset + 2U];
-    bgra[offset + 1U] = frame.pixels[offset + 1U];
-    bgra[offset + 2U] = frame.pixels[offset];
-    bgra[offset + 3U] = frame.pixels[offset + 3U];
+  try {
+    std::vector<uint8_t> bgra =
+        dependencies.allocate_bgra
+            ? dependencies.allocate_bgra(byte_count)
+            : std::vector<uint8_t>(byte_count);
+    if (bgra.size() != byte_count) {
+      return Failure<std::vector<uint8_t>>(
+          Status::kIoError, "video BGRA allocation size is invalid");
+    }
+    for (size_t offset = 0; offset < byte_count; offset += 4U) {
+      bgra[offset] = frame.pixels[offset + 2U];
+      bgra[offset + 1U] = frame.pixels[offset + 1U];
+      bgra[offset + 2U] = frame.pixels[offset];
+      bgra[offset + 3U] = frame.pixels[offset + 3U];
+    }
+    return Result<std::vector<uint8_t>>{std::move(bgra), std::nullopt};
+  } catch (...) {
+    return Failure<std::vector<uint8_t>>(
+        Status::kIoError, "video BGRA allocation failed");
   }
-  return Result<std::vector<uint8_t>>{std::move(bgra), std::nullopt};
 }
 
 }  // namespace
 
 struct VideoTexturePlayer::FrameState {
   std::mutex frame_mutex;
-  std::vector<uint8_t> bgra;
+  std::shared_ptr<const std::vector<uint8_t>> bgra;
   uint32_t width = 0;
   uint32_t height = 0;
   std::mutex lifecycle_mutex;
@@ -58,19 +77,22 @@ struct VideoTexturePlayer::FrameState {
 VideoTexturePlayer::VideoTexturePlayer(
     std::unique_ptr<FrameSource> source, TextureRegistry& texture_registry,
     PlatformDispatcher& dispatcher, std::shared_ptr<FrameState> frame_state,
-    uint32_t width, uint32_t height, int64_t duration_ms)
+    uint32_t width, uint32_t height, int64_t duration_ms,
+    VideoPlayerDependencies dependencies)
     : source_(std::move(source)),
       texture_registry_(texture_registry),
       dispatcher_(dispatcher),
       frame_state_(std::move(frame_state)),
       clock_(duration_ms),
+      dependencies_(std::move(dependencies)),
       width_(width),
       height_(height),
       duration_ms_(duration_ms) {}
 
 Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
     std::unique_ptr<FrameSource> source, TextureRegistry& texture_registry,
-    PlatformDispatcher& dispatcher) {
+    PlatformDispatcher& dispatcher, VideoPlayerDependencies dependencies) {
+  try {
   if (!source) {
     return Failure<std::unique_ptr<VideoTexturePlayer>>(
         Status::kInvalidArgument, "video source must not be null");
@@ -91,7 +113,8 @@ Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
     return Failure<std::unique_ptr<VideoTexturePlayer>>(
         Status::kDecodeFailed, "video source has no frames");
   }
-  Result<std::vector<uint8_t>> converted = ConvertToBgra(first_frame);
+  Result<std::vector<uint8_t>> converted =
+      ConvertToBgra(first_frame, dependencies);
   if (!converted.ok()) {
     return Result<std::unique_ptr<VideoTexturePlayer>>{
         std::nullopt, std::move(converted.error)};
@@ -102,26 +125,32 @@ Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
         "video first frame does not match upright source geometry");
   }
 
-  try {
     auto frame_state = std::make_shared<FrameState>();
-    frame_state->bgra = std::move(*converted.value);
+    frame_state->bgra =
+        std::make_shared<const std::vector<uint8_t>>(std::move(*converted.value));
     frame_state->width = first_frame.width;
     frame_state->height = first_frame.height;
-    const int64_t duration_ms = info.duration_100ns / 10'000;
+    const int64_t duration_ms = DurationMilliseconds(info.duration_100ns);
     auto player = std::unique_ptr<VideoTexturePlayer>(
         new VideoTexturePlayer(std::move(source), texture_registry, dispatcher,
                                frame_state, info.width, info.height,
-                               duration_ms));
+                               duration_ms, std::move(dependencies)));
     std::weak_ptr<FrameState> weak_frame = frame_state;
     const int64_t texture_id =
         texture_registry.RegisterPixelBufferTexture([weak_frame] {
           std::shared_ptr<FrameState> state = weak_frame.lock();
           if (!state || !state->alive.load()) {
-            return PixelBufferView{nullptr, 0, 0, 0};
+            return PixelBufferView{nullptr, nullptr, 0, 0, 0};
           }
           std::lock_guard<std::mutex> lock(state->frame_mutex);
-          return PixelBufferView{state->bgra.data(), state->bgra.size(),
-                                 state->width, state->height};
+          std::shared_ptr<const std::vector<uint8_t>> snapshot =
+              state->bgra;
+          if (!snapshot) {
+            return PixelBufferView{nullptr, nullptr, 0, 0, 0};
+          }
+          return PixelBufferView{snapshot, snapshot->data(),
+                                 snapshot->size(), state->width,
+                                 state->height};
         });
     if (texture_id < 0) {
       return Failure<std::unique_ptr<VideoTexturePlayer>>(
@@ -137,10 +166,13 @@ Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
       return Failure<std::unique_ptr<VideoTexturePlayer>>(
           Status::kInvalidState, "Flutter rejected the first video frame");
     }
-    player->worker_ =
-        std::thread([raw_player = player.get()] {
-          raw_player->WorkerMain();
-        });
+    std::function<void()> worker_entry = [raw_player = player.get()] {
+      raw_player->WorkerMain();
+    };
+    player->worker_ = player->dependencies_.start_worker
+                          ? player->dependencies_.start_worker(
+                                std::move(worker_entry))
+                          : std::thread(std::move(worker_entry));
     return Result<std::unique_ptr<VideoTexturePlayer>>{std::move(player),
                                                        std::nullopt};
   } catch (const std::bad_alloc&) {
@@ -149,6 +181,12 @@ Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
   } catch (const std::system_error&) {
     return Failure<std::unique_ptr<VideoTexturePlayer>>(
         Status::kInvalidState, "video player worker failed to start");
+  } catch (const std::exception&) {
+    return Failure<std::unique_ptr<VideoTexturePlayer>>(
+        Status::kIoError, "video source or texture operation failed");
+  } catch (...) {
+    return Failure<std::unique_ptr<VideoTexturePlayer>>(
+        Status::kIoError, "video player operation failed");
   }
 }
 
@@ -158,7 +196,7 @@ VideoTexturePlayer::~VideoTexturePlayer() {
 
 Outcome VideoTexturePlayer::Play() {
   std::lock_guard<std::mutex> lock(state_mutex_);
-  if (disposed_) {
+  if (disposed_ || dispose_in_progress_ || worker_failed_) {
     return Outcome{Error{Status::kInvalidState,
                          "video player is disposed"}};
   }
@@ -172,7 +210,7 @@ Outcome VideoTexturePlayer::Play() {
 
 Outcome VideoTexturePlayer::Pause() {
   std::lock_guard<std::mutex> lock(state_mutex_);
-  if (disposed_) {
+  if (disposed_ || dispose_in_progress_ || worker_failed_) {
     return Outcome{Error{Status::kInvalidState,
                          "video player is disposed"}};
   }
@@ -190,7 +228,7 @@ Outcome VideoTexturePlayer::Seek(int64_t position_ms) {
                          "video seek position must not be negative"}};
   }
   std::lock_guard<std::mutex> lock(state_mutex_);
-  if (disposed_) {
+  if (disposed_ || dispose_in_progress_ || worker_failed_) {
     return Outcome{Error{Status::kInvalidState,
                          "video player is disposed"}};
   }
@@ -206,7 +244,7 @@ Outcome VideoTexturePlayer::Seek(int64_t position_ms) {
 
 Result<int64_t> VideoTexturePlayer::Position() const {
   std::lock_guard<std::mutex> lock(state_mutex_);
-  if (disposed_) {
+  if (disposed_ || dispose_in_progress_ || worker_failed_) {
     return Failure<int64_t>(Status::kInvalidState,
                             "video player is disposed");
   }
@@ -215,9 +253,38 @@ Result<int64_t> VideoTexturePlayer::Position() const {
 
 Outcome VideoTexturePlayer::Dispose() {
   {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    state_condition_.wait(lock, [this] {
+      return disposed_ || !dispose_in_progress_;
+    });
     if (disposed_) {
       return Outcome{std::nullopt};
+    }
+    dispose_in_progress_ = true;
+  }
+
+  bool unregister_accepted = true;
+  {
+    std::lock_guard<std::mutex> lock(frame_state_->lifecycle_mutex);
+    if (frame_state_->alive.load() &&
+        frame_state_->texture_id >= 0 &&
+        frame_state_->registry != nullptr) {
+      unregister_accepted =
+          frame_state_->registry->UnregisterTexture(
+          frame_state_->texture_id);
+    }
+    if (unregister_accepted) {
+      frame_state_->alive.store(false);
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    dispose_in_progress_ = false;
+    if (!unregister_accepted) {
+      state_condition_.notify_all();
+      return Outcome{Error{Status::kInvalidState,
+                           "Flutter texture unregister failed"}};
     }
     disposed_ = true;
     playing_ = false;
@@ -226,36 +293,39 @@ Outcome VideoTexturePlayer::Dispose() {
     pending_seek_ms_.reset();
     state_condition_.notify_all();
   }
-
-  bool unregistered = true;
-  {
-    std::lock_guard<std::mutex> lock(frame_state_->lifecycle_mutex);
-    if (frame_state_->alive.exchange(false) &&
-        frame_state_->texture_id >= 0 &&
-        frame_state_->registry != nullptr) {
-      unregistered = frame_state_->registry->UnregisterTexture(
-          frame_state_->texture_id);
-    }
-  }
-
   if (worker_.joinable()) {
     worker_.join();
   }
   source_.reset();
   {
     std::lock_guard<std::mutex> lock(frame_state_->frame_mutex);
-    frame_state_->bgra.clear();
+    frame_state_->bgra.reset();
     frame_state_->width = 0;
     frame_state_->height = 0;
-  }
-  if (!unregistered) {
-    return Outcome{Error{Status::kInvalidState,
-                         "Flutter texture unregister failed"}};
   }
   return Outcome{std::nullopt};
 }
 
-void VideoTexturePlayer::WorkerMain() {
+void VideoTexturePlayer::WorkerMain() noexcept {
+  bool failed = false;
+  try {
+    failed = !WorkerLoop();
+  } catch (...) {
+    failed = true;
+  }
+  if (!failed) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  if (!disposed_) {
+    worker_failed_ = true;
+    playing_ = false;
+    clock_.Pause();
+    state_condition_.notify_all();
+  }
+}
+
+bool VideoTexturePlayer::WorkerLoop() {
   bool wait_for_loop = false;
   for (;;) {
     std::optional<int64_t> seek_ms;
@@ -266,7 +336,7 @@ void VideoTexturePlayer::WorkerMain() {
         return disposed_ || pending_seek_ms_.has_value() || playing_;
       });
       if (disposed_) {
-        return;
+        return true;
       }
       generation = generation_;
       if (pending_seek_ms_.has_value()) {
@@ -284,7 +354,9 @@ void VideoTexturePlayer::WorkerMain() {
       RgbaFrame frame{};
       Result<bool> read = source_->ReadNext(&frame);
       if (read.ok() && *read.value) {
-        PublishFrame(std::move(frame), generation);
+        if (!PublishFrame(std::move(frame), generation)) {
+          return false;
+        }
       }
       continue;
     }
@@ -317,7 +389,9 @@ void VideoTexturePlayer::WorkerMain() {
       continue;
     }
     wait_for_loop = false;
-    PublishFrame(std::move(frame), generation);
+    if (!PublishFrame(std::move(frame), generation)) {
+      return false;
+    }
   }
 }
 
@@ -325,8 +399,38 @@ bool VideoTexturePlayer::WaitUntilFrameTime(int64_t pts_ms,
                                             uint64_t generation,
                                             bool wait_for_loop) {
   std::unique_lock<std::mutex> lock(state_mutex_);
-  int64_t previous_position = clock_.Position();
-  bool loop_observed = !wait_for_loop;
+  if (wait_for_loop) {
+    const int64_t current_position_ms = clock_.Position();
+    const int64_t remaining_to_loop_ms =
+        std::max<int64_t>(1, duration_ms_ - current_position_ms);
+    std::chrono::steady_clock::duration remaining_to_loop =
+        std::chrono::milliseconds(remaining_to_loop_ms);
+    while (remaining_to_loop >
+           std::chrono::steady_clock::duration::zero()) {
+      if (disposed_ || generation_ != generation ||
+          pending_seek_ms_.has_value()) {
+        return false;
+      }
+      if (!playing_) {
+        state_condition_.wait(lock, [this, generation] {
+          return disposed_ || generation_ != generation ||
+                 pending_seek_ms_.has_value() || playing_;
+        });
+        continue;
+      }
+      const auto wait_started = std::chrono::steady_clock::now();
+      state_condition_.wait_for(lock, remaining_to_loop);
+      const auto elapsed =
+          std::chrono::steady_clock::now() - wait_started;
+      if (elapsed >= remaining_to_loop) {
+        remaining_to_loop =
+            std::chrono::steady_clock::duration::zero();
+      } else {
+        remaining_to_loop -= elapsed;
+      }
+    }
+  }
+
   for (;;) {
     if (disposed_ || generation_ != generation ||
         pending_seek_ms_.has_value()) {
@@ -341,15 +445,6 @@ bool VideoTexturePlayer::WaitUntilFrameTime(int64_t pts_ms,
     }
 
     const int64_t position_ms = clock_.Position();
-    if (!loop_observed) {
-      if (position_ms < previous_position || position_ms < 10) {
-        loop_observed = true;
-      } else {
-        previous_position = position_ms;
-        state_condition_.wait_for(lock, std::chrono::milliseconds(5));
-        continue;
-      }
-    }
     if (position_ms >= pts_ms) {
       return true;
     }
@@ -360,25 +455,28 @@ bool VideoTexturePlayer::WaitUntilFrameTime(int64_t pts_ms,
   }
 }
 
-void VideoTexturePlayer::PublishFrame(RgbaFrame frame,
+bool VideoTexturePlayer::PublishFrame(RgbaFrame frame,
                                       uint64_t generation) {
-  Result<std::vector<uint8_t>> converted = ConvertToBgra(frame);
+  Result<std::vector<uint8_t>> converted = ConvertToBgra(frame, dependencies_);
   if (!converted.ok()) {
-    return;
+    return false;
   }
+  std::shared_ptr<const std::vector<uint8_t>> snapshot =
+      std::make_shared<const std::vector<uint8_t>>(
+          std::move(*converted.value));
   {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
     if (disposed_ || generation_ != generation) {
-      return;
+      return true;
     }
     std::lock_guard<std::mutex> frame_lock(frame_state_->frame_mutex);
-    frame_state_->bgra.swap(*converted.value);
+    frame_state_->bgra = std::move(snapshot);
     frame_state_->width = frame.width;
     frame_state_->height = frame.height;
   }
 
   std::weak_ptr<FrameState> weak_state = frame_state_;
-  (void)dispatcher_.Post([weak_state, generation] {
+  return dispatcher_.Post([weak_state, generation] {
     std::shared_ptr<FrameState> state = weak_state.lock();
     if (!state) {
       return;

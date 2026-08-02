@@ -66,25 +66,29 @@ void CompleteInvalidPlayer(
 
 struct PlayerChannel::State {
   State(TextureRegistry& registry, PlatformDispatcher& platform_dispatcher,
-        PlayerSourceOpener opener)
+        PlayerSourceOpener opener, PlayerOperationGate gate)
       : texture_registry(registry),
         dispatcher(platform_dispatcher),
-        source_opener(std::move(opener)) {}
+        source_opener(std::move(opener)),
+        operation_gate(std::move(gate)) {}
 
   TextureRegistry& texture_registry;
   PlatformDispatcher& dispatcher;
   PlayerSourceOpener source_opener;
+  PlayerOperationGate operation_gate;
   std::mutex mutex;
   bool alive = true;
-  std::unordered_map<int64_t, std::unique_ptr<VideoTexturePlayer>> players;
+  std::unordered_map<int64_t, std::shared_ptr<VideoTexturePlayer>> players;
   std::unordered_set<int64_t> disposed_ids;
 };
 
 PlayerChannel::PlayerChannel(TextureRegistry& texture_registry,
                              PlatformDispatcher& dispatcher,
-                             PlayerSourceOpener source_opener)
+                             PlayerSourceOpener source_opener,
+                             PlayerOperationGate operation_gate)
     : state_(std::make_unique<State>(
-          texture_registry, dispatcher, std::move(source_opener))) {}
+          texture_registry, dispatcher, std::move(source_opener),
+          std::move(operation_gate))) {}
 
 PlayerChannel::~PlayerChannel() { Shutdown(); }
 
@@ -144,8 +148,8 @@ void PlayerChannel::Handle(
                                     : "video player create failed");
       return;
     }
-    std::unique_ptr<VideoTexturePlayer> player =
-        std::move(*created.value);
+    std::shared_ptr<VideoTexturePlayer> player(
+        std::move(*created.value));
     const int64_t texture_id = player->texture_id();
     const uint32_t width = player->width();
     const uint32_t height = player->height();
@@ -181,7 +185,7 @@ void PlayerChannel::Handle(
   }
 
   if (method == "dispose") {
-    std::unique_ptr<VideoTexturePlayer> player;
+    std::shared_ptr<VideoTexturePlayer> player;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       auto found = state_->players.find(*id);
@@ -194,15 +198,28 @@ void PlayerChannel::Handle(
         }
         return;
       }
-      player = std::move(found->second);
-      state_->players.erase(found);
+      player = found->second;
+    }
+    Outcome disposed = player->Dispose();
+    if (!disposed.ok()) {
+      CompleteOutcome(retained, std::move(disposed));
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      const auto found = state_->players.find(*id);
+      if (found != state_->players.end() &&
+          found->second == player) {
+        state_->players.erase(found);
+      }
       state_->disposed_ids.insert(*id);
     }
-    CompleteOutcome(retained, player->Dispose());
+    retained->Success();
     return;
   }
 
-  VideoTexturePlayer* player = nullptr;
+  std::shared_ptr<VideoTexturePlayer> player;
+  PlayerOperationGate operation_gate;
   {
     std::lock_guard<std::mutex> lock(state_->mutex);
     const auto found = state_->players.find(*id);
@@ -210,7 +227,18 @@ void PlayerChannel::Handle(
       CompleteInvalidPlayer(retained);
       return;
     }
-    player = found->second.get();
+    player = found->second;
+    operation_gate = state_->operation_gate;
+  }
+  if (operation_gate) {
+    try {
+      operation_gate();
+    } catch (...) {
+      CompleteFlutterError(
+          retained, Error{Status::kInvalidState,
+                          "video player operation gate failed"});
+      return;
+    }
   }
 
   if (method == "play") {
@@ -233,7 +261,7 @@ void PlayerChannel::Handle(
 }
 
 void PlayerChannel::Shutdown() {
-  std::unordered_map<int64_t, std::unique_ptr<VideoTexturePlayer>>
+  std::unordered_map<int64_t, std::shared_ptr<VideoTexturePlayer>>
       players;
   {
     std::lock_guard<std::mutex> lock(state_->mutex);

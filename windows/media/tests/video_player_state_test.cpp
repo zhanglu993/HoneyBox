@@ -9,8 +9,11 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -29,9 +32,12 @@ hmw::RgbaFrame TestFrame(int64_t pts_100ns, uint8_t red) {
 class FakeFrameSource final : public hmw::FrameSource {
  public:
   explicit FakeFrameSource(std::vector<hmw::RgbaFrame> frames,
-                           bool block_second_read = false)
+                           bool block_second_read = false,
+                           int64_t duration_100ns = 10'000'000)
       : frames_(std::move(frames)),
-        block_second_read_(block_second_read) {}
+        block_second_read_(block_second_read) {
+    info_.duration_100ns = duration_100ns;
+  }
 
   const hmw::SourceInfo& info() const override { return info_; }
 
@@ -84,6 +90,71 @@ class FakeFrameSource final : public hmw::FrameSource {
   bool release_second_read_ = false;
 };
 
+class CountingLoopSource final : public hmw::FrameSource {
+ public:
+  const hmw::SourceInfo& info() const override { return info_; }
+
+  hmw::Result<bool> ReadNext(hmw::RgbaFrame* frame) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++read_count_;
+    if (!frame_available_) {
+      return hmw::Result<bool>{false, std::nullopt};
+    }
+    frame_available_ = false;
+    *frame = TestFrame(0, 10);
+    return hmw::Result<bool>{true, std::nullopt};
+  }
+
+  hmw::Outcome Seek(int64_t) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    frame_available_ = true;
+    return hmw::Outcome{std::nullopt};
+  }
+
+  size_t read_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return read_count_;
+  }
+
+ private:
+  hmw::SourceInfo info_{2, 1, 1, 10.0, 0, false};
+  mutable std::mutex mutex_;
+  size_t read_count_ = 0;
+  bool frame_available_ = true;
+};
+
+class ThrowingCreateSource final : public hmw::FrameSource {
+ public:
+  enum class Stage {
+    kInfo,
+    kRead,
+  };
+
+  explicit ThrowingCreateSource(Stage stage) : stage_(stage) {}
+
+  const hmw::SourceInfo& info() const override {
+    if (stage_ == Stage::kInfo) {
+      throw std::runtime_error("info failed");
+    }
+    return info_;
+  }
+
+  hmw::Result<bool> ReadNext(hmw::RgbaFrame*) override {
+    if (stage_ == Stage::kRead) {
+      throw std::runtime_error("read failed");
+    }
+    return hmw::Result<bool>{false, std::nullopt};
+  }
+
+  hmw::Outcome Seek(int64_t) override {
+    return hmw::Outcome{std::nullopt};
+  }
+
+ private:
+  Stage stage_;
+  hmw::SourceInfo info_{2, 1, 10'000'000, 10.0, 0, false};
+};
+
 class FakeTextureRegistry final : public hmw::TextureRegistry {
  public:
   int64_t RegisterPixelBufferTexture(
@@ -129,6 +200,105 @@ class FakeTextureRegistry final : public hmw::TextureRegistry {
   std::vector<uint8_t> marked_reds;
   hmw::PixelBufferProvider provider_;
 };
+
+class ThrowingWorkerReadSource final : public hmw::FrameSource {
+ public:
+  const hmw::SourceInfo& info() const override { return info_; }
+
+  hmw::Result<bool> ReadNext(hmw::RgbaFrame* frame) override {
+    if (read_count_++ == 0) {
+      *frame = TestFrame(0, 10);
+      return hmw::Result<bool>{true, std::nullopt};
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      throw_attempted_ = true;
+      condition_.notify_all();
+    }
+    throw std::runtime_error("worker read failed");
+  }
+
+  hmw::Outcome Seek(int64_t) override {
+    return hmw::Outcome{std::nullopt};
+  }
+
+  bool WaitForThrowAttempt() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(
+        lock, std::chrono::seconds(2),
+        [this] { return throw_attempted_; });
+  }
+
+ private:
+  hmw::SourceInfo info_{2, 1, 10'000'000, 10.0, 0, false};
+  size_t read_count_ = 0;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool throw_attempted_ = false;
+};
+
+class ThrowingDispatcher final : public hmw::PlatformDispatcher {
+ public:
+  bool Post(std::function<void()>) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      throw_attempted_ = true;
+      condition_.notify_all();
+    }
+    throw std::runtime_error("dispatcher post failed");
+  }
+
+  bool WaitForThrowAttempt() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(
+        lock, std::chrono::seconds(2),
+        [this] { return throw_attempted_; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool throw_attempted_ = false;
+};
+
+struct AllocationFailureGate {
+  std::vector<uint8_t> Allocate(size_t byte_count) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      ++call_count;
+      if (call_count == 2) {
+        failure_attempted = true;
+        condition.notify_all();
+        throw std::bad_alloc();
+      }
+    }
+    return std::vector<uint8_t>(byte_count);
+  }
+
+  bool WaitForFailureAttempt() {
+    std::unique_lock<std::mutex> lock(mutex);
+    return condition.wait_for(
+        lock, std::chrono::seconds(2),
+        [this] { return failure_attempted; });
+  }
+
+  std::mutex mutex;
+  std::condition_variable condition;
+  size_t call_count = 0;
+  bool failure_attempted = false;
+};
+
+bool WaitForWorkerFailure(hmw::VideoTexturePlayer* player) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!player->Play().ok()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
 
 class QueueDispatcher final : public hmw::PlatformDispatcher {
  public:
@@ -182,6 +352,236 @@ HMW_TEST(player_create_publishes_first_frame_before_success) {
   HMW_EXPECT(registry.last_bytes ==
              std::vector<uint8_t>({30, 20, 10, 255, 60, 50, 40, 255}));
 }
+
+HMW_TEST(player_provider_returns_owned_immutable_snapshot) {
+  FakeTextureRegistry registry;
+  QueueDispatcher dispatcher;
+  auto source = std::make_unique<FakeFrameSource>(
+      std::vector<hmw::RgbaFrame>{TestFrame(0, 10)});
+  auto created =
+      hmw::VideoTexturePlayer::Create(std::move(source), registry, dispatcher);
+  HMW_EXPECT(created.ok());
+  if (!created.ok()) {
+    return;
+  }
+  std::unique_ptr<hmw::VideoTexturePlayer> player =
+      std::move(*created.value);
+
+  const hmw::PixelBufferView snapshot = registry.provider_();
+  HMW_EXPECT(snapshot.owner != nullptr);
+  HMW_EXPECT(snapshot.bgra == snapshot.owner->data());
+  HMW_EXPECT(player->Dispose().ok());
+  HMW_EXPECT(*snapshot.owner ==
+             std::vector<uint8_t>({30, 20, 10, 255,
+                                   60, 50, 40, 255}));
+}
+
+HMW_TEST(player_duration_rounds_positive_100ns_up_to_milliseconds) {
+  struct DurationCase {
+    int64_t duration_100ns;
+    int64_t expected_ms;
+  };
+  const DurationCase cases[] = {
+      {1, 1},
+      {9'999, 1},
+      {(std::numeric_limits<int64_t>::max)(), 922'337'203'685'478},
+  };
+  for (const DurationCase& test_case : cases) {
+    FakeTextureRegistry registry;
+    QueueDispatcher dispatcher;
+    auto source = std::make_unique<FakeFrameSource>(
+        std::vector<hmw::RgbaFrame>{TestFrame(0, 10)}, false,
+        test_case.duration_100ns);
+    auto created = hmw::VideoTexturePlayer::Create(
+        std::move(source), registry, dispatcher);
+    HMW_EXPECT(created.ok());
+    if (created.ok()) {
+      HMW_EXPECT((*created.value)->duration_ms() ==
+                 test_case.expected_ms);
+    }
+  }
+}
+
+HMW_TEST(player_sub_millisecond_video_does_not_hot_loop_at_eof) {
+  FakeTextureRegistry registry;
+  QueueDispatcher dispatcher;
+  auto source = std::make_unique<CountingLoopSource>();
+  CountingLoopSource* source_ptr = source.get();
+  auto created = hmw::VideoTexturePlayer::Create(
+      std::move(source), registry, dispatcher);
+  HMW_EXPECT(created.ok());
+  if (!created.ok()) {
+    return;
+  }
+  std::unique_ptr<hmw::VideoTexturePlayer> player =
+      std::move(*created.value);
+
+  HMW_EXPECT(player->Play().ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  HMW_EXPECT(player->Pause().ok());
+  HMW_EXPECT(source_ptr->read_count() <= 200);
+  HMW_EXPECT(player->Dispose().ok());
+}
+
+HMW_TEST(player_create_translates_source_exceptions_to_io_error) {
+  const ThrowingCreateSource::Stage stages[] = {
+      ThrowingCreateSource::Stage::kInfo,
+      ThrowingCreateSource::Stage::kRead,
+  };
+  for (ThrowingCreateSource::Stage stage : stages) {
+    FakeTextureRegistry registry;
+    QueueDispatcher dispatcher;
+    hmw::Result<std::unique_ptr<hmw::VideoTexturePlayer>> created;
+    bool threw = false;
+    try {
+      created = hmw::VideoTexturePlayer::Create(
+          std::make_unique<ThrowingCreateSource>(stage),
+          registry, dispatcher);
+    } catch (...) {
+      threw = true;
+    }
+
+    HMW_EXPECT(!threw);
+    HMW_EXPECT(!created.ok());
+    HMW_EXPECT(created.error.has_value());
+    if (created.error.has_value()) {
+      HMW_EXPECT(created.error->status == hmw::Status::kIoError);
+    }
+    HMW_EXPECT(registry.register_count == 0);
+    HMW_EXPECT(registry.unregister_count == 0);
+  }
+}
+
+HMW_TEST(player_create_translates_bgra_allocation_failure_to_io_error) {
+  FakeTextureRegistry registry;
+  QueueDispatcher dispatcher;
+  hmw::VideoPlayerDependencies dependencies;
+  dependencies.allocate_bgra =
+      [](size_t) -> std::vector<uint8_t> {
+    throw std::bad_alloc();
+  };
+
+  bool threw = false;
+  hmw::Result<std::unique_ptr<hmw::VideoTexturePlayer>> created;
+  try {
+    created = hmw::VideoTexturePlayer::Create(
+        std::make_unique<FakeFrameSource>(
+            std::vector<hmw::RgbaFrame>{TestFrame(0, 10)}),
+        registry, dispatcher, std::move(dependencies));
+  } catch (...) {
+    threw = true;
+  }
+
+  HMW_EXPECT(!threw);
+  HMW_EXPECT(!created.ok());
+  HMW_EXPECT(created.error.has_value());
+  if (created.error.has_value()) {
+    HMW_EXPECT(created.error->status == hmw::Status::kIoError);
+  }
+  HMW_EXPECT(registry.register_count == 0);
+}
+
+HMW_TEST(player_create_translates_worker_start_failure_and_rolls_back_texture) {
+  FakeTextureRegistry registry;
+  QueueDispatcher dispatcher;
+  hmw::VideoPlayerDependencies dependencies;
+  dependencies.start_worker =
+      [](std::function<void()>) -> std::thread {
+    throw std::system_error(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  };
+
+  bool threw = false;
+  hmw::Result<std::unique_ptr<hmw::VideoTexturePlayer>> created;
+  try {
+    created = hmw::VideoTexturePlayer::Create(
+        std::make_unique<FakeFrameSource>(
+            std::vector<hmw::RgbaFrame>{TestFrame(0, 10)}),
+        registry, dispatcher, std::move(dependencies));
+  } catch (...) {
+    threw = true;
+  }
+
+  HMW_EXPECT(!threw);
+  HMW_EXPECT(!created.ok());
+  HMW_EXPECT(created.error.has_value());
+  if (created.error.has_value()) {
+    HMW_EXPECT(created.error->status == hmw::Status::kInvalidState);
+  }
+  HMW_EXPECT(registry.register_count == 1);
+  HMW_EXPECT(registry.mark_count == 1);
+  HMW_EXPECT(registry.unregister_count == 1);
+}
+
+HMW_TEST(player_worker_translates_source_exception_and_remains_disposable) {
+  FakeTextureRegistry registry;
+  QueueDispatcher dispatcher;
+  auto source = std::make_unique<ThrowingWorkerReadSource>();
+  ThrowingWorkerReadSource* source_ptr = source.get();
+  auto created = hmw::VideoTexturePlayer::Create(
+      std::move(source), registry, dispatcher);
+  HMW_EXPECT(created.ok());
+  if (!created.ok()) {
+    return;
+  }
+  std::unique_ptr<hmw::VideoTexturePlayer> player =
+      std::move(*created.value);
+
+  HMW_EXPECT(player->Play().ok());
+  HMW_EXPECT(source_ptr->WaitForThrowAttempt());
+  HMW_EXPECT(WaitForWorkerFailure(player.get()));
+  HMW_EXPECT(player->Dispose().ok());
+  HMW_EXPECT(registry.unregister_count == 1);
+}
+
+HMW_TEST(player_worker_translates_dispatcher_exception_and_remains_disposable) {
+  FakeTextureRegistry registry;
+  ThrowingDispatcher dispatcher;
+  auto source = std::make_unique<FakeFrameSource>(
+      std::vector<hmw::RgbaFrame>{TestFrame(0, 10), TestFrame(0, 80)});
+  auto created = hmw::VideoTexturePlayer::Create(
+      std::move(source), registry, dispatcher);
+  HMW_EXPECT(created.ok());
+  if (!created.ok()) {
+    return;
+  }
+  std::unique_ptr<hmw::VideoTexturePlayer> player =
+      std::move(*created.value);
+
+  HMW_EXPECT(player->Play().ok());
+  HMW_EXPECT(dispatcher.WaitForThrowAttempt());
+  HMW_EXPECT(WaitForWorkerFailure(player.get()));
+  HMW_EXPECT(player->Dispose().ok());
+  HMW_EXPECT(registry.unregister_count == 1);
+}
+
+HMW_TEST(player_worker_translates_allocation_failure_and_remains_disposable) {
+  FakeTextureRegistry registry;
+  QueueDispatcher dispatcher;
+  auto allocation_gate = std::make_shared<AllocationFailureGate>();
+  hmw::VideoPlayerDependencies dependencies;
+  dependencies.allocate_bgra =
+      [allocation_gate](size_t byte_count) {
+    return allocation_gate->Allocate(byte_count);
+  };
+  auto source = std::make_unique<FakeFrameSource>(
+      std::vector<hmw::RgbaFrame>{TestFrame(0, 10), TestFrame(0, 80)});
+  auto created = hmw::VideoTexturePlayer::Create(
+      std::move(source), registry, dispatcher, std::move(dependencies));
+  HMW_EXPECT(created.ok());
+  if (!created.ok()) {
+    return;
+  }
+  std::unique_ptr<hmw::VideoTexturePlayer> player =
+      std::move(*created.value);
+
+  HMW_EXPECT(player->Play().ok());
+  HMW_EXPECT(allocation_gate->WaitForFailureAttempt());
+  HMW_EXPECT(WaitForWorkerFailure(player.get()));
+  HMW_EXPECT(player->Dispose().ok());
+  HMW_EXPECT(registry.unregister_count == 1);
+}
+
 HMW_TEST(player_seek_flushes_old_generation) {
   FakeTextureRegistry registry;
   QueueDispatcher dispatcher;

@@ -7,6 +7,8 @@
 
 #include <flutter/encodable_value.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -14,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -71,11 +74,18 @@ class ChannelTextureRegistry final : public hmw::TextureRegistry {
   }
 
   bool UnregisterTexture(int64_t id) override {
+    ++unregister_attempts;
+    if (reject_next_unregister) {
+      reject_next_unregister = false;
+      return false;
+    }
     unregistered.push_back(id);
     return true;
   }
 
   std::vector<int64_t> unregistered;
+  int unregister_attempts = 0;
+  bool reject_next_unregister = false;
 
  private:
   int64_t next_id_ = 41;
@@ -300,4 +310,173 @@ HMW_TEST(player_channel_decodes_dart_path_as_utf8) {
     EncodableValue id_arguments = IdArguments(texture_id);
     HMW_EXPECT(Invoke(channel, "dispose", &id_arguments)->successes == 1);
   }
+}
+
+HMW_TEST(player_channel_retries_dispose_when_unregister_is_rejected) {
+  ChannelTextureRegistry registry;
+  ChannelDispatcher dispatcher;
+  hmw::PlayerChannel channel(
+      registry, dispatcher,
+      [](const std::filesystem::path&) {
+        std::unique_ptr<hmw::FrameSource> source =
+            std::make_unique<ChannelSource>();
+        return hmw::Result<std::unique_ptr<hmw::FrameSource>>{
+            std::move(source), std::nullopt};
+      });
+
+  EncodableValue create_arguments(EncodableMap{
+      {EncodableValue("path"), EncodableValue("retry.mp4")},
+  });
+  auto created = Invoke(channel, "create", &create_arguments);
+  HMW_EXPECT(created->successes == 1);
+  HMW_EXPECT(created->value.has_value());
+  if (!created->value.has_value()) {
+    return;
+  }
+  const int64_t texture_id =
+      IntegerValue(MapValue(*created->value, "textureId"));
+  EncodableValue id_arguments = IdArguments(texture_id);
+
+  registry.reject_next_unregister = true;
+  auto rejected = Invoke(channel, "dispose", &id_arguments);
+  HMW_EXPECT(rejected->errors == 1);
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  HMW_EXPECT(registry.unregistered.empty());
+
+  auto retained = Invoke(channel, "position", &id_arguments);
+  HMW_EXPECT(retained->successes == 1);
+  HMW_EXPECT(retained->errors == 0);
+
+  auto retried = Invoke(channel, "dispose", &id_arguments);
+  HMW_EXPECT(retried->successes == 1);
+  HMW_EXPECT(registry.unregister_attempts == 2);
+  HMW_EXPECT(registry.unregistered ==
+             std::vector<int64_t>({texture_id}));
+
+  auto repeated = Invoke(channel, "dispose", &id_arguments);
+  HMW_EXPECT(repeated->successes == 1);
+  HMW_EXPECT(registry.unregister_attempts == 2);
+}
+
+HMW_TEST(player_channel_handle_keeps_player_alive_during_concurrent_dispose) {
+  ChannelTextureRegistry registry;
+  ChannelDispatcher dispatcher;
+  std::mutex gate_mutex;
+  std::condition_variable gate_condition;
+  bool operation_captured = false;
+  bool release_operation = false;
+  hmw::PlayerChannel channel(
+      registry, dispatcher,
+      [](const std::filesystem::path&) {
+        std::unique_ptr<hmw::FrameSource> source =
+            std::make_unique<ChannelSource>();
+        return hmw::Result<std::unique_ptr<hmw::FrameSource>>{
+            std::move(source), std::nullopt};
+      },
+      [&] {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        operation_captured = true;
+        gate_condition.notify_all();
+        gate_condition.wait(lock, [&] { return release_operation; });
+      });
+
+  EncodableValue create_arguments(EncodableMap{
+      {EncodableValue("path"), EncodableValue("concurrent.mp4")},
+  });
+  auto created = Invoke(channel, "create", &create_arguments);
+  HMW_EXPECT(created->successes == 1);
+  HMW_EXPECT(created->value.has_value());
+  if (!created->value.has_value()) {
+    return;
+  }
+  const int64_t texture_id =
+      IntegerValue(MapValue(*created->value, "textureId"));
+  EncodableValue id_arguments = IdArguments(texture_id);
+
+  std::shared_ptr<ChannelCapture> position;
+  std::thread operation_thread([&] {
+    position = Invoke(channel, "position", &id_arguments);
+  });
+  {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    HMW_EXPECT(gate_condition.wait_for(
+        lock, std::chrono::seconds(2),
+        [&] { return operation_captured; }));
+  }
+
+  auto disposed = Invoke(channel, "dispose", &id_arguments);
+  HMW_EXPECT(disposed->successes == 1);
+  {
+    std::lock_guard<std::mutex> lock(gate_mutex);
+    release_operation = true;
+    gate_condition.notify_all();
+  }
+  operation_thread.join();
+
+  HMW_EXPECT(position != nullptr);
+  HMW_EXPECT(position->errors == 1);
+  HMW_EXPECT(position->error_code == "invalid_state");
+  HMW_EXPECT(registry.unregister_attempts == 1);
+}
+
+HMW_TEST(player_channel_handle_keeps_player_alive_during_concurrent_shutdown) {
+  ChannelTextureRegistry registry;
+  ChannelDispatcher dispatcher;
+  std::mutex gate_mutex;
+  std::condition_variable gate_condition;
+  bool operation_captured = false;
+  bool release_operation = false;
+  hmw::PlayerChannel channel(
+      registry, dispatcher,
+      [](const std::filesystem::path&) {
+        std::unique_ptr<hmw::FrameSource> source =
+            std::make_unique<ChannelSource>();
+        return hmw::Result<std::unique_ptr<hmw::FrameSource>>{
+            std::move(source), std::nullopt};
+      },
+      [&] {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        operation_captured = true;
+        gate_condition.notify_all();
+        gate_condition.wait(lock, [&] { return release_operation; });
+      });
+
+  EncodableValue create_arguments(EncodableMap{
+      {EncodableValue("path"), EncodableValue("shutdown.mp4")},
+  });
+  auto created = Invoke(channel, "create", &create_arguments);
+  HMW_EXPECT(created->successes == 1);
+  HMW_EXPECT(created->value.has_value());
+  if (!created->value.has_value()) {
+    return;
+  }
+  const int64_t texture_id =
+      IntegerValue(MapValue(*created->value, "textureId"));
+  EncodableValue id_arguments = IdArguments(texture_id);
+
+  std::shared_ptr<ChannelCapture> position;
+  std::thread operation_thread([&] {
+    position = Invoke(channel, "position", &id_arguments);
+  });
+  {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    HMW_EXPECT(gate_condition.wait_for(
+        lock, std::chrono::seconds(2),
+        [&] { return operation_captured; }));
+  }
+
+  channel.Shutdown();
+  {
+    std::lock_guard<std::mutex> lock(gate_mutex);
+    release_operation = true;
+    gate_condition.notify_all();
+  }
+  operation_thread.join();
+
+  HMW_EXPECT(position != nullptr);
+  HMW_EXPECT(position->errors == 1);
+  HMW_EXPECT(position->error_code == "invalid_state");
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  auto after_shutdown = Invoke(channel, "position", &id_arguments);
+  HMW_EXPECT(after_shutdown->errors == 1);
 }

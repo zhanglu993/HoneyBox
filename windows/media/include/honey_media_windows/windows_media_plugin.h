@@ -57,12 +57,14 @@ void HoneyMediaWindowsPluginRegisterWithRegistrar(
 namespace hmw {
 using PlayerSourceOpener = std::function<
     Result<std::unique_ptr<FrameSource>>(const std::filesystem::path&)>;
+using PlayerOperationGate = std::function<void()>;
 
 class PlayerChannel final {
  public:
   PlayerChannel(TextureRegistry& texture_registry,
                 PlatformDispatcher& dispatcher,
-                PlayerSourceOpener source_opener = OpenMediaSource);
+                PlayerSourceOpener source_opener = OpenMediaSource,
+                PlayerOperationGate operation_gate = {});
   ~PlayerChannel();
 
   PlayerChannel(const PlayerChannel&) = delete;

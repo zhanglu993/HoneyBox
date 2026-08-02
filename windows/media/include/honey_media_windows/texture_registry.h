@@ -3,10 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <vector>
 
 namespace hmw {
 
 struct PixelBufferView {
+  std::shared_ptr<const std::vector<uint8_t>> owner;
   const uint8_t* bgra;
   size_t byte_count;
   uint32_t width;
