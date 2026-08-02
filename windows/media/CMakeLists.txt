@@ -65,7 +65,7 @@ if(BUILD_TESTING)
   add_test(NAME media_converter_cancel
     COMMAND honey_media_windows_tests convert_cancel_returns_no_partial_avi)
   add_test(NAME media_converter_png_cancel
-    COMMAND honey_media_windows_tests png_operations_recheck_cancel_after_encoder_returns)
+    COMMAND honey_media_windows_tests png_)
   add_test(NAME media_converter_slideshow
     COMMAND honey_media_windows_tests slideshow_forces_key_frame_for_each_source_slide)
   add_test(NAME media_converter_scroll

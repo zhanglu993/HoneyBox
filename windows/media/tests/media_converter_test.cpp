@@ -442,6 +442,100 @@ HMW_TEST(png_operations_recheck_cancel_after_encoder_returns) {
       [&cancel]() { return cancel; }));
   HMW_EXPECT(encode_calls == 3);
 }
+
+HMW_TEST(png_encoder_error_does_not_override_cancellation) {
+  const hmw::SlideshowRequest slideshow{{SolidFrame(4, 20, 40, 60)},
+                                        {1}, 4, 10, 100};
+  const hmw::Result<hmw::ConversionResult> encoded =
+      hmw::EncodeSlideshow(slideshow, IgnoreProgress, NeverCancel);
+  HMW_EXPECT(encoded.ok());
+  if (!encoded.ok()) {
+    return;
+  }
+  const TemporaryFile cached_file(".avi", encoded.value->avi);
+  bool cancel = false;
+  uint32_t encode_calls = 0;
+  hmw::internal::ScopedPngEncoderOverride override_encoder(
+      [&cancel, &encode_calls](const hmw::RgbaFrame&) {
+        ++encode_calls;
+        cancel = true;
+        return hmw::Result<std::vector<uint8_t>>{
+            std::nullopt,
+            hmw::Error{hmw::Status::kEncodeFailed, "injected PNG failure"}};
+      });
+  const auto expect_cancelled = [](const auto& result) {
+    HMW_EXPECT(!result.ok() && !result.value.has_value());
+    HMW_EXPECT(result.error.has_value());
+    if (result.error) {
+      HMW_EXPECT(result.error->status == hmw::Status::kCancelled);
+    }
+  };
+
+  cancel = false;
+  expect_cancelled(hmw::MakeThumbnail(
+      hmw::ThumbnailRequest{GifFixturePath()}, [&cancel]() { return cancel; }));
+  cancel = false;
+  expect_cancelled(hmw::MakePreview(
+      hmw::PreviewRequest{GifFixturePath(), 1, 4},
+      [&cancel]() { return cancel; }));
+  cancel = false;
+  expect_cancelled(hmw::DecodeCachedCvid(
+      hmw::DecodeCvidRequest{cached_file.path(), 1, 4},
+      [&cancel]() { return cancel; }));
+  HMW_EXPECT(encode_calls == 3);
+}
+
+HMW_TEST(png_encoder_override_restores_nested_slots) {
+  uint32_t outer_calls = 0;
+  uint32_t inner_calls = 0;
+  {
+    hmw::internal::ScopedPngEncoderOverride outer(
+        [&outer_calls](const hmw::RgbaFrame&) {
+          ++outer_calls;
+          return hmw::Result<std::vector<uint8_t>>{
+              std::vector<uint8_t>{11U}, std::nullopt};
+        });
+    const hmw::Result<hmw::ThumbnailResult> outer_before =
+        hmw::MakeThumbnail(hmw::ThumbnailRequest{GifFixturePath()},
+                           NeverCancel);
+    HMW_EXPECT(outer_before.ok());
+    if (outer_before.ok()) {
+      HMW_EXPECT(outer_before.value->png == std::vector<uint8_t>{11U});
+    }
+    {
+      hmw::internal::ScopedPngEncoderOverride inner(
+          [&inner_calls](const hmw::RgbaFrame&) {
+            ++inner_calls;
+            return hmw::Result<std::vector<uint8_t>>{
+                std::vector<uint8_t>{22U}, std::nullopt};
+          });
+      const hmw::Result<hmw::ThumbnailResult> inner_result =
+          hmw::MakeThumbnail(hmw::ThumbnailRequest{GifFixturePath()},
+                             NeverCancel);
+      HMW_EXPECT(inner_result.ok());
+      if (inner_result.ok()) {
+        HMW_EXPECT(inner_result.value->png == std::vector<uint8_t>{22U});
+      }
+    }
+    const hmw::Result<hmw::ThumbnailResult> outer_after =
+        hmw::MakeThumbnail(hmw::ThumbnailRequest{GifFixturePath()},
+                           NeverCancel);
+    HMW_EXPECT(outer_after.ok());
+    if (outer_after.ok()) {
+      HMW_EXPECT(outer_after.value->png == std::vector<uint8_t>{11U});
+    }
+  }
+  const hmw::Result<hmw::ThumbnailResult> default_result =
+      hmw::MakeThumbnail(hmw::ThumbnailRequest{GifFixturePath()}, NeverCancel);
+  HMW_EXPECT(default_result.ok());
+  if (default_result.ok()) {
+    HMW_EXPECT(PngDimensions(default_result.value->png) ==
+               std::make_pair(4U, 4U));
+  }
+  HMW_EXPECT(outer_calls == 2);
+  HMW_EXPECT(inner_calls == 1);
+}
+
 HMW_TEST(thumbnail_and_preview_obey_max_edge_and_count) {
   const hmw::Result<hmw::ThumbnailResult> thumbnail =
       hmw::MakeThumbnail(hmw::ThumbnailRequest{GifFixturePath()}, NeverCancel);

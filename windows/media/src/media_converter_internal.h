@@ -35,6 +35,11 @@ class ScopedPngEncoderOverride {
 
   ScopedPngEncoderOverride(const ScopedPngEncoderOverride&) = delete;
   ScopedPngEncoderOverride& operator=(const ScopedPngEncoderOverride&) = delete;
+  ScopedPngEncoderOverride(ScopedPngEncoderOverride&&) = delete;
+  ScopedPngEncoderOverride& operator=(ScopedPngEncoderOverride&&) = delete;
+
+ private:
+  PngEncoder previous_;
 };
 
 }  // namespace hmw::internal

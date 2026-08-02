@@ -225,11 +225,11 @@ Result<std::vector<uint8_t>> PreviewPng(const RgbaFrame& frame,
     return Cancelled<std::vector<uint8_t>>();
   }
   Result<std::vector<uint8_t>> png = EncodePngForMedia(*resized.value);
-  if (!png.ok()) {
-    return png;
-  }
   if (IsCancellationRequested(cancelled)) {
     return Cancelled<std::vector<uint8_t>>();
+  }
+  if (!png.ok()) {
+    return png;
   }
   return png;
 }
@@ -378,12 +378,13 @@ Result<std::reference_wrapper<const RgbaFrame>> ForwardFrameSampler::Sample(
   return SampleResult{std::cref(*current_), std::nullopt};
 }
 
-ScopedPngEncoderOverride::ScopedPngEncoderOverride(PngEncoder encoder) {
+ScopedPngEncoderOverride::ScopedPngEncoderOverride(PngEncoder encoder)
+    : previous_(std::move(PngEncoderOverride())) {
   PngEncoderOverride() = std::move(encoder);
 }
 
 ScopedPngEncoderOverride::~ScopedPngEncoderOverride() {
-  PngEncoderOverride() = PngEncoder{};
+  PngEncoderOverride() = std::move(previous_);
 }
 
 }  // namespace internal
@@ -497,11 +498,11 @@ Result<ThumbnailResult> MakeThumbnail(const ThumbnailRequest& request,
     return Cancelled<ThumbnailResult>();
   }
   Result<std::vector<uint8_t>> png = EncodePngForMedia(frame);
-  if (!png.ok()) {
-    return ForwardError<ThumbnailResult>(std::move(png));
-  }
   if (IsCancellationRequested(cancelled)) {
     return Cancelled<ThumbnailResult>();
+  }
+  if (!png.ok()) {
+    return ForwardError<ThumbnailResult>(std::move(png));
   }
   return Result<ThumbnailResult>{
       ThumbnailResult{std::move(*png.value), frame.width, frame.height,
