@@ -17,12 +17,14 @@ add_subdirectory(
 add_library(honey_media_windows_core
   src/channel_contract.cpp
   src/cinepak_pipeline.cpp
+  src/conversion_controller.cpp
   src/gif_source.cpp
   src/media_foundation_runtime.cpp
   src/media_foundation_source.cpp
   src/media_foundation_source_internal.cpp
   src/media_source_factory.cpp
   src/media_converter.cpp
+  src/platform_dispatcher.cpp
   src/png_codec.cpp
   src/rgba_transform.cpp
   src/wic_helpers.cpp
@@ -53,6 +55,7 @@ endif()
 if(BUILD_TESTING)
   add_subdirectory(tests)
   target_sources(honey_media_windows_tests PRIVATE
+    tests/conversion_controller_test.cpp
     tests/media_converter_test.cpp
   )
   target_link_libraries(honey_media_windows_tests PRIVATE honey_media_core)
@@ -76,4 +79,10 @@ if(BUILD_TESTING)
     COMMAND honey_media_windows_tests thumbnail_and_preview_obey_max_edge_and_count)
   add_test(NAME media_converter_dispatch
     COMMAND honey_media_windows_tests job_dispatch_covers_every_converter_channel_operation)
+  add_test(NAME conversion_controller_state
+    COMMAND honey_media_windows_tests controller_)
+  add_test(NAME conversion_controller_dispatch_failure
+    COMMAND honey_media_windows_tests dispatch_failure_)
+  add_test(NAME conversion_controller_win32_dispatcher
+    COMMAND honey_media_windows_tests win32_dispatcher_)
 endif()
