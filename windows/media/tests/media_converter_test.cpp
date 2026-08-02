@@ -1,16 +1,26 @@
 #include "honey_media_windows/media_converter.h"
+#include "honey_media_windows/rgba_transform.h"
 #include "../src/media_converter_internal.h"
 
 #include "honey_media_core/media_core.h"
+#include "benchmark_support.h"
 #include "test_support.h"
 
+#define NOMINMAX
+#include <windows.h>
+#include <bcrypt.h>
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <variant>
@@ -19,6 +29,38 @@
 namespace {
 
 constexpr uint32_t kCvid = HMC_MEDIA_FOURCC('c', 'v', 'i', 'd');
+
+std::string Sha256Hex(const std::vector<uint8_t>& bytes) {
+  HMW_EXPECT(bytes.size() <= (std::numeric_limits<ULONG>::max)());
+  if (bytes.size() > (std::numeric_limits<ULONG>::max)()) {
+    return {};
+  }
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  NTSTATUS status = BCryptOpenAlgorithmProvider(
+      &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0U);
+  HMW_EXPECT(status >= 0);
+  std::array<UCHAR, 32U> digest{};
+  if (status >= 0) {
+    status = BCryptHash(
+        algorithm, nullptr, 0U,
+        const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(bytes.data())),
+        static_cast<ULONG>(bytes.size()), digest.data(),
+        static_cast<ULONG>(digest.size()));
+    HMW_EXPECT(status >= 0);
+  }
+  if (algorithm != nullptr) {
+    HMW_EXPECT(BCryptCloseAlgorithmProvider(algorithm, 0U) >= 0);
+  }
+  if (status < 0) {
+    return {};
+  }
+  std::ostringstream hex;
+  hex << std::hex << std::setfill('0');
+  for (const UCHAR byte : digest) {
+    hex << std::setw(2) << static_cast<unsigned int>(byte);
+  }
+  return hex.str();
+}
 
 std::filesystem::path ProjectPath(const std::filesystem::path& relative) {
   return std::filesystem::path(HMW_PROJECT_SOURCE_DIR) / relative;
@@ -222,6 +264,109 @@ std::pair<uint32_t, uint32_t> PngDimensions(
 }
 
 }  // namespace
+
+HMW_TEST(benchmark_fixture_default_avi_sha256_baseline) {
+  const hmw::Result<hmw::ConversionResult> converted = hmw::ConvertMedia(
+      hmw::test::DefaultBenchmarkRequest(hmw::test::MovFixturePath()),
+      IgnoreProgress, NeverCancel);
+  HMW_EXPECT(converted.ok());
+  if (!converted.ok()) {
+    return;
+  }
+  const size_t length = converted.value->avi.size();
+  const std::string sha256 = Sha256Hex(converted.value->avi);
+  std::printf("ROUND3A_BASELINE_LENGTH=%zu\n", length);
+  std::printf("ROUND3A_BASELINE_SHA256=%s\n", sha256.c_str());
+  HMW_EXPECT(length == 2098498U);
+  HMW_EXPECT(sha256 == "f48ebfb6abf4327e5bff5a6ada68bf942a5b73e8d6a7f4a8da15a7be78d46ef2");
+}
+
+HMW_TEST(benchmark_fixture_sampled_frames_equal_old_transform_bytes) {
+  hmw::Result<std::unique_ptr<hmw::FrameSource>> opened =
+      hmw::OpenMediaSource(hmw::test::MovFixturePath());
+  HMW_EXPECT(opened.ok());
+  if (!opened.ok()) {
+    return;
+  }
+  std::unique_ptr<hmw::FrameSource> source = std::move(*opened.value);
+  const hmw::SourceInfo info = source->info();
+  HMW_EXPECT(info.width == 360U);
+  HMW_EXPECT(info.height == 360U);
+  HMW_EXPECT(info.clockwise_rotation == 0U);
+  HMW_EXPECT(!info.is_gif);
+
+  hmw::internal::ForwardFrameSampler sampler(source.get());
+  constexpr uint32_t kFrameCount = 120U;
+  constexpr int64_t kFrameDuration100ns = 1000000;
+  for (uint32_t index = 0U; index < kFrameCount; ++index) {
+    const hmw::Result<std::reference_wrapper<const hmw::RgbaFrame>> sampled =
+        sampler.Sample(static_cast<int64_t>(index) * kFrameDuration100ns,
+                       NeverCancel);
+    HMW_EXPECT(sampled.ok());
+    if (!sampled.ok()) {
+      return;
+    }
+    const hmw::RgbaFrame& frame = sampled.value->get();
+    const hmw::Result<hmw::RgbaFrame> transformed = hmw::TransformRgba(
+        frame,
+        hmw::TransformRequest{360U, 360U, hmw::FitMode::kCover, std::nullopt,
+                              0xff000000U, 0U});
+    HMW_EXPECT(transformed.ok());
+    if (!transformed.ok()) {
+      return;
+    }
+    HMW_EXPECT(transformed.value->width == frame.width);
+    HMW_EXPECT(transformed.value->height == frame.height);
+    HMW_EXPECT(transformed.value->pts_100ns == frame.pts_100ns);
+    HMW_EXPECT(transformed.value->duration_100ns == frame.duration_100ns);
+    HMW_EXPECT(transformed.value->pixels == frame.pixels);
+  }
+}
+
+HMW_TEST(identity_conversion_frame_requires_exact_safe_context) {
+  hmw::RgbaFrame sampled = SolidFrame(4U, 10U, 20U, 30U);
+  const hmw::SourceInfo source_info{4U, 4U, 10000000, 10.0, 0U, false};
+  hmw::ConversionRequest request =
+      hmw::test::DefaultBenchmarkRequest("unused.mov");
+  request.width = 4U;
+  request.height = 4U;
+
+  HMW_EXPECT(hmw::internal::CanUseIdentityConversionFrame(
+      sampled, source_info, 4U, 4U, request));
+
+  hmw::SourceInfo changed_info = source_info;
+  changed_info.is_gif = true;
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      sampled, changed_info, 4U, 4U, request));
+  changed_info = source_info;
+  changed_info.clockwise_rotation = 90U;
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      sampled, changed_info, 4U, 4U, request));
+  changed_info = source_info;
+  changed_info.width = 8U;
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      sampled, changed_info, 4U, 4U, request));
+
+  hmw::ConversionRequest changed_request = request;
+  changed_request.crop = hmw::CropRect{0.0, 0.0, 1.0, 1.0};
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      sampled, source_info, 4U, 4U, changed_request));
+  changed_request = request;
+  changed_request.background_argb = 0xffffffffU;
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      sampled, source_info, 4U, 4U, changed_request));
+  changed_request = request;
+  changed_request.fit = hmw::FitMode::kContain;
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      sampled, source_info, 4U, 4U, changed_request));
+
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      sampled, source_info, 8U, 4U, request));
+  hmw::RgbaFrame malformed = sampled;
+  malformed.pixels.pop_back();
+  HMW_EXPECT(!hmw::internal::CanUseIdentityConversionFrame(
+      malformed, source_info, 4U, 4U, request));
+}
 
 HMW_TEST(convert_mov_produces_readable_cvid_avi) {
   const hmw::Result<hmw::ConversionResult> converted = hmw::ConvertMedia(

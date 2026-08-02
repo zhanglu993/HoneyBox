@@ -378,6 +378,20 @@ Result<std::reference_wrapper<const RgbaFrame>> ForwardFrameSampler::Sample(
   return SampleResult{std::cref(*current_), std::nullopt};
 }
 
+bool CanUseIdentityConversionFrame(const RgbaFrame& sampled,
+                                   const SourceInfo& source_info,
+                                   uint32_t output_width,
+                                   uint32_t output_height,
+                                   const ConversionRequest& request) {
+  return !source_info.is_gif && source_info.clockwise_rotation == 0U &&
+         source_info.width == sampled.width &&
+         source_info.height == sampled.height && !request.crop.has_value() &&
+         request.fit == FitMode::kCover &&
+         request.background_argb == 0xff000000U &&
+         output_width == sampled.width && output_height == sampled.height &&
+         IsTightlyPacked(sampled);
+}
+
 ScopedPngEncoderOverride::ScopedPngEncoderOverride(PngEncoder encoder)
     : previous_(std::move(PngEncoderOverride())) {
   PngEncoderOverride() = std::move(encoder);
@@ -442,8 +456,14 @@ Result<ConversionResult> ConvertMedia(const ConversionRequest& request,
       return Result<std::reference_wrapper<const RgbaFrame>>{
           std::nullopt, std::move(sampled.error)};
     }
+    const RgbaFrame& sampled_frame = sampled.value->get();
+    if (internal::CanUseIdentityConversionFrame(sampled_frame, info, width,
+                                                height, request)) {
+      return Result<std::reference_wrapper<const RgbaFrame>>{
+          std::cref(sampled_frame), std::nullopt};
+    }
     Result<RgbaFrame> transformed = TransformRgba(
-        sampled.value->get(),
+        sampled_frame,
         TransformRequest{width, height, request.fit, request.crop,
                                   request.background_argb, 0});
     if (!transformed.ok()) {

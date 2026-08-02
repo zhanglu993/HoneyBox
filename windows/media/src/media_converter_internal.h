@@ -25,6 +25,12 @@ class ForwardFrameSampler {
   bool eof_ = false;
 };
 
+bool CanUseIdentityConversionFrame(const RgbaFrame& sampled,
+                                   const SourceInfo& source_info,
+                                   uint32_t output_width,
+                                   uint32_t output_height,
+                                   const ConversionRequest& request);
+
 using PngEncoder =
     std::function<Result<std::vector<uint8_t>>(const RgbaFrame&)>;
 

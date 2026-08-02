@@ -91,7 +91,7 @@ if(BUILD_TESTING)
     tests/conversion_controller_test.cpp
     tests/media_converter_test.cpp
   )
-  target_link_libraries(honey_media_windows_tests PRIVATE honey_media_core advapi32)
+  target_link_libraries(honey_media_windows_tests PRIVATE honey_media_core advapi32 bcrypt)
   add_test(NAME media_converter_convert_mov
     COMMAND honey_media_windows_tests convert_mov_produces_readable_cvid_avi)
   add_test(NAME media_converter_convert_gif
