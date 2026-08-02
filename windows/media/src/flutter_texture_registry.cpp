@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <list>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,7 @@ class FlutterTextureRegistry final : public TextureRegistry {
             registrar, std::move(before_insert))) {}
 
   ~FlutterTextureRegistry() override {
+    RetryPendingRollbacksForDestruction(state_);
     for (;;) {
       int64_t texture_id = -1;
       {
@@ -54,28 +56,50 @@ class FlutterTextureRegistry final : public TextureRegistry {
       return -1;
     }
     try {
-      auto entry = std::make_shared<Entry>(std::move(provider));
+      auto entry =
+          std::make_shared<Entry>(std::move(provider));
       if (!entry->Refresh()) {
         return -1;
       }
+      auto rollback =
+          std::make_shared<PendingRollback>(entry);
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->pending_rollbacks.push_back(rollback);
+        // If RegisterTexture itself throws after retaining the raw pointer,
+        // there is no texture id to unregister. Keep the Entry safely leaked.
+        rollback->unregister_keepalive = rollback;
+      }
       const int64_t texture_id =
           state->registrar->RegisterTexture(&entry->texture);
-      if (texture_id < 0) {
-        return -1;
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        rollback->texture_id = texture_id;
+        rollback->unregister_keepalive.reset();
+        if (texture_id < 0) {
+          RemovePendingRollbackLocked(state.get(), rollback);
+          return -1;
+        }
       }
       try {
         if (state->before_insert) {
           state->before_insert();
         }
-        std::lock_guard<std::mutex> lock(state->mutex);
-        const auto inserted = state->entries.emplace(
-            texture_id, Registration{entry, false});
-        if (!inserted.second) {
-          RollbackRegistration(state, texture_id, std::move(entry));
+        bool inserted = false;
+        {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          inserted = state->entries.emplace(
+              texture_id, Registration{entry, false}).second;
+          if (inserted) {
+            RemovePendingRollbackLocked(state.get(), rollback);
+          }
+        }
+        if (!inserted) {
+          (void)RequestRollback(state, rollback);
           return -1;
         }
       } catch (...) {
-        RollbackRegistration(state, texture_id, std::move(entry));
+        (void)RequestRollback(state, rollback);
         return -1;
       }
       return texture_id;
@@ -151,11 +175,22 @@ class FlutterTextureRegistry final : public TextureRegistry {
     FlutterDesktopPixelBuffer pixel_buffer{};
     flutter::PixelBufferTexture pixel_texture;
     flutter::TextureVariant texture;
+    std::shared_ptr<Entry> unregister_keepalive;
   };
 
   struct Registration {
     std::shared_ptr<Entry> entry;
     bool unregistering;
+  };
+
+  struct PendingRollback {
+    explicit PendingRollback(std::shared_ptr<Entry> retained_entry)
+        : entry(std::move(retained_entry)) {}
+
+    std::shared_ptr<Entry> entry;
+    std::shared_ptr<PendingRollback> unregister_keepalive;
+    int64_t texture_id = -1;
+    bool unregistering = false;
   };
 
   struct State {
@@ -168,20 +203,78 @@ class FlutterTextureRegistry final : public TextureRegistry {
     std::function<void()> before_insert;
     std::mutex mutex;
     std::unordered_map<int64_t, Registration> entries;
+    std::list<std::shared_ptr<PendingRollback>> pending_rollbacks;
   };
 
-  static void RollbackRegistration(
-      const std::shared_ptr<State>& state, int64_t texture_id,
-      std::shared_ptr<Entry> entry) noexcept {
+  static void RemovePendingRollbackLocked(
+      State* state, const std::shared_ptr<PendingRollback>& rollback) {
+    for (auto found = state->pending_rollbacks.begin();
+         found != state->pending_rollbacks.end(); ++found) {
+      if (*found == rollback) {
+        state->pending_rollbacks.erase(found);
+        return;
+      }
+    }
+  }
+
+  static bool RequestRollback(
+      const std::shared_ptr<State>& state,
+      const std::shared_ptr<PendingRollback>& rollback) noexcept {
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      if (rollback->unregistering || rollback->texture_id < 0) {
+        return rollback->unregistering;
+      }
+      rollback->unregistering = true;
+      // Flutter stores a raw TextureVariant pointer. Establish a no-throw
+      // self-reference before constructing the callback, which may allocate.
+      rollback->unregister_keepalive = rollback;
+    }
     if (state->registrar == nullptr) {
-      return;
+      std::lock_guard<std::mutex> lock(state->mutex);
+      rollback->unregistering = false;
+      return false;
     }
     try {
       state->registrar->UnregisterTexture(
-          texture_id, [entry = std::move(entry)] {});
+          rollback->texture_id, [state, rollback] {
+            {
+              std::lock_guard<std::mutex> lock(state->mutex);
+              RemovePendingRollbackLocked(state.get(), rollback);
+            }
+            rollback->entry.reset();
+            rollback->unregister_keepalive.reset();
+          });
+      return true;
     } catch (...) {
-      // The Flutter registrar contract is non-throwing. Returning failure is
-      // still preferable to letting an embedder exception cross the channel.
+      std::lock_guard<std::mutex> lock(state->mutex);
+      rollback->unregistering = false;
+      return false;
+    }
+  }
+
+  static void RetryPendingRollbacksForDestruction(
+      const std::shared_ptr<State>& state) noexcept {
+    for (;;) {
+      std::shared_ptr<PendingRollback> rollback;
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        for (const auto& candidate : state->pending_rollbacks) {
+          if (!candidate->unregistering && candidate->texture_id >= 0) {
+            rollback = candidate;
+            break;
+          }
+        }
+      }
+      if (!rollback) {
+        return;
+      }
+      if (!RequestRollback(state, rollback)) {
+        // No callback exists to prove Flutter released its raw pointer.
+        // Leave the self-cycle intact as an intentional process-lifetime leak.
+        std::lock_guard<std::mutex> lock(state->mutex);
+        rollback->unregistering = true;
+      }
     }
   }
 
@@ -199,6 +292,9 @@ class FlutterTextureRegistry final : public TextureRegistry {
       }
       found->second.unregistering = true;
       entry = found->second.entry;
+      // Keep TextureVariant alive even if std::function construction or the
+      // registrar call throws before Flutter accepts the callback.
+      entry->unregister_keepalive = entry;
     }
     if (state->registrar == nullptr) {
       std::lock_guard<std::mutex> lock(state->mutex);
@@ -210,9 +306,12 @@ class FlutterTextureRegistry final : public TextureRegistry {
     }
     try {
       state->registrar->UnregisterTexture(
-          texture_id, [state, texture_id, entry = std::move(entry)] {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            state->entries.erase(texture_id);
+          texture_id, [state, texture_id, entry] {
+            {
+              std::lock_guard<std::mutex> lock(state->mutex);
+              state->entries.erase(texture_id);
+            }
+            entry->unregister_keepalive.reset();
           });
       return true;
     } catch (...) {

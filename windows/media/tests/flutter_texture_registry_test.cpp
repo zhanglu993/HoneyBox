@@ -345,3 +345,74 @@ HMW_TEST(flutter_texture_registry_rolls_back_when_map_insert_throws) {
   HMW_EXPECT(flutter_registrar.texture_ == nullptr);
   HMW_EXPECT(source_lifetime.expired());
 }
+
+HMW_TEST(
+    flutter_texture_registry_keeps_failed_insert_entry_when_rollback_throws) {
+  FakeFlutterTextureRegistrar flutter_registrar;
+  flutter_registrar.delay_unregister = true;
+  flutter_registrar.throw_next_unregister = true;
+  std::unique_ptr<hmw::TextureRegistry> registry =
+      hmw::CreateFlutterTextureRegistryForTesting(
+          &flutter_registrar, [] { throw std::bad_alloc(); });
+  HMW_EXPECT(registry != nullptr);
+  if (!registry) {
+    return;
+  }
+
+  auto source = std::make_shared<const std::vector<uint8_t>>(
+      std::initializer_list<uint8_t>{51, 52, 53, 255,
+                                     54, 55, 56, 255});
+  std::weak_ptr<const std::vector<uint8_t>> source_lifetime = source;
+  const int64_t texture_id = registry->RegisterPixelBufferTexture(
+      [source] {
+        return hmw::PixelBufferView{
+            source, source->data(), source->size(), 2, 1};
+      });
+
+  HMW_EXPECT(texture_id < 0);
+  source.reset();
+  HMW_EXPECT(flutter_registrar.register_count == 1);
+  HMW_EXPECT(flutter_registrar.async_unregister_count == 1);
+  HMW_EXPECT(flutter_registrar.texture_ != nullptr);
+  HMW_EXPECT(!source_lifetime.expired());
+
+  registry.reset();
+  HMW_EXPECT(flutter_registrar.async_unregister_count == 2);
+  HMW_EXPECT(flutter_registrar.texture_ != nullptr);
+  HMW_EXPECT(!source_lifetime.expired());
+
+  flutter_registrar.CompletePendingUnregister();
+  HMW_EXPECT(flutter_registrar.texture_ == nullptr);
+  HMW_EXPECT(source_lifetime.expired());
+}
+
+HMW_TEST(
+    flutter_texture_registry_destructor_safely_leaks_when_unregister_throws) {
+  FakeFlutterTextureRegistrar flutter_registrar;
+  std::unique_ptr<hmw::TextureRegistry> registry =
+      hmw::CreateFlutterTextureRegistry(&flutter_registrar);
+  HMW_EXPECT(registry != nullptr);
+  if (!registry) {
+    return;
+  }
+
+  auto source = std::make_shared<const std::vector<uint8_t>>(
+      std::initializer_list<uint8_t>{61, 62, 63, 255,
+                                     64, 65, 66, 255});
+  std::weak_ptr<const std::vector<uint8_t>> source_lifetime = source;
+  const int64_t texture_id = registry->RegisterPixelBufferTexture(
+      [source] {
+        return hmw::PixelBufferView{
+            source, source->data(), source->size(), 2, 1};
+      });
+  HMW_EXPECT(texture_id == 41);
+
+  source.reset();
+  flutter_registrar.throw_next_unregister = true;
+  registry.reset();
+
+  HMW_EXPECT(flutter_registrar.async_unregister_count == 1);
+  HMW_EXPECT(flutter_registrar.sync_unregister_count == 0);
+  HMW_EXPECT(flutter_registrar.texture_ != nullptr);
+  HMW_EXPECT(!source_lifetime.expired());
+}
