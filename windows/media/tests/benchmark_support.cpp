@@ -6,14 +6,17 @@
 
 #include <Windows.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 
 namespace hmw::test {
@@ -156,6 +159,80 @@ Error BenchmarkError(Status status, std::string message) {
 
 }  // namespace
 
+Result<std::filesystem::path> BenchmarkEvidencePathFromWideArguments(
+    const std::vector<std::wstring>& arguments) {
+  if (arguments.size() != 3U || arguments[1] != L"--json" ||
+      arguments[2].empty()) {
+    return {std::nullopt,
+            BenchmarkError(Status::kInvalidArgument,
+                           "expected --json and an evidence path")};
+  }
+  return {std::filesystem::path(arguments[2]), std::nullopt};
+}
+
+Outcome WriteBenchmarkEvidenceAtomically(
+    const std::filesystem::path& destination,
+    const std::string& json,
+    AtomicEvidenceReplace replace) {
+  if (destination.empty() || !replace) {
+    return {
+        BenchmarkError(Status::kInvalidArgument,
+                       "evidence destination or replace callback is invalid")};
+  }
+
+  std::error_code error;
+  const std::filesystem::path parent = destination.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent, error);
+    if (error) {
+      return {BenchmarkError(Status::kIoError,
+                             "evidence directory could not be created")};
+    }
+  }
+
+  static std::atomic<uint64_t> temporary_sequence{0U};
+  const uint64_t sequence = temporary_sequence.fetch_add(1U);
+  const std::filesystem::path temporary =
+      parent /
+      (destination.filename().wstring() + L".tmp-" +
+       std::to_wstring(GetCurrentProcessId()) + L"-" +
+       std::to_wstring(sequence));
+
+  {
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    output.write(json.data(), static_cast<std::streamsize>(json.size()));
+    output.flush();
+    if (!output.good()) {
+      output.close();
+      std::error_code cleanup_error;
+      std::filesystem::remove(temporary, cleanup_error);
+      return {BenchmarkError(Status::kIoError,
+                             "temporary evidence could not be written")};
+    }
+  }
+
+  if (!replace(temporary, destination)) {
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary, cleanup_error);
+    return {BenchmarkError(Status::kIoError,
+                           "evidence could not be replaced atomically")};
+  }
+  return {std::nullopt};
+}
+
+Outcome WriteBenchmarkEvidenceAtomically(
+    const std::filesystem::path& destination,
+    const std::string& json) {
+  return WriteBenchmarkEvidenceAtomically(
+      destination, json,
+      [](const std::filesystem::path& temporary,
+         const std::filesystem::path& final_path) {
+        return MoveFileExW(
+                   temporary.c_str(), final_path.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+      });
+}
+
 ConversionRequest DefaultBenchmarkRequest(
     const std::filesystem::path& mov_fixture) {
   return ConversionRequest{mov_fixture,
@@ -208,59 +285,101 @@ std::string BenchmarkEvidenceJson(const BenchmarkEvidence& evidence) {
   return output.str();
 }
 
-Result<uint64_t> MeasureRealCancellationMilliseconds(
-    const std::filesystem::path& mov_fixture) {
-  QueueDispatcher dispatcher;
-  ConversionController controller(dispatcher);
+Result<uint64_t> MeasureCancellationMillisecondsWithHooks(
+    CancellationMeasurementHooks hooks) {
+  if (!hooks.start || !hooks.cancel || !hooks.pump || !hooks.quiesce) {
+    return {std::nullopt,
+            BenchmarkError(Status::kInvalidArgument,
+                           "benchmark cancellation hooks are incomplete")};
+  }
+
   bool saw_progress = false;
-  bool completed = false;
   uint32_t completion_count = 0U;
-  Result<MediaJobResult> completion_result{};
-  const Result<uint64_t> started = controller.Start(
-      DefaultBenchmarkRequest(mov_fixture),
+  std::optional<Result<MediaJobResult>> first_completion;
+  std::optional<std::chrono::steady_clock::time_point> first_completed_at;
+  const Result<uint64_t> started = hooks.start(
       [&saw_progress](uint32_t, uint32_t) { saw_progress = true; },
-      [&completed, &completion_count,
-       &completion_result](Result<MediaJobResult> result) {
+      [&completion_count, &first_completion,
+       &first_completed_at](Result<MediaJobResult> result) {
         ++completion_count;
-        completion_result = std::move(result);
-        completed = true;
+        if (!first_completion.has_value()) {
+          first_completion = std::move(result);
+          first_completed_at = std::chrono::steady_clock::now();
+        }
       });
   if (!started.ok()) {
+    hooks.quiesce();
     return {std::nullopt, std::move(started.error)};
   }
 
   const auto progress_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!saw_progress && std::chrono::steady_clock::now() < progress_deadline) {
-    (void)dispatcher.RunOne(std::chrono::milliseconds(100));
+    (void)hooks.pump(std::chrono::milliseconds(100));
   }
   if (!saw_progress) {
-    controller.Shutdown();
+    hooks.quiesce();
     return {std::nullopt,
             BenchmarkError(Status::kInvalidState,
                            "benchmark did not report progress")};
   }
 
   const auto cancelled_at = std::chrono::steady_clock::now();
-  controller.Cancel();
+  hooks.cancel();
   const auto completion_deadline = cancelled_at + std::chrono::seconds(5);
-  while (!completed &&
+  while (!first_completion.has_value() &&
          std::chrono::steady_clock::now() < completion_deadline) {
-    (void)dispatcher.RunOne(std::chrono::milliseconds(100));
+    (void)hooks.pump(std::chrono::milliseconds(100));
   }
-  const uint64_t elapsed = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - cancelled_at)
-          .count());
-  controller.Shutdown();
-  if (!completed || completion_count != 1U || completion_result.ok() ||
-      !completion_result.error.has_value() ||
-      completion_result.error->status != Status::kCancelled) {
+
+  if (first_completion.has_value()) {
+    const auto drain_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (std::chrono::steady_clock::now() < drain_deadline &&
+           hooks.pump(std::chrono::milliseconds(50))) {
+    }
+  }
+
+  const bool completion_is_unique_cancel =
+      completion_count == 1U && first_completion.has_value() &&
+      first_completed_at.has_value() && !first_completion->ok() &&
+      first_completion->error.has_value() &&
+      first_completion->error->status == Status::kCancelled &&
+      *first_completed_at >= cancelled_at;
+
+  // The completion callback means the real worker has finished its terminal
+  // work. Drain dispatcher callbacks and validate uniqueness before Shutdown
+  // invalidates the controller's callbacks.
+  hooks.quiesce();
+  if (!completion_is_unique_cancel) {
     return {std::nullopt,
             BenchmarkError(Status::kInvalidState,
                            "benchmark cancellation completion was invalid")};
   }
+
+  const uint64_t elapsed = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          *first_completed_at - cancelled_at)
+          .count());
   return {elapsed, std::nullopt};
+}
+
+Result<uint64_t> MeasureRealCancellationMilliseconds(
+    const std::filesystem::path& mov_fixture) {
+  QueueDispatcher dispatcher;
+  ConversionController controller(dispatcher);
+  CancellationMeasurementHooks hooks;
+  hooks.start = [&controller, &mov_fixture](
+                    Progress progress, BenchmarkCompletion completion) {
+    return controller.Start(DefaultBenchmarkRequest(mov_fixture),
+                            std::move(progress), std::move(completion));
+  };
+  hooks.cancel = [&controller] { controller.Cancel(); };
+  hooks.pump = [&dispatcher](std::chrono::milliseconds timeout) {
+    return dispatcher.RunOne(timeout);
+  };
+  hooks.quiesce = [&controller] { controller.Shutdown(); };
+  return MeasureCancellationMillisecondsWithHooks(std::move(hooks));
 }
 
 Result<BenchmarkEvidence> RunTenSecondEquivalentBenchmark(

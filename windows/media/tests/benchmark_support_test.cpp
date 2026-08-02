@@ -2,8 +2,84 @@
 
 #include "test_support.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <optional>
 #include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace {
+
+class TemporaryDirectory {
+ public:
+  TemporaryDirectory() {
+    static std::atomic<uint64_t> counter{0U};
+    const uint64_t sequence = counter.fetch_add(1U);
+    const auto timestamp = std::chrono::steady_clock::now()
+                               .time_since_epoch()
+                               .count();
+    path_ = std::filesystem::temp_directory_path() /
+            ("hmw-benchmark-" + std::to_string(timestamp) + "-" +
+             std::to_string(sequence));
+    std::error_code error;
+    std::filesystem::create_directories(path_, error);
+    HMW_EXPECT(!error);
+  }
+
+  ~TemporaryDirectory() {
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+
+  const std::filesystem::path& path() const { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+class ScopedCurrentDirectory {
+ public:
+  explicit ScopedCurrentDirectory(const std::filesystem::path& path)
+      : previous_(std::filesystem::current_path()) {
+    std::error_code error;
+    std::filesystem::current_path(path, error);
+    HMW_EXPECT(!error);
+  }
+
+  ~ScopedCurrentDirectory() {
+    std::error_code error;
+    std::filesystem::current_path(previous_, error);
+  }
+
+ private:
+  std::filesystem::path previous_;
+};
+
+std::string ReadText(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(input),
+                     std::istreambuf_iterator<char>());
+}
+
+void WriteText(const std::filesystem::path& path, const std::string& text) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  output << text;
+  HMW_EXPECT(output.good());
+}
+
+hmw::Result<hmw::MediaJobResult> CancelledResult() {
+  return {std::nullopt,
+          hmw::Error{hmw::Status::kCancelled, "cancelled by test"}};
+}
+
+}  // namespace
 
 HMW_TEST(benchmark_accumulates_at_least_ten_source_seconds) {
   HMW_EXPECT(hmw::test::BenchmarkSourceSecondsForDuration(3.25) == 13.0);
@@ -50,16 +126,115 @@ HMW_TEST(benchmark_json_contains_machine_source_elapsed_and_cancel_fields) {
       "CPU \"name\"", 17179869184ULL, "Windows 11\n23H2", 10.5,
       8.25, 250U, true, true};
   const std::string json = hmw::test::BenchmarkEvidenceJson(evidence);
-  HMW_EXPECT(json.find("\"cpu\":\"CPU \\\"name\\\"\"") !=
-             std::string::npos);
-  HMW_EXPECT(json.find("\"memory_bytes\":17179869184") !=
-             std::string::npos);
-  HMW_EXPECT(json.find("\"windows_version\":\"Windows 11\\n23H2\"") !=
-             std::string::npos);
-  HMW_EXPECT(json.find("\"source_seconds\":10.5") != std::string::npos);
-  HMW_EXPECT(json.find("\"elapsed_seconds\":8.25") != std::string::npos);
-  HMW_EXPECT(json.find("\"cancel_milliseconds\":250") !=
-             std::string::npos);
-  HMW_EXPECT(json.find("\"realtime_pass\":true") != std::string::npos);
-  HMW_EXPECT(json.find("\"cancel_pass\":true") != std::string::npos);
+  const std::string expected =
+      "{\"cpu\":\"CPU \\\"name\\\"\",\"memory_bytes\":17179869184,"
+      "\"windows_version\":\"Windows 11\\n23H2\","
+      "\"source_seconds\":10.5,\"elapsed_seconds\":8.25,"
+      "\"cancel_milliseconds\":250,\"realtime_pass\":true,"
+      "\"cancel_pass\":true}\n";
+  HMW_EXPECT(json == expected);
+}
+
+HMW_TEST(benchmark_evidence_path_preserves_non_acp_unicode) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path destination =
+      directory.path() / L"证据-😀.json";
+  const std::vector<std::wstring> arguments{
+      L"hmw_windows_media_benchmark.exe", L"--json", destination.native()};
+  const auto parsed =
+      hmw::test::BenchmarkEvidencePathFromWideArguments(arguments);
+  HMW_EXPECT(parsed.ok());
+  if (!parsed.ok()) {
+    return;
+  }
+  HMW_EXPECT(*parsed.value == destination);
+  const hmw::Outcome written =
+      hmw::test::WriteBenchmarkEvidenceAtomically(*parsed.value, "{}\n");
+  HMW_EXPECT(written.ok());
+  HMW_EXPECT(ReadText(destination) == "{}\n");
+}
+
+HMW_TEST(benchmark_atomic_write_supports_parentless_path) {
+  const TemporaryDirectory directory;
+  const ScopedCurrentDirectory current(directory.path());
+  const std::filesystem::path destination = L"证据-😀.json";
+  const hmw::Outcome written =
+      hmw::test::WriteBenchmarkEvidenceAtomically(destination, "first");
+  HMW_EXPECT(written.ok());
+  HMW_EXPECT(ReadText(destination) == "first");
+}
+
+HMW_TEST(benchmark_atomic_write_creates_directories_and_replaces_old_file) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path destination =
+      directory.path() / L"嵌套-😀" / L"证据.json";
+  HMW_EXPECT(
+      hmw::test::WriteBenchmarkEvidenceAtomically(destination, "old").ok());
+  HMW_EXPECT(
+      hmw::test::WriteBenchmarkEvidenceAtomically(destination, "new").ok());
+  HMW_EXPECT(ReadText(destination) == "new");
+}
+
+HMW_TEST(benchmark_atomic_move_failure_preserves_old_file_and_cleans_temp) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path destination =
+      directory.path() / L"证据-😀.json";
+  WriteText(destination, "old");
+  std::filesystem::path observed_temporary;
+  const hmw::Outcome written = hmw::test::WriteBenchmarkEvidenceAtomically(
+      destination, "new",
+      [&observed_temporary](const std::filesystem::path& temporary,
+                            const std::filesystem::path&) {
+        observed_temporary = temporary;
+        return false;
+      });
+  HMW_EXPECT(!written.ok());
+  HMW_EXPECT(ReadText(destination) == "old");
+  HMW_EXPECT(!observed_temporary.empty());
+  HMW_EXPECT(!std::filesystem::exists(observed_temporary));
+}
+
+HMW_TEST(benchmark_cancellation_drains_duplicate_completion_before_quiesce) {
+  std::deque<std::function<void()>> queue;
+  hmw::Progress progress_callback;
+  hmw::test::BenchmarkCompletion completion_callback;
+  bool quiesced = false;
+  hmw::test::CancellationMeasurementHooks hooks;
+  hooks.start = [&queue, &progress_callback, &completion_callback](
+                    hmw::Progress progress,
+                    hmw::test::BenchmarkCompletion completion) {
+    progress_callback = std::move(progress);
+    completion_callback = std::move(completion);
+    queue.push_back([&progress_callback] { progress_callback(1U, 2U); });
+    return hmw::Result<uint64_t>{1U, std::nullopt};
+  };
+  hooks.cancel = [&queue, &completion_callback] {
+    queue.push_back(
+        [&completion_callback] { completion_callback(CancelledResult()); });
+    queue.push_back(
+        [&completion_callback] { completion_callback(CancelledResult()); });
+  };
+  hooks.pump = [&queue](std::chrono::milliseconds) {
+    if (queue.empty()) {
+      return false;
+    }
+    std::function<void()> callback = std::move(queue.front());
+    queue.pop_front();
+    callback();
+    return true;
+  };
+  hooks.quiesce = [&queue, &quiesced] {
+    quiesced = true;
+    queue.clear();
+  };
+
+  const hmw::Result<uint64_t> measured =
+      hmw::test::MeasureCancellationMillisecondsWithHooks(std::move(hooks));
+  HMW_EXPECT(!measured.ok());
+  HMW_EXPECT(measured.error.has_value());
+  if (measured.error) {
+    HMW_EXPECT(measured.error->status == hmw::Status::kInvalidState);
+  }
+  HMW_EXPECT(quiesced);
+  HMW_EXPECT(queue.empty());
 }

@@ -1,12 +1,9 @@
 #include "benchmark_support.h"
 
-#include <Windows.h>
-
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <string>
-#include <system_error>
+#include <vector>
 
 namespace {
 
@@ -15,42 +12,17 @@ std::filesystem::path MovFixturePath() {
          "assets/example/video/badge-preset-video-1.mov";
 }
 
-bool WriteAtomically(const std::filesystem::path& destination,
-                     const std::string& contents) {
-  std::error_code error;
-  const std::filesystem::path parent = destination.parent_path();
-  if (!parent.empty()) {
-    std::filesystem::create_directories(parent, error);
-    if (error) {
-      return false;
-    }
-  }
-  const std::filesystem::path temporary =
-      destination.parent_path() /
-      (destination.filename().wstring() + L".tmp-" +
-       std::to_wstring(GetCurrentProcessId()));
-  {
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
-    output.flush();
-    if (!output.good()) {
-      output.close();
-      std::filesystem::remove(temporary, error);
-      return false;
-    }
-  }
-  if (!MoveFileExW(temporary.c_str(), destination.c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-    std::filesystem::remove(temporary, error);
-    return false;
-  }
-  return true;
-}
-
 }  // namespace
 
-int main(int argc, char** argv) {
-  if (argc != 3 || std::string(argv[1]) != "--json") {
+int wmain(int argc, wchar_t** argv) {
+  std::vector<std::wstring> arguments;
+  arguments.reserve(static_cast<size_t>(argc));
+  for (int index = 0; index < argc; ++index) {
+    arguments.emplace_back(argv[index]);
+  }
+  const auto evidence_path =
+      hmw::test::BenchmarkEvidencePathFromWideArguments(arguments);
+  if (!evidence_path.ok()) {
     std::cerr << "usage: hmw_windows_media_benchmark.exe --json <path>\n";
     return 2;
   }
@@ -63,7 +35,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::string json = hmw::test::BenchmarkEvidenceJson(*result.value);
-  if (!WriteAtomically(std::filesystem::path(argv[2]), json)) {
+  if (!hmw::test::WriteBenchmarkEvidenceAtomically(*evidence_path.value, json)
+           .ok()) {
     std::cerr << "benchmark evidence could not be written atomically\n";
     return 2;
   }
