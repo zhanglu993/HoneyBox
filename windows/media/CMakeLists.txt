@@ -112,6 +112,8 @@ if(BUILD_TESTING)
     COMMAND honey_media_windows_tests thumbnail_and_preview_obey_max_edge_and_count)
   add_test(NAME benchmark_support
     COMMAND honey_media_windows_tests benchmark_)
+  add_test(NAME media_converter_identity
+    COMMAND honey_media_windows_tests identity_conversion_frame_requires_exact_safe_context)
   add_test(NAME media_converter_dispatch
     COMMAND honey_media_windows_tests job_dispatch_covers_every_converter_channel_operation)
   add_test(NAME conversion_controller_state

@@ -3,11 +3,13 @@
 #include "cinepak_encoder.hpp"
 #include "test_support.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -130,6 +132,47 @@ std::vector<std::uint8_t> mixed_skip_v1_v4_rgba(std::uint32_t width)
         }
     }
     return rgba;
+}
+
+std::size_t reference_nearest_codebook(
+    const std::int32_t *data,
+    const double *centroids,
+    std::size_t codebook_count,
+    std::int32_t chroma_weight,
+    std::size_t *evaluated_terms = nullptr)
+{
+    constexpr std::size_t dimensions = 6u;
+    if (evaluated_terms != nullptr) {
+        *evaluated_terms = 0u;
+    }
+    std::size_t best = 0u;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (std::size_t c = 0u; c < codebook_count; ++c) {
+        const std::size_t cb = c * dimensions;
+        double distance = 0.0;
+        for (std::size_t d = 0u; d < 4u; ++d) {
+            const double delta = data[d] - centroids[cb + d];
+            distance += delta * delta;
+            if (evaluated_terms != nullptr) {
+                ++*evaluated_terms;
+            }
+        }
+        double delta = data[4] - centroids[cb + 4u];
+        distance += static_cast<double>(chroma_weight) * delta * delta;
+        if (evaluated_terms != nullptr) {
+            ++*evaluated_terms;
+        }
+        delta = data[5] - centroids[cb + 5u];
+        distance += static_cast<double>(chroma_weight) * delta * delta;
+        if (evaluated_terms != nullptr) {
+            ++*evaluated_terms;
+        }
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = c;
+        }
+    }
+    return best;
 }
 
 } // namespace
@@ -587,6 +630,117 @@ HMC_TEST(cinepak_encoder_lloyd_near_tie_uses_lower_index_without_contraction)
     HMC_EXPECT(centroids[0] > 0.0 && centroids[0] < 1.0);
     HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook(
         data, centroids, 2u, 4) == 0u);
+}
+
+HMC_TEST(cinepak_nearest_codebook_counts_zero_match_and_first_term_rejection)
+{
+    const std::int32_t data[6]{};
+    const double zero_first[] = {
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        10.0, 10.0, 10.0, 10.0, 10.0, 10.0,
+        -10.0, -10.0, -10.0, -10.0, -10.0, -10.0,
+    };
+    std::size_t reference_terms = 0u;
+    HMC_EXPECT(reference_nearest_codebook(
+        data, zero_first, 3u, 4, &reference_terms) == 0u);
+    HMC_EXPECT(reference_terms == 6u * 3u);
+    std::size_t evaluated_terms = 0u;
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        data, zero_first, 3u, 4, &evaluated_terms) == 0u);
+    HMC_EXPECT(evaluated_terms == 6u);
+
+    const double rejected_after_first[] = {
+        1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        2.0, 50.0, 50.0, 50.0, 50.0, 50.0,
+        -1.0, 50.0, 50.0, 50.0, 50.0, 50.0,
+    };
+    HMC_EXPECT(reference_nearest_codebook(
+        data, rejected_after_first, 3u, 4, &reference_terms) == 0u);
+    HMC_EXPECT(reference_terms == 6u * 3u);
+    evaluated_terms = 0u;
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        data, rejected_after_first, 3u, 4, &evaluated_terms) == 0u);
+    HMC_EXPECT(evaluated_terms == 8u);
+    HMC_EXPECT(evaluated_terms < 6u * 3u);
+}
+
+HMC_TEST(cinepak_nearest_codebook_matches_ordered_full_distance_corpus)
+{
+    constexpr std::size_t dimensions = 6u;
+    const std::array<std::int32_t, dimensions> tie_data{{5, 0, 0, 0, 0, 0}};
+    const double tie_centroids[] = {
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        10.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    };
+    std::size_t terms = 0u;
+    HMC_EXPECT(reference_nearest_codebook(
+        tie_data.data(), tie_centroids, 2u, 4) == 0u);
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        tie_data.data(), tie_centroids, 2u, 4, &terms) == 0u);
+
+    const std::array<std::int32_t, dimensions> later_data{{0, 0, 0, 0, 0, 0}};
+    const double later_centroids[] = {
+        0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    };
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        later_data.data(), later_centroids, 2u, 4, &terms) ==
+        reference_nearest_codebook(later_data.data(), later_centroids, 2u, 4));
+
+    const double near_tie_centroids[] = {
+        0x1.ec39220f61c91p-7, 0x1.1354301b7d6c4p+0,
+        0x1.c7b384c7b384cp+0, 0x1.bfcb517df12efp-4, 0.0, 0.0,
+        0x1.1354301b7d6c4p+0, 0x1.bfcb517df12efp-4,
+        0x1.ec39220f61c91p-7, 0x1.c7b384c7b384cp+0, 0.0, 0.0,
+    };
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        later_data.data(), near_tie_centroids, 2u, 4, &terms) ==
+        reference_nearest_codebook(later_data.data(), near_tie_centroids, 2u, 4));
+
+    const double infinity_centroids[] = {
+        0.0, 0.0, 0.0, 0.0,
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(),
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    };
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        later_data.data(), infinity_centroids, 2u, 0, &terms) ==
+        reference_nearest_codebook(later_data.data(), infinity_centroids, 2u, 0));
+
+    const double finite_after_infinity[] = {
+        std::numeric_limits<double>::infinity(),
+        0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    };
+    HMC_EXPECT(reference_nearest_codebook(
+        later_data.data(), finite_after_infinity, 2u, 4) == 1u);
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        later_data.data(), finite_after_infinity, 2u, 4, &terms) == 1u);
+
+    constexpr std::size_t codebooks = 7u;
+    std::array<double, codebooks * dimensions> centroids{};
+    for (std::size_t sample = 0u; sample < 41u; ++sample) {
+        std::array<std::int32_t, dimensions> generated_data{};
+        for (std::size_t d = 0u; d < dimensions; ++d) {
+            generated_data[d] = static_cast<std::int32_t>(
+                (sample * 37u + d * 11u) % 257u) - 128;
+        }
+        for (std::size_t c = 0u; c < codebooks; ++c) {
+            for (std::size_t d = 0u; d < dimensions; ++d) {
+                const std::int32_t whole = static_cast<std::int32_t>(
+                    (sample * 7u + c * 53u + d * 29u) % 311u) - 155;
+                centroids[c * dimensions + d] =
+                    static_cast<double>(whole) + ((c + d) % 4u) * 0.25;
+            }
+        }
+        for (const std::int32_t chroma_weight : {0, 1, 4}) {
+            const std::size_t expected = reference_nearest_codebook(
+                generated_data.data(), centroids.data(), codebooks, chroma_weight);
+            HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+                generated_data.data(), centroids.data(), codebooks,
+                chroma_weight, &terms) == expected);
+        }
+    }
 }
 
 HMC_TEST(cinepak_encoder_quality_boundaries_control_v4_and_strict_zero_threshold)

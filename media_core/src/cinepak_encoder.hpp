@@ -69,6 +69,12 @@ HMC_API std::size_t cinepak_encoder_test_nearest_codebook(
     const double *centroids,
     std::size_t codebook_count,
     std::int32_t chroma_weight) noexcept;
+HMC_API std::size_t cinepak_encoder_test_nearest_codebook_with_term_count(
+    const std::int32_t *data,
+    const double *centroids,
+    std::size_t codebook_count,
+    std::int32_t chroma_weight,
+    std::size_t *evaluated_terms) noexcept;
 HMC_API void cinepak_encoder_test_fail_nth_allocation(
     std::size_t allocation_number) noexcept;
 HMC_API void cinepak_encoder_test_clear_allocation_failure() noexcept;

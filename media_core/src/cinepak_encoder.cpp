@@ -467,24 +467,65 @@ std::size_t nearest_codebook(
     const std::int32_t *data,
     const double *centroids,
     std::size_t codebook_count,
-    std::int32_t chroma_weight) noexcept
+    std::int32_t chroma_weight
+#if defined(HMC_ENABLE_TEST_HOOKS)
+    , std::size_t *evaluated_terms = nullptr
+#endif
+    ) noexcept
 {
+#if defined(HMC_ENABLE_TEST_HOOKS)
+    if (evaluated_terms != nullptr) {
+        *evaluated_terms = 0u;
+    }
+#endif
     std::size_t best = 0u;
     double best_distance = std::numeric_limits<double>::infinity();
     for (std::size_t c = 0u; c < codebook_count; ++c) {
         const std::size_t cb = c * kVectorDimensions;
         double distance = 0.0;
+        bool rejected = false;
         for (std::size_t d = 0u; d < 4u; ++d) {
             const double delta = data[d] - centroids[cb + d];
             distance += delta * delta;
+#if defined(HMC_ENABLE_TEST_HOOKS)
+            if (evaluated_terms != nullptr) {
+                ++*evaluated_terms;
+            }
+#endif
+            if (distance >= best_distance) {
+                rejected = true;
+                break;
+            }
+        }
+        if (rejected) {
+            continue;
         }
         double delta = data[4] - centroids[cb + 4u];
         distance += static_cast<double>(chroma_weight) * delta * delta;
+#if defined(HMC_ENABLE_TEST_HOOKS)
+        if (evaluated_terms != nullptr) {
+            ++*evaluated_terms;
+        }
+#endif
+        if (distance >= best_distance) {
+            continue;
+        }
         delta = data[5] - centroids[cb + 5u];
         distance += static_cast<double>(chroma_weight) * delta * delta;
+#if defined(HMC_ENABLE_TEST_HOOKS)
+        if (evaluated_terms != nullptr) {
+            ++*evaluated_terms;
+        }
+#endif
+        if (distance >= best_distance) {
+            continue;
+        }
         if (distance < best_distance) {
             best_distance = distance;
             best = c;
+            if (best_distance == 0.0) {
+                return best;
+            }
         }
     }
     return best;
@@ -1253,6 +1294,17 @@ HMC_API std::size_t cinepak_encoder_test_nearest_codebook(
     std::int32_t chroma_weight) noexcept
 {
     return nearest_codebook(data, centroids, codebook_count, chroma_weight);
+}
+
+HMC_API std::size_t cinepak_encoder_test_nearest_codebook_with_term_count(
+    const std::int32_t *data,
+    const double *centroids,
+    std::size_t codebook_count,
+    std::int32_t chroma_weight,
+    std::size_t *evaluated_terms) noexcept
+{
+    return nearest_codebook(
+        data, centroids, codebook_count, chroma_weight, evaluated_terms);
 }
 
 HMC_API void cinepak_encoder_test_fail_nth_allocation(
