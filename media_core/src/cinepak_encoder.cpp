@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
 
 #if defined(_MSC_VER) && !defined(_M_FP_STRICT)
 #error "Cinepak deterministic floating-point code requires MSVC /fp:strict"
@@ -267,7 +268,6 @@ struct Scratch {
     std::uint32_t *counts = nullptr;
     std::uint8_t *v4_decisions = nullptr;
     std::uint8_t *skip = nullptr;
-    std::uint8_t *frame = nullptr;
 
     ~Scratch()
     {
@@ -288,7 +288,22 @@ struct Scratch {
         deallocate(counts);
         deallocate(v4_decisions);
         deallocate(skip);
-        deallocate(frame);
+    }
+};
+
+struct OwnedFrame {
+    std::uint8_t *data = nullptr;
+
+    ~OwnedFrame()
+    {
+        deallocate(data);
+    }
+
+    std::uint8_t *release() noexcept
+    {
+        std::uint8_t *const released = data;
+        data = nullptr;
+        return released;
     }
 };
 
@@ -334,7 +349,6 @@ hmc_status_t allocate_scratch(const hmc_cinepak_encoder_t &encoder, Scratch *scr
     HMC_ALLOCATE_SCRATCH(kCodebookMaximum, counts);
     HMC_ALLOCATE_SCRATCH(encoder.maximum_strip_macroblocks, v4_decisions);
     HMC_ALLOCATE_SCRATCH(encoder.maximum_strip_macroblocks, skip);
-    HMC_ALLOCATE_SCRATCH(encoder.maximum_frame_size, frame);
 #undef HMC_ALLOCATE_SCRATCH
     return HMC_STATUS_OK;
 }
@@ -1073,6 +1087,22 @@ hmc_status_t cinepak_encoder_create(
         deallocate(candidate);
         return allocation;
     }
+    void *const scratch_memory = allocate(sizeof(Scratch));
+    if (scratch_memory == nullptr) {
+        deallocate(candidate->reconstruction);
+        deallocate(candidate);
+        return HMC_STATUS_OUT_OF_MEMORY;
+    }
+    auto *const scratch = ::new (scratch_memory) Scratch{};
+    candidate->scratch = scratch;
+    const hmc_status_t scratch_allocation = allocate_scratch(*candidate, scratch);
+    if (scratch_allocation != HMC_STATUS_OK) {
+        scratch->~Scratch();
+        deallocate(scratch_memory);
+        deallocate(candidate->reconstruction);
+        deallocate(candidate);
+        return scratch_allocation;
+    }
     std::memset(candidate->reconstruction, 0, reconstruction_count * sizeof(*candidate->reconstruction));
     *encoder = candidate;
     return HMC_STATUS_OK;
@@ -1094,6 +1124,11 @@ void cinepak_encoder_destroy(hmc_cinepak_encoder_t *encoder) noexcept
 {
     if (encoder == nullptr) {
         return;
+    }
+    auto *const scratch = static_cast<Scratch *>(encoder->scratch);
+    if (scratch != nullptr) {
+        scratch->~Scratch();
+        deallocate(scratch);
     }
     deallocate(encoder->reconstruction);
     deallocate(encoder);
@@ -1118,30 +1153,31 @@ hmc_status_t cinepak_encoder_encode(
         return HMC_STATUS_BUFFER_TOO_SMALL;
     }
 
-    Scratch scratch;
-    const hmc_status_t scratch_status = allocate_scratch(*encoder, &scratch);
-    if (scratch_status != HMC_STATUS_OK) {
-        return scratch_status;
+    auto *const scratch = static_cast<Scratch *>(encoder->scratch);
+    OwnedFrame frame;
+    const hmc_status_t frame_status = allocate_array(encoder->maximum_frame_size, &frame.data);
+    if (frame_status != HMC_STATUS_OK) {
+        return frame_status;
     }
     std::size_t reconstruction_count = encoder->pixel_count + encoder->uv_pixel_count * 2u;
     std::memcpy(
-        scratch.reconstruction,
+        scratch->reconstruction,
         encoder->reconstruction,
-        reconstruction_count * sizeof(*scratch.reconstruction));
+        reconstruction_count * sizeof(*scratch->reconstruction));
     rgb_to_yuv(
         rgba,
         encoder->config.width,
         encoder->config.height,
-        scratch.y,
-        scratch.u,
-        scratch.v);
+        scratch->y,
+        scratch->u,
+        scratch->v);
 
     bool key = (encode_flags & HMC_ENCODE_FLAG_FORCE_KEY) != 0u || encoder->frame_index == 0u;
     if (!key && encoder->config.key_interval > 0) {
         const std::uint64_t last = static_cast<std::uint64_t>(encoder->last_key);
         key = encoder->frame_index - last >= static_cast<std::uint64_t>(encoder->config.key_interval);
     }
-    Writer writer{scratch.frame, encoder->maximum_frame_size, 0u};
+    Writer writer{frame.data, encoder->maximum_frame_size, 0u};
     if (!writer.byte(key ? 0u : 1u) || !writer.be24(0u) ||
         !writer.be16(encoder->config.width) || !writer.be16(encoder->config.height) ||
         !writer.be16(encoder->effective_strips)) {
@@ -1153,7 +1189,7 @@ hmc_status_t cinepak_encoder_encode(
         const std::size_t rows =
             (macroblock_rows - row_start) / (encoder->effective_strips - strip);
         const hmc_status_t status = encode_strip(
-            *encoder, &scratch, &writer, row_start, rows, !key);
+            *encoder, scratch, &writer, row_start, rows, !key);
         if (status != HMC_STATUS_OK) {
             return status;
         }
@@ -1163,12 +1199,11 @@ hmc_status_t cinepak_encoder_encode(
         return HMC_STATUS_OVERFLOW;
     }
 
-    std::uint8_t *const published = scratch.frame;
-    scratch.frame = nullptr;
+    std::uint8_t *const published = frame.release();
     std::memcpy(
         encoder->reconstruction,
-        scratch.reconstruction,
-        reconstruction_count * sizeof(*scratch.reconstruction));
+        scratch->reconstruction,
+        reconstruction_count * sizeof(*scratch->reconstruction));
     if (key) {
         encoder->last_key = static_cast<std::int64_t>(encoder->frame_index);
     }

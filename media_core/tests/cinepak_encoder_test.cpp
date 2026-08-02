@@ -980,6 +980,60 @@ HMC_TEST(cinepak_encoder_mixed_skip_v1_v4_inserts_next_word_before_live_index)
     hmc_cinepak_encoder_destroy(encoder);
 }
 
+HMC_TEST(cinepak_encoder_reuses_scratch_and_keeps_published_frames_independent)
+{
+    const auto a = fixture_bytes("input_8x8_a.rgba");
+    const auto b = fixture_bytes("input_8x8_b.rgba");
+    const hmc_cinepak_encoder_config_t value = config();
+    hmc_cinepak_encoder_t *encoder = nullptr;
+    HMC_EXPECT(hmc_cinepak_encoder_create(&value, &encoder) == HMC_STATUS_OK);
+
+    hmc_owned_buffer_t first{};
+    hmc_owned_buffer_t second{};
+    hmc_owned_buffer_t after_reset{};
+    hmc_frame_flags_t flags = 0u;
+
+    honey::media::cinepak_encoder_test_clear_allocation_failure();
+    HMC_EXPECT(hmc_cinepak_encoder_encode(
+        encoder, a.data(), a.size(), HMC_ENCODE_FLAG_NONE, &first, &flags) ==
+        HMC_STATUS_OK);
+    HMC_EXPECT(honey::media::cinepak_encoder_test_allocation_count() == 1u);
+    const std::vector<std::uint8_t> first_snapshot(
+        first.data, first.data + first.size);
+
+    honey::media::cinepak_encoder_test_clear_allocation_failure();
+    HMC_EXPECT(hmc_cinepak_encoder_encode(
+        encoder, b.data(), b.size(), HMC_ENCODE_FLAG_NONE, &second, &flags) ==
+        HMC_STATUS_OK);
+    HMC_EXPECT(honey::media::cinepak_encoder_test_allocation_count() == 1u);
+    HMC_EXPECT(first.data != second.data);
+    HMC_EXPECT(first.size == first_snapshot.size());
+    if (first.size == first_snapshot.size()) {
+        HMC_EXPECT(std::memcmp(
+            first.data, first_snapshot.data(), first.size) == 0);
+    }
+    const std::vector<std::uint8_t> second_snapshot(
+        second.data, second.data + second.size);
+
+    HMC_EXPECT(hmc_cinepak_encoder_reset(encoder) == HMC_STATUS_OK);
+    honey::media::cinepak_encoder_test_clear_allocation_failure();
+    HMC_EXPECT(hmc_cinepak_encoder_encode(
+        encoder, a.data(), a.size(), HMC_ENCODE_FLAG_NONE, &after_reset, &flags) ==
+        HMC_STATUS_OK);
+    HMC_EXPECT(honey::media::cinepak_encoder_test_allocation_count() == 1u);
+    HMC_EXPECT(first.data != after_reset.data && second.data != after_reset.data);
+    HMC_EXPECT(std::memcmp(
+        first.data, first_snapshot.data(), first_snapshot.size()) == 0);
+    HMC_EXPECT(std::memcmp(
+        second.data, second_snapshot.data(), second_snapshot.size()) == 0);
+
+    hmc_owned_buffer_release(&after_reset);
+    hmc_owned_buffer_release(&second);
+    hmc_owned_buffer_release(&first);
+    hmc_cinepak_encoder_destroy(encoder);
+    honey::media::cinepak_encoder_test_clear_allocation_failure();
+}
+
 HMC_TEST(cinepak_encoder_allocation_failures_preserve_state_and_retry)
 {
     const auto a = fixture_bytes("input_8x8_a.rgba");

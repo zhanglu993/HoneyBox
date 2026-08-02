@@ -13,6 +13,7 @@ struct hmc_cinepak_encoder {
     std::size_t maximum_strip_macroblocks;
     std::size_t maximum_frame_size;
     std::int16_t *reconstruction;
+    void *scratch;
     std::uint64_t frame_index;
     std::int64_t last_key;
     std::uint32_t effective_strips;
