@@ -52,6 +52,33 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
   target_compile_options(honey_media_windows_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
+if(TARGET flutter AND TARGET flutter_wrapper_plugin)
+  add_library(honey_media_windows_plugin STATIC
+    src/converter_channel.cpp
+    src/flutter_value_reader.cpp
+    src/windows_media_plugin.cpp
+  )
+  target_compile_features(honey_media_windows_plugin PUBLIC cxx_std_17)
+  target_include_directories(honey_media_windows_plugin
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
+    PRIVATE
+      "${CMAKE_CURRENT_LIST_DIR}/src"
+  )
+  target_link_libraries(honey_media_windows_plugin
+    PUBLIC honey_media_windows_core
+    PRIVATE flutter flutter_wrapper_plugin
+  )
+  target_compile_definitions(honey_media_windows_plugin PRIVATE NOMINMAX)
+  if(MSVC)
+    target_compile_options(honey_media_windows_plugin
+      PRIVATE /W4 /WX /permissive- /EHsc)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
+    target_compile_options(honey_media_windows_plugin
+      PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
+
 if(BUILD_TESTING)
   add_subdirectory(tests)
   target_sources(honey_media_windows_tests PRIVATE
@@ -85,4 +112,45 @@ if(BUILD_TESTING)
     COMMAND honey_media_windows_tests dispatch_failure_)
   add_test(NAME conversion_controller_win32_dispatcher
     COMMAND honey_media_windows_tests win32_dispatcher_)
+
+  set(HMW_FLUTTER_CPP_WRAPPER_DIR "" CACHE PATH
+    "Flutter cpp_client_wrapper directory for channel adapter tests")
+  if(NOT HMW_FLUTTER_CPP_WRAPPER_DIR AND
+     EXISTS "${CMAKE_CURRENT_LIST_DIR}/../flutter/ephemeral/cpp_client_wrapper/include/flutter/encodable_value.h")
+    set(HMW_FLUTTER_CPP_WRAPPER_DIR
+      "${CMAKE_CURRENT_LIST_DIR}/../flutter/ephemeral/cpp_client_wrapper")
+  endif()
+  if(HMW_FLUTTER_CPP_WRAPPER_DIR)
+    add_executable(honey_media_windows_flutter_value_reader_tests
+      tests/test_main.cpp
+      tests/flutter_value_reader_test.cpp
+      tests/converter_channel_test.cpp
+      tests/converter_channel_contract_test.cpp
+      src/flutter_value_reader.cpp
+      src/converter_channel.cpp
+    )
+    target_compile_features(honey_media_windows_flutter_value_reader_tests
+      PRIVATE cxx_std_17)
+    target_include_directories(honey_media_windows_flutter_value_reader_tests
+      PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CMAKE_CURRENT_LIST_DIR}/tests"
+        "${HMW_FLUTTER_CPP_WRAPPER_DIR}/include"
+        "${HMW_FLUTTER_CPP_WRAPPER_DIR}/.."
+    )
+    target_link_libraries(honey_media_windows_flutter_value_reader_tests
+      PRIVATE honey_media_windows_core)
+    target_compile_definitions(honey_media_windows_flutter_value_reader_tests
+      PRIVATE HMW_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/../.."
+    )
+    if(MSVC)
+      target_compile_options(honey_media_windows_flutter_value_reader_tests
+        PRIVATE /W4 /WX /permissive-)
+    endif()
+    add_test(NAME flutter_value_reader
+      COMMAND honey_media_windows_flutter_value_reader_tests)
+    add_test(NAME converter_channel_contract
+      COMMAND honey_media_windows_flutter_value_reader_tests channel_)
+  endif()
 endif()

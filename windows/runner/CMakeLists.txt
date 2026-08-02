@@ -33,6 +33,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
+target_link_libraries(${BINARY_NAME} PRIVATE honey_media_windows_plugin)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 # Shcore：GetDpiForMonitor（main.cpp 中按当前机器 DPI 动态计算窗口尺寸）。
 target_link_libraries(${BINARY_NAME} PRIVATE "Shcore.lib")
