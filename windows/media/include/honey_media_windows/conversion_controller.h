@@ -30,6 +30,7 @@ class ConversionController {
   struct JobSession;
   struct SharedState;
 
+  void RunWorker(uint64_t generation, MediaJobRequest&& request) noexcept;
   void PostProgressIfCurrent(uint64_t generation, uint32_t done,
                              uint32_t total);
   void PostCompletionIfCurrent(uint64_t generation,

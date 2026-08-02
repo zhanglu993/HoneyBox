@@ -19,6 +19,7 @@ struct ConversionController::JobSession {
   uint64_t generation;
   Progress progress;
   Completion completion;
+  std::atomic<bool> terminal_posted{false};
   std::atomic<bool> terminal_delivered{false};
 };
 
@@ -58,9 +59,17 @@ Result<uint64_t> ConversionController::Start(MediaJobRequest request,
     if (state_->active) {
       return StartFailure(Status::kBusy, "a conversion job is already active");
     }
+    if (!completion) {
+      return StartFailure(Status::kInvalidState,
+                          "completion callback is required");
+    }
   }
 
   if (worker_.joinable()) {
+    if (worker_.get_id() == std::this_thread::get_id()) {
+      return StartFailure(Status::kInvalidState,
+                          "platform dispatcher invoked callback inline");
+    }
     worker_.join();
   }
 
@@ -89,20 +98,9 @@ Result<uint64_t> ConversionController::Start(MediaJobRequest request,
   try {
     worker_ = std::thread(
         [this, generation, request = std::move(request)]() mutable {
-          const auto cancelled = [state = state_, generation] {
-            return state->shutting_down.load() || state->cancelled.load() ||
-                   state->generation.load() != generation;
-          };
-          Result<MediaJobResult> result = ExecuteMediaJob(
-              request,
-              [this, generation](uint32_t done, uint32_t total) {
-                PostProgressIfCurrent(generation, done, total);
-              },
-              cancelled);
-          PostCompletionIfCurrent(generation, std::move(result));
-          MarkWorkerFinished(generation);
+          RunWorker(generation, std::move(request));
         });
-  } catch (const std::system_error&) {
+  } catch (...) {
     std::lock_guard<std::mutex> state_lock(state_->mutex);
     if (state_->current == session) {
       state_->active = false;
@@ -133,11 +131,46 @@ void ConversionController::Shutdown() {
   }
   std::lock_guard<std::mutex> worker_lock(worker_mutex_);
   if (worker_.joinable()) {
+    if (worker_.get_id() == std::this_thread::get_id()) {
+      return;
+    }
     worker_.join();
   }
   std::lock_guard<std::mutex> state_lock(state_->mutex);
   state_->active = false;
   state_->current.reset();
+}
+
+void ConversionController::RunWorker(uint64_t generation,
+                                     MediaJobRequest&& request) noexcept {
+  try {
+    const auto cancelled = [state = state_, generation] {
+      return state->shutting_down.load() || state->cancelled.load() ||
+             state->generation.load() != generation;
+    };
+    Result<MediaJobResult> result = ExecuteMediaJob(
+        request,
+        [this, generation](uint32_t done, uint32_t total) {
+          PostProgressIfCurrent(generation, done, total);
+        },
+        cancelled);
+    PostCompletionIfCurrent(generation, std::move(result));
+  } catch (...) {
+    try {
+      PostCompletionIfCurrent(
+          generation,
+          Result<MediaJobResult>{
+              std::nullopt,
+              Error{Status::kInvalidState,
+                    "media worker failed unexpectedly"}});
+    } catch (...) {
+    }
+  }
+
+  try {
+    MarkWorkerFinished(generation);
+  } catch (...) {
+  }
 }
 
 void ConversionController::PostProgressIfCurrent(uint64_t generation,
@@ -158,13 +191,17 @@ void ConversionController::PostProgressIfCurrent(uint64_t generation,
   }
   const std::shared_ptr<SharedState> state = state_;
   Progress progress = session->progress;
-  dispatcher_.Post([state, generation, progress = std::move(progress), done,
-                    total]() mutable {
-    if (!state->shutting_down.load() && !state->cancelled.load() &&
-        state->generation.load() == generation) {
-      progress(done, total);
-    }
-  });
+  try {
+    (void)dispatcher_.Post(
+        [state, generation, progress = std::move(progress), done,
+         total]() mutable {
+          if (!state->shutting_down.load() && !state->cancelled.load() &&
+              state->generation.load() == generation) {
+            progress(done, total);
+          }
+        });
+  } catch (...) {
+  }
 }
 
 void ConversionController::PostCompletionIfCurrent(
@@ -178,26 +215,47 @@ void ConversionController::PostCompletionIfCurrent(
       return;
     }
     session = state_->current;
-  }
-  if (!session->completion) {
-    return;
+    session->terminal_posted.store(true);
   }
   const std::shared_ptr<SharedState> state = state_;
-  dispatcher_.Post([state, session, generation,
-                    result = std::move(result)]() mutable {
-    if (!state->shutting_down.load() &&
-        state->generation.load() == generation &&
-        !session->terminal_delivered.exchange(true)) {
-      session->completion(std::move(result));
+  bool posted = false;
+  try {
+    posted = dispatcher_.Post(
+        [state, session, generation,
+         result = std::move(result)]() mutable {
+          bool deliver = false;
+          {
+            std::lock_guard<std::mutex> state_lock(state->mutex);
+            if (!state->shutting_down.load() &&
+                state->generation.load() == generation &&
+                state->current == session) {
+              state->active = false;
+              state->current.reset();
+              deliver = !session->terminal_delivered.exchange(true);
+            }
+          }
+          if (deliver) {
+            session->completion(std::move(result));
+          }
+        });
+  } catch (...) {
+  }
+  if (!posted) {
+    std::lock_guard<std::mutex> state_lock(state_->mutex);
+    if (state_->current == session) {
+      state_->active = false;
+      state_->current.reset();
     }
-  });
+  }
 }
 
 void ConversionController::MarkWorkerFinished(uint64_t generation) {
   std::lock_guard<std::mutex> state_lock(state_->mutex);
   if (state_->current && state_->current->generation == generation) {
     state_->active = false;
-    state_->current.reset();
+    if (!state_->current->terminal_posted.load()) {
+      state_->current.reset();
+    }
   }
 }
 

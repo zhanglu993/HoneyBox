@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -179,6 +180,14 @@ class QueueDispatcher : public hmw::PlatformDispatcher {
   std::vector<std::thread::id> posting_threads_;
 };
 
+class InlineDispatcher : public hmw::PlatformDispatcher {
+ public:
+  bool Post(std::function<void()> callback) override {
+    callback();
+    return true;
+  }
+};
+
 class RejectingDispatcher : public hmw::PlatformDispatcher {
  public:
   bool Post(std::function<void()>) override {
@@ -204,6 +213,34 @@ class RejectingDispatcher : public hmw::PlatformDispatcher {
   size_t attempts_ = 0;
 };
 
+class ThrowingDispatcher : public hmw::PlatformDispatcher {
+ public:
+  bool Post(std::function<void()>) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++attempts_;
+    }
+    condition_.notify_all();
+    throw std::runtime_error("dispatcher failure");
+  }
+
+  bool WaitForAttempts(size_t count) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 10s,
+                               [&] { return attempts_ >= count; });
+  }
+
+  size_t attempts() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return attempts_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  size_t attempts_ = 0;
+};
+
 template <typename Dispatcher>
 bool PumpUntil(Dispatcher& dispatcher, const std::atomic<bool>& completed) {
   const auto deadline = std::chrono::steady_clock::now() + 10s;
@@ -216,6 +253,135 @@ bool PumpUntil(Dispatcher& dispatcher, const std::atomic<bool>& completed) {
 }
 
 }  // namespace
+
+HMW_TEST(controller_completion_can_start_next_generation) {
+  QueueDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<bool> first_completed{false};
+  std::atomic<bool> second_completed{false};
+  std::atomic<bool> second_succeeded{false};
+  hmw::Result<uint64_t> second{
+      std::nullopt, hmw::Error{hmw::Status::kBusy, "not started"}};
+
+  const hmw::Result<uint64_t> first = controller.Start(
+      SmallSlideshow(), IgnoreProgress,
+      [&](hmw::Result<hmw::MediaJobResult> result) {
+        HMW_EXPECT(result.ok());
+        second = controller.Start(
+            SmallSlideshow(), IgnoreProgress,
+            [&](hmw::Result<hmw::MediaJobResult> next_result) {
+              second_succeeded = next_result.ok();
+              second_completed = true;
+            });
+        first_completed = true;
+      });
+
+  HMW_EXPECT(first.ok());
+  if (!first.ok()) {
+    return;
+  }
+  HMW_EXPECT(PumpUntil(dispatcher, first_completed));
+  HMW_EXPECT(second.ok());
+  if (!second.ok()) {
+    return;
+  }
+  HMW_EXPECT(*second.value == *first.value + 1U);
+  HMW_EXPECT(PumpUntil(dispatcher, second_completed));
+  HMW_EXPECT(second_succeeded.load());
+}
+
+HMW_TEST(controller_rejects_inline_dispatcher_reentry_without_self_join) {
+  InlineDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<bool> completed{false};
+  hmw::Result<uint64_t> reentrant{
+      std::nullopt, hmw::Error{hmw::Status::kBusy, "not called"}};
+
+  const hmw::Result<uint64_t> started = controller.Start(
+      SmallSlideshow(), IgnoreProgress,
+      [&](hmw::Result<hmw::MediaJobResult> result) {
+        HMW_EXPECT(result.ok());
+        reentrant = controller.Start(
+            SmallSlideshow(), IgnoreProgress,
+            [](hmw::Result<hmw::MediaJobResult>) {});
+        completed = true;
+      });
+
+  HMW_EXPECT(started.ok());
+  if (!started.ok()) {
+    return;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  while (!completed.load() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  HMW_EXPECT(completed.load());
+  HMW_EXPECT(!reentrant.ok());
+  HMW_EXPECT(reentrant.error.has_value());
+  if (reentrant.error) {
+    HMW_EXPECT(reentrant.error->status == hmw::Status::kInvalidState);
+  }
+  controller.Shutdown();
+}
+
+HMW_TEST(controller_rejects_empty_completion_before_starting_worker) {
+  CountingDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<uint32_t> progress{0};
+
+  const hmw::Result<uint64_t> started = controller.Start(
+      SmallSlideshow(), [&](uint32_t, uint32_t) { ++progress; },
+      hmw::ConversionController::Completion{});
+
+  HMW_EXPECT(!started.ok());
+  HMW_EXPECT(started.error.has_value());
+  if (started.error) {
+    HMW_EXPECT(started.error->status == hmw::Status::kInvalidState);
+  }
+  HMW_EXPECT(dispatcher.post_attempts.load() == 0);
+  HMW_EXPECT(progress.load() == 0);
+}
+
+HMW_TEST(controller_survives_throwing_dispatcher_and_can_restart) {
+  ThrowingDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<uint32_t> completions{0};
+  const auto completion = [&](hmw::Result<hmw::MediaJobResult>) {
+    ++completions;
+  };
+
+  const hmw::Result<uint64_t> first = controller.Start(
+      hmw::SlideshowRequest{}, IgnoreProgress, completion);
+  HMW_EXPECT(first.ok());
+  if (!first.ok()) {
+    return;
+  }
+  HMW_EXPECT(dispatcher.WaitForAttempts(1));
+
+  hmw::Result<uint64_t> second{
+      std::nullopt, hmw::Error{hmw::Status::kBusy, "not started"}};
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  while (!second.ok() && std::chrono::steady_clock::now() < deadline) {
+    second = controller.Start(hmw::SlideshowRequest{}, IgnoreProgress,
+                              completion);
+    if (!second.ok()) {
+      HMW_EXPECT(second.error.has_value());
+      if (!second.error || second.error->status != hmw::Status::kBusy) {
+        break;
+      }
+      std::this_thread::yield();
+    }
+  }
+  HMW_EXPECT(second.ok());
+  if (second.ok()) {
+    HMW_EXPECT(*second.value == *first.value + 1U);
+  }
+  HMW_EXPECT(dispatcher.WaitForAttempts(2));
+  controller.Shutdown();
+
+  HMW_EXPECT(dispatcher.attempts() == 2);
+  HMW_EXPECT(completions.load() == 0);
+}
 
 HMW_TEST(controller_rejects_start_after_shutdown_as_invalid_state) {
   CountingDispatcher dispatcher;
@@ -464,6 +630,86 @@ HMW_TEST(win32_dispatcher_failed_post_destroys_callback_immediately) {
   HMW_EXPECT(!dispatcher.Post(std::move(callback)));
   HMW_EXPECT(retained_weak.expired());
 }
+
+HMW_TEST(win32_dispatcher_teardown_reclaims_unconsumed_callback) {
+  UINT posted_message = 0;
+  WPARAM posted_wparam = 0;
+  LPARAM posted_lparam = 0;
+  std::atomic<uint32_t> calls{0};
+  auto retained = std::make_shared<uint32_t>(11U);
+  std::weak_ptr<uint32_t> retained_weak = retained;
+  {
+    hmw::Win32PlatformDispatcher dispatcher(
+        reinterpret_cast<HWND>(static_cast<uintptr_t>(1)),
+        [&](HWND, UINT message, WPARAM wparam, LPARAM lparam) {
+          posted_message = message;
+          posted_wparam = wparam;
+          posted_lparam = lparam;
+          return true;
+        });
+    HMW_EXPECT(dispatcher.Post([retained, &calls] { ++calls; }));
+    retained.reset();
+    HMW_EXPECT(!retained_weak.expired());
+  }
+
+  HMW_EXPECT(retained_weak.expired());
+  const std::optional<LRESULT> handled =
+      hmw::Win32PlatformDispatcher::HandleMessage(
+          posted_message, posted_wparam, posted_lparam);
+  HMW_EXPECT(handled.has_value());
+  HMW_EXPECT(calls.load() == 0);
+}
+
+HMW_TEST(win32_dispatcher_duplicate_message_executes_callback_once) {
+  UINT posted_message = 0;
+  WPARAM posted_wparam = 0;
+  LPARAM posted_lparam = 0;
+  hmw::Win32PlatformDispatcher dispatcher(
+      reinterpret_cast<HWND>(static_cast<uintptr_t>(1)),
+      [&](HWND, UINT message, WPARAM wparam, LPARAM lparam) {
+        posted_message = message;
+        posted_wparam = wparam;
+        posted_lparam = lparam;
+        return true;
+      });
+  std::atomic<uint32_t> calls{0};
+  HMW_EXPECT(dispatcher.Post([&] { ++calls; }));
+
+  HMW_EXPECT(hmw::Win32PlatformDispatcher::HandleMessage(
+                 posted_message, posted_wparam, posted_lparam)
+                 .has_value());
+  HMW_EXPECT(hmw::Win32PlatformDispatcher::HandleMessage(
+                 posted_message, posted_wparam, posted_lparam)
+                 .has_value());
+  HMW_EXPECT(calls.load() == 1);
+}
+
+HMW_TEST(win32_dispatcher_unknown_token_is_ignored_safely) {
+  UINT posted_message = 0;
+  WPARAM posted_wparam = 0;
+  LPARAM posted_lparam = 0;
+  hmw::Win32PlatformDispatcher dispatcher(
+      reinterpret_cast<HWND>(static_cast<uintptr_t>(1)),
+      [&](HWND, UINT message, WPARAM wparam, LPARAM lparam) {
+        posted_message = message;
+        posted_wparam = wparam;
+        posted_lparam = lparam;
+        return true;
+      });
+  std::atomic<uint32_t> calls{0};
+  HMW_EXPECT(dispatcher.Post([&] { ++calls; }));
+  const LPARAM fake_token = posted_lparam + static_cast<LPARAM>(0x100000U);
+
+  HMW_EXPECT(hmw::Win32PlatformDispatcher::HandleMessage(
+                 posted_message, posted_wparam, fake_token)
+                 .has_value());
+  HMW_EXPECT(calls.load() == 0);
+  HMW_EXPECT(hmw::Win32PlatformDispatcher::HandleMessage(
+                 posted_message, posted_wparam, posted_lparam)
+                 .has_value());
+  HMW_EXPECT(calls.load() == 1);
+}
+
 HMW_TEST(controller_runs_thumbnail_preview_decode_convert_frames_and_scroll_jobs) {
   const std::filesystem::path gif =
       FixturePath("windows/media/tests/fixtures/animated_disposal.gif");
