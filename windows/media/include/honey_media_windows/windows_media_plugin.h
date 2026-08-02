@@ -1,15 +1,22 @@
 #pragma once
 
 #include "honey_media_windows/conversion_controller.h"
+#include "honey_media_windows/media_source.h"
+#include "honey_media_windows/texture_registry.h"
 
 #include <flutter/encodable_value.h>
 #include <flutter/method_result.h>
 #include <flutter_windows.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string_view>
+
+namespace flutter {
+class TextureRegistrar;
+}
 
 namespace hmw {
 
@@ -46,3 +53,33 @@ class ConverterChannel final {
 
 void HoneyMediaWindowsPluginRegisterWithRegistrar(
     FlutterDesktopPluginRegistrarRef registrar);
+
+namespace hmw {
+using PlayerSourceOpener = std::function<
+    Result<std::unique_ptr<FrameSource>>(const std::filesystem::path&)>;
+
+class PlayerChannel final {
+ public:
+  PlayerChannel(TextureRegistry& texture_registry,
+                PlatformDispatcher& dispatcher,
+                PlayerSourceOpener source_opener = OpenMediaSource);
+  ~PlayerChannel();
+
+  PlayerChannel(const PlayerChannel&) = delete;
+  PlayerChannel& operator=(const PlayerChannel&) = delete;
+
+  void Handle(std::string_view method,
+              const flutter::EncodableValue* arguments,
+              std::unique_ptr<FlutterResult> result);
+  void Shutdown();
+
+ private:
+  struct State;
+  std::unique_ptr<State> state_;
+};
+
+std::unique_ptr<TextureRegistry> CreateFlutterTextureRegistry(
+    flutter::TextureRegistrar* registrar);
+
+
+}  // namespace hmw

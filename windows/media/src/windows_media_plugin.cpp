@@ -19,29 +19,45 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
                         ? nullptr
                         : registrar->GetView()->GetNativeWindow()),
         controller_(dispatcher_),
-        method_channel_(registrar->messenger(), "ebadge/converter",
-                        &flutter::StandardMethodCodec::GetInstance()),
+        texture_registry_(
+            hmw::CreateFlutterTextureRegistry(
+                registrar->texture_registrar())),
+        converter_method_channel_(
+            registrar->messenger(), "ebadge/converter",
+            &flutter::StandardMethodCodec::GetInstance()),
+        player_method_channel_(
+            registrar->messenger(), "ebadge/player",
+            &flutter::StandardMethodCodec::GetInstance()),
         converter_channel_(
             controller_,
             [this](uint32_t done, uint32_t total) {
               SendProgress(done, total);
-            }) {
+            }),
+        player_channel_(*texture_registry_, dispatcher_) {
     window_proc_delegate_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
         [](HWND, UINT message, WPARAM wparam,
            LPARAM lparam) -> std::optional<LRESULT> {
           return hmw::Win32PlatformDispatcher::HandleMessage(message, wparam,
                                                               lparam);
         });
-    method_channel_.SetMethodCallHandler(
+    converter_method_channel_.SetMethodCallHandler(
         [this](const flutter::MethodCall<flutter::EncodableValue>& call,
                std::unique_ptr<hmw::FlutterResult> result) {
           converter_channel_.Handle(call.method_name(), call.arguments(),
                                     std::move(result));
         });
+    player_method_channel_.SetMethodCallHandler(
+        [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+               std::unique_ptr<hmw::FlutterResult> result) {
+          player_channel_.Handle(call.method_name(), call.arguments(),
+                                 std::move(result));
+        });
   }
 
   ~HoneyMediaWindowsPlugin() override {
-    method_channel_.SetMethodCallHandler(nullptr);
+    player_method_channel_.SetMethodCallHandler(nullptr);
+    converter_method_channel_.SetMethodCallHandler(nullptr);
+    player_channel_.Shutdown();
     converter_channel_.Shutdown();
     if (window_proc_delegate_id_ != 0) {
       registrar_->UnregisterTopLevelWindowProcDelegate(
@@ -62,14 +78,20 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
             {flutter::EncodableValue("total"),
              flutter::EncodableValue(static_cast<int64_t>(total))},
         });
-    method_channel_.InvokeMethod("onProgress", std::move(arguments));
+    converter_method_channel_.InvokeMethod(
+        "onProgress", std::move(arguments));
   }
 
   flutter::PluginRegistrarWindows* registrar_;
   hmw::Win32PlatformDispatcher dispatcher_;
   hmw::ConversionController controller_;
-  flutter::MethodChannel<flutter::EncodableValue> method_channel_;
+  std::unique_ptr<hmw::TextureRegistry> texture_registry_;
+  flutter::MethodChannel<flutter::EncodableValue>
+      converter_method_channel_;
+  flutter::MethodChannel<flutter::EncodableValue>
+      player_method_channel_;
   hmw::ConverterChannel converter_channel_;
+  hmw::PlayerChannel player_channel_;
   int window_proc_delegate_id_ = 0;
 };
 

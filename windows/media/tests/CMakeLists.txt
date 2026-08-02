@@ -3,8 +3,10 @@ add_executable(honey_media_windows_tests
   channel_contract_test.cpp
   media_foundation_source_test.cpp
   forward_sampler_test.cpp
+  playback_clock_test.cpp
   rgba_transform_test.cpp
   status_contract_test.cpp
+  video_player_state_test.cpp
   wic_media_test.cpp
 )
 
@@ -37,4 +39,6 @@ add_test(NAME rgba_transform COMMAND honey_media_windows_tests transform_)
 add_test(NAME status_contract COMMAND honey_media_windows_tests status_contract)
 add_test(NAME wic_media COMMAND honey_media_windows_tests wic_media)
 add_test(NAME media_foundation_source COMMAND honey_media_windows_tests media_foundation_source)
+add_test(NAME playback_clock COMMAND honey_media_windows_tests clock_)
+add_test(NAME video_player_state COMMAND honey_media_windows_tests player_)
 add_test(NAME forward_sampler COMMAND honey_media_windows_tests forward_sampler_)

@@ -24,9 +24,11 @@ add_library(honey_media_windows_core
   src/media_foundation_source_internal.cpp
   src/media_source_factory.cpp
   src/media_converter.cpp
+  src/playback_clock.cpp
   src/platform_dispatcher.cpp
   src/png_codec.cpp
   src/rgba_transform.cpp
+  src/video_texture_player.cpp
   src/wic_helpers.cpp
 )
 
@@ -55,7 +57,9 @@ endif()
 if(TARGET flutter AND TARGET flutter_wrapper_plugin)
   add_library(honey_media_windows_plugin STATIC
     src/converter_channel.cpp
+    src/flutter_texture_registry.cpp
     src/flutter_value_reader.cpp
+    src/player_channel.cpp
     src/windows_media_plugin.cpp
   )
   target_compile_features(honey_media_windows_plugin PUBLIC cxx_std_17)
@@ -126,8 +130,12 @@ if(BUILD_TESTING)
       tests/flutter_value_reader_test.cpp
       tests/converter_channel_test.cpp
       tests/converter_channel_contract_test.cpp
+      tests/flutter_texture_registry_test.cpp
+      tests/player_channel_contract_test.cpp
       src/flutter_value_reader.cpp
+      src/flutter_texture_registry.cpp
       src/converter_channel.cpp
+      src/player_channel.cpp
     )
     target_compile_features(honey_media_windows_flutter_value_reader_tests
       PRIVATE cxx_std_17)
@@ -152,5 +160,9 @@ if(BUILD_TESTING)
       COMMAND honey_media_windows_flutter_value_reader_tests)
     add_test(NAME converter_channel_contract
       COMMAND honey_media_windows_flutter_value_reader_tests channel_)
+    add_test(NAME player_channel_contract
+      COMMAND honey_media_windows_flutter_value_reader_tests player_channel_)
+    add_test(NAME flutter_texture_registry
+      COMMAND honey_media_windows_flutter_value_reader_tests flutter_texture_)
   endif()
 endif()
