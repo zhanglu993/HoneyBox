@@ -84,6 +84,50 @@ HMW_TEST(transform_explicit_crop_overrides_cover) {
   });
 }
 
+HMW_TEST(transform_explicit_crop_preserves_wide_viewport_background) {
+  const hmw::RgbaFrame source = Frame(4, 2, {
+      10, 1, 2, 255, 20, 1, 2, 255, 30, 1, 2, 255, 40, 1, 2, 255,
+      50, 3, 4, 255, 60, 3, 4, 255, 70, 3, 4, 255, 80, 3, 4, 255,
+  });
+  hmw::TransformRequest request = Request();
+  request.crop = hmw::CropRect{0.0, -0.5, 1.0, 2.0};
+  request.background_argb = 0xff112233;
+
+  const hmw::Result<hmw::RgbaFrame> result =
+      hmw::TransformRgba(source, request);
+
+  HMW_EXPECT(result.ok());
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      17, 34, 51, 255, 17, 34, 51, 255, 17, 34, 51, 255, 17, 34, 51, 255,
+      10, 1, 2, 255, 20, 1, 2, 255, 30, 1, 2, 255, 40, 1, 2, 255,
+      50, 3, 4, 255, 60, 3, 4, 255, 70, 3, 4, 255, 80, 3, 4, 255,
+      17, 34, 51, 255, 17, 34, 51, 255, 17, 34, 51, 255, 17, 34, 51, 255,
+  });
+}
+
+HMW_TEST(transform_explicit_crop_preserves_negative_and_overrun_offsets) {
+  const hmw::RgbaFrame source = Frame(2, 4, {
+      10, 1, 2, 255, 20, 1, 2, 255,
+      30, 3, 4, 255, 40, 3, 4, 255,
+      50, 5, 6, 255, 60, 5, 6, 255,
+      70, 7, 8, 255, 80, 7, 8, 255,
+  });
+  hmw::TransformRequest request = Request();
+  request.crop = hmw::CropRect{-0.5, 0.0, 2.0, 1.0};
+  request.background_argb = 0xff112233;
+
+  const hmw::Result<hmw::RgbaFrame> result =
+      hmw::TransformRgba(source, request);
+
+  HMW_EXPECT(result.ok());
+  HMW_EXPECT(result.value->pixels == std::vector<uint8_t>{
+      17, 34, 51, 255, 10, 1, 2, 255, 20, 1, 2, 255, 17, 34, 51, 255,
+      17, 34, 51, 255, 30, 3, 4, 255, 40, 3, 4, 255, 17, 34, 51, 255,
+      17, 34, 51, 255, 50, 5, 6, 255, 60, 5, 6, 255, 17, 34, 51, 255,
+      17, 34, 51, 255, 70, 7, 8, 255, 80, 7, 8, 255, 17, 34, 51, 255,
+  });
+}
+
 HMW_TEST(transform_cover_center_crops_wide_source) {
   const hmw::RgbaFrame source = Frame(4, 2, {
       10, 0, 0, 255, 20, 0, 0, 255, 30, 0, 0, 255, 40, 0, 0, 255,

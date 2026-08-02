@@ -237,6 +237,73 @@ void BilinearScale(const std::vector<uint8_t>& source_pixels,
   }
 }
 
+void BilinearScaleViewport(const std::vector<uint8_t>& source_pixels,
+                           uint32_t source_width, uint32_t source_height,
+                           const CropRect& viewport,
+                           uint32_t destination_width,
+                           uint32_t destination_height,
+                           std::vector<uint8_t>* destination) {
+  const double viewport_x = viewport.x * static_cast<double>(source_width);
+  const double viewport_y = viewport.y * static_cast<double>(source_height);
+  const double viewport_width =
+      viewport.width * static_cast<double>(source_width);
+  const double viewport_height =
+      viewport.height * static_cast<double>(source_height);
+  const double maximum_x = static_cast<double>(source_width) - 1.0;
+  const double maximum_y = static_cast<double>(source_height) - 1.0;
+  const size_t source_width_size = static_cast<size_t>(source_width);
+  const size_t destination_width_size =
+      static_cast<size_t>(destination_width);
+
+  for (size_t output_y = 0;
+       output_y < static_cast<size_t>(destination_height); ++output_y) {
+    const double sample_y =
+        viewport_y +
+        (static_cast<double>(output_y) + 0.5) * viewport_height /
+            static_cast<double>(destination_height) -
+        0.5;
+    if (sample_y < 0.0 || sample_y > maximum_y) {
+      continue;
+    }
+    const size_t y0 = static_cast<size_t>(std::floor(sample_y));
+    const size_t y1 = static_cast<size_t>(std::ceil(sample_y));
+    const double y_fraction = sample_y - static_cast<double>(y0);
+    for (size_t output_x = 0; output_x < destination_width_size; ++output_x) {
+      const double sample_x =
+          viewport_x +
+          (static_cast<double>(output_x) + 0.5) * viewport_width /
+              static_cast<double>(destination_width) -
+          0.5;
+      if (sample_x < 0.0 || sample_x > maximum_x) {
+        continue;
+      }
+      const size_t x0 = static_cast<size_t>(std::floor(sample_x));
+      const size_t x1 = static_cast<size_t>(std::ceil(sample_x));
+      const double x_fraction = sample_x - static_cast<double>(x0);
+      const size_t top_left = PixelOffset(x0, y0, source_width_size);
+      const size_t top_right = PixelOffset(x1, y0, source_width_size);
+      const size_t bottom_left = PixelOffset(x0, y1, source_width_size);
+      const size_t bottom_right = PixelOffset(x1, y1, source_width_size);
+      const size_t output_offset =
+          PixelOffset(output_x, output_y, destination_width_size);
+      for (size_t channel = 0; channel < 4; ++channel) {
+        const double top =
+            static_cast<double>(source_pixels[top_left + channel]) +
+            (static_cast<double>(source_pixels[top_right + channel]) -
+             static_cast<double>(source_pixels[top_left + channel])) *
+                x_fraction;
+        const double bottom =
+            static_cast<double>(source_pixels[bottom_left + channel]) +
+            (static_cast<double>(source_pixels[bottom_right + channel]) -
+             static_cast<double>(source_pixels[bottom_left + channel])) *
+                x_fraction;
+        (*destination)[output_offset + channel] =
+            RoundedChannel(top + (bottom - top) * y_fraction);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 Result<RgbaFrame> TransformRgba(const RgbaFrame& source,
@@ -289,7 +356,14 @@ Result<RgbaFrame> TransformRgba(const RgbaFrame& source,
     uint32_t destination_y = 0;
     uint32_t scaled_width = request.output_width;
     uint32_t scaled_height = request.output_height;
-    if (!has_explicit_crop && request.fit == FitMode::kContain) {
+    const bool crop_extends_outside_source =
+        has_explicit_crop &&
+        (request.crop->x < 0.0 || request.crop->y < 0.0 ||
+         request.crop->x + request.crop->width > 1.0 ||
+         request.crop->y + request.crop->height > 1.0);
+    if (crop_extends_outside_source) {
+      WriteArgbBackground(&destination, request.background_argb);
+    } else if (!has_explicit_crop && request.fit == FitMode::kContain) {
       const double scale = std::min(
           static_cast<double>(request.output_width) / crop.width,
           static_cast<double>(request.output_height) / crop.height);
@@ -303,9 +377,15 @@ Result<RgbaFrame> TransformRgba(const RgbaFrame& source,
       destination_y = (request.output_height - scaled_height) / 2;
       WriteArgbBackground(&destination, request.background_argb);
     }
-    BilinearScale(upright_pixels, upright_width, upright_height, crop,
-                  destination_x, destination_y, scaled_width, scaled_height,
-                  request.output_width, &destination);
+    if (crop_extends_outside_source) {
+      BilinearScaleViewport(upright_pixels, upright_width, upright_height,
+                            *request.crop, request.output_width,
+                            request.output_height, &destination);
+    } else {
+      BilinearScale(upright_pixels, upright_width, upright_height, crop,
+                    destination_x, destination_y, scaled_width, scaled_height,
+                    request.output_width, &destination);
+    }
     return Result<RgbaFrame>{
         RgbaFrame{request.output_width, request.output_height, source.pts_100ns,
                   source.duration_100ns, std::move(destination)},

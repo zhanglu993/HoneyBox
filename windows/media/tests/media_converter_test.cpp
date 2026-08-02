@@ -1,4 +1,5 @@
 #include "honey_media_windows/media_converter.h"
+#include "../src/media_converter_internal.h"
 
 #include "honey_media_core/media_core.h"
 #include "test_support.h"
@@ -158,6 +159,21 @@ hmw::RgbaFrame SolidFrame(uint32_t size, uint8_t red, uint8_t green,
   }
   return hmw::RgbaFrame{size, size, 0, 0, std::move(pixels)};
 }
+hmw::RgbaFrame NonuniformStrip() {
+  hmw::RgbaFrame strip = SolidFrame(8, 0, 0, 0);
+  const uint8_t colors[4][3] = {
+      {255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 0}};
+  for (uint32_t y = 0; y < strip.height; ++y) {
+    for (uint32_t x = 0; x < strip.width; ++x) {
+      const size_t offset = (static_cast<size_t>(y) * strip.width + x) * 4U;
+      const uint32_t color = x / 2U;
+      strip.pixels[offset] = colors[color][0];
+      strip.pixels[offset + 1U] = colors[color][1];
+      strip.pixels[offset + 2U] = colors[color][2];
+    }
+  }
+  return strip;
+}
 
 hmw::ConversionRequest SmallConversion(const std::filesystem::path& path) {
   return hmw::ConversionRequest{path,
@@ -217,8 +233,13 @@ HMW_TEST(convert_mov_produces_readable_cvid_avi) {
   HMW_EXPECT(converted.value->frame_count == 3);
   HMW_EXPECT(converted.value->fps == 2.0);
   OpenedAvi avi = OpenAvi(*converted.value);
-  const std::vector<uint32_t> pixels = DecodeThrough(&avi, 2);
-  HMW_EXPECT(std::any_of(pixels.begin(), pixels.end(), [](uint32_t pixel) {
+  const std::vector<uint32_t> first = DecodeThrough(&avi, 0);
+  const std::vector<uint32_t> last = DecodeThrough(&avi, 2);
+  HMW_EXPECT(first != last);
+  HMW_EXPECT(std::any_of(first.begin(), first.end(), [](uint32_t pixel) {
+    return (pixel & 0x00ffffffU) != 0;
+  }));
+  HMW_EXPECT(std::any_of(last.begin(), last.end(), [](uint32_t pixel) {
     return (pixel & 0x00ffffffU) != 0;
   }));
 }
@@ -310,12 +331,12 @@ HMW_TEST(slideshow_forces_key_frame_for_each_source_slide) {
 }
 
 HMW_TEST(scroll_output_loops_without_visible_seam) {
-  const hmw::ScrollRequest request{SolidFrame(4, 255, 0, 0),
-                                   4,
-                                   0xff000000U,
+  const hmw::ScrollRequest request{NonuniformStrip(),
                                    8,
+                                   0xff000000U,
+                                   16,
                                    4,
-                                   4,
+                                   8,
                                    100,
                                    20};
   const hmw::Result<hmw::ConversionResult> encoded =
@@ -328,20 +349,30 @@ HMW_TEST(scroll_output_loops_without_visible_seam) {
   OpenedAvi avi = OpenAvi(*encoded.value);
   const std::vector<uint32_t> last = DecodeThrough(&avi, 3);
   const std::vector<uint32_t> first = DecodeThrough(&avi, 0);
-  HMW_EXPECT(last.size() == 16 && first.size() == 16);
-  if (last.size() == 16 && first.size() == 16) {
-    HMW_EXPECT(ChannelNear(last[2], 255, 0, 0));
+  const std::vector<uint32_t> middle = DecodeThrough(&avi, 2);
+  HMW_EXPECT(last.size() == 64 && first.size() == 64 && middle.size() == 64);
+  if (last.size() == 64 && first.size() == 64 && middle.size() == 64) {
     HMW_EXPECT(ChannelNear(first[0], 255, 0, 0));
-    HMW_EXPECT(ChannelNear(last[2],
-                           static_cast<uint8_t>((first[0] >> 16U) & 0xffU),
-                           static_cast<uint8_t>((first[0] >> 8U) & 0xffU),
-                           static_cast<uint8_t>(first[0] & 0xffU)));
+    HMW_EXPECT(ChannelNear(first[2], 0, 255, 0));
+    HMW_EXPECT(ChannelNear(first[4], 0, 0, 255));
+    HMW_EXPECT(ChannelNear(first[6], 255, 255, 0));
+    HMW_EXPECT(std::all_of(middle.begin(), middle.end(), [](uint32_t pixel) {
+      return ChannelNear(pixel, 0, 0, 0);
+    }));
+    HMW_EXPECT(ChannelNear(last[0], 0, 0, 0));
+    HMW_EXPECT(ChannelNear(last[2], 0, 0, 0));
+    HMW_EXPECT(ChannelNear(last[4], 255, 0, 0));
+    HMW_EXPECT(ChannelNear(last[6], 0, 255, 0));
+    HMW_EXPECT(last[4] == first[0]);
+    HMW_EXPECT(last[6] == first[2]);
   }
 }
 
 HMW_TEST(cached_cvid_decodes_stateful_frames_in_order) {
-  const hmw::SlideshowRequest slideshow{{SolidFrame(4, 40, 180, 220)},
-                                        {3}, 4, 10, 100};
+  const hmw::SlideshowRequest slideshow{
+      {SolidFrame(4, 220, 40, 40), SolidFrame(4, 40, 220, 40),
+       SolidFrame(4, 40, 40, 220)},
+      {1, 1, 1}, 4, 10, 100};
   const hmw::Result<hmw::ConversionResult> encoded =
       hmw::EncodeSlideshow(slideshow, IgnoreProgress, NeverCancel);
   HMW_EXPECT(encoded.ok());
@@ -349,6 +380,8 @@ HMW_TEST(cached_cvid_decodes_stateful_frames_in_order) {
     return;
   }
   const TemporaryFile file(".avi", encoded.value->avi);
+  const hmw::Result<hmw::PreviewResult> full = hmw::DecodeCachedCvid(
+      hmw::DecodeCvidRequest{file.path(), 3, 4}, NeverCancel);
   const hmw::Result<hmw::PreviewResult> preview = hmw::DecodeCachedCvid(
       hmw::DecodeCvidRequest{file.path(), 2, 4}, NeverCancel);
   HMW_EXPECT(preview.ok());
@@ -356,15 +389,59 @@ HMW_TEST(cached_cvid_decodes_stateful_frames_in_order) {
     return;
   }
   HMW_EXPECT(preview.value->png_frames.size() == 2);
+  HMW_EXPECT(full.ok() && full.value->png_frames.size() == 3);
   HMW_EXPECT(preview.value->interval_ms == 100);
-  if (preview.value->png_frames.size() == 2) {
+  if (preview.value->png_frames.size() == 2 && full.ok() &&
+      full.value->png_frames.size() == 3) {
     HMW_EXPECT(PngDimensions(preview.value->png_frames[0]) ==
                std::make_pair(4U, 4U));
-    HMW_EXPECT(preview.value->png_frames[0] ==
-               preview.value->png_frames[1]);
+    HMW_EXPECT(full.value->png_frames[0] != full.value->png_frames[1]);
+    HMW_EXPECT(full.value->png_frames[1] != full.value->png_frames[2]);
+    HMW_EXPECT(preview.value->png_frames[0] == full.value->png_frames[0]);
+    HMW_EXPECT(preview.value->png_frames[1] == full.value->png_frames[2]);
   }
 }
 
+HMW_TEST(png_operations_recheck_cancel_after_encoder_returns) {
+  const hmw::SlideshowRequest slideshow{{SolidFrame(4, 20, 40, 60)},
+                                        {1}, 4, 10, 100};
+  const hmw::Result<hmw::ConversionResult> encoded =
+      hmw::EncodeSlideshow(slideshow, IgnoreProgress, NeverCancel);
+  HMW_EXPECT(encoded.ok());
+  if (!encoded.ok()) {
+    return;
+  }
+  const TemporaryFile cached_file(".avi", encoded.value->avi);
+  bool cancel = false;
+  uint32_t encode_calls = 0;
+  hmw::internal::ScopedPngEncoderOverride override_encoder(
+      [&cancel, &encode_calls](const hmw::RgbaFrame&) {
+        ++encode_calls;
+        cancel = true;
+        return hmw::Result<std::vector<uint8_t>>{
+            std::vector<uint8_t>{1U}, std::nullopt};
+      });
+  const auto expect_cancelled = [](const auto& result) {
+    HMW_EXPECT(!result.ok() && !result.value.has_value());
+    HMW_EXPECT(result.error.has_value());
+    if (result.error) {
+      HMW_EXPECT(result.error->status == hmw::Status::kCancelled);
+    }
+  };
+
+  cancel = false;
+  expect_cancelled(hmw::MakeThumbnail(
+      hmw::ThumbnailRequest{GifFixturePath()}, [&cancel]() { return cancel; }));
+  cancel = false;
+  expect_cancelled(hmw::MakePreview(
+      hmw::PreviewRequest{GifFixturePath(), 1, 4},
+      [&cancel]() { return cancel; }));
+  cancel = false;
+  expect_cancelled(hmw::DecodeCachedCvid(
+      hmw::DecodeCvidRequest{cached_file.path(), 1, 4},
+      [&cancel]() { return cancel; }));
+  HMW_EXPECT(encode_calls == 3);
+}
 HMW_TEST(thumbnail_and_preview_obey_max_edge_and_count) {
   const hmw::Result<hmw::ThumbnailResult> thumbnail =
       hmw::MakeThumbnail(hmw::ThumbnailRequest{GifFixturePath()}, NeverCancel);
@@ -491,4 +568,15 @@ HMW_TEST(job_dispatch_covers_every_converter_channel_operation) {
   const hmw::Result<hmw::ConversionResult> bad_scroll =
       hmw::EncodeScroll(invalid_scroll, IgnoreProgress, NeverCancel);
   HMW_EXPECT(!bad_scroll.ok() && bad_scroll.error.has_value());
+
+  const hmw::Result<hmw::MediaJobResult> dispatched_error =
+      hmw::ExecuteMediaJob(hmw::PreviewRequest{GifFixturePath(), 0, 4},
+                           IgnoreProgress, NeverCancel);
+  HMW_EXPECT(!dispatched_error.ok() && !dispatched_error.value.has_value());
+  HMW_EXPECT(dispatched_error.error.has_value());
+  if (dispatched_error.error) {
+    HMW_EXPECT(dispatched_error.error->status == hmw::Status::kInvalidArgument);
+    HMW_EXPECT(dispatched_error.error->message ==
+               "preview count and edge must be nonzero");
+  }
 }

@@ -1,4 +1,5 @@
 #include "honey_media_windows/media_converter.h"
+#include "media_converter_internal.h"
 
 #include "honey_media_core/media_core.h"
 #include "honey_media_windows/media_source.h"
@@ -200,6 +201,16 @@ Result<RgbaFrame> ResizeToMaxEdge(const RgbaFrame& source,
   }
 }
 
+internal::PngEncoder& PngEncoderOverride() {
+  static thread_local internal::PngEncoder encoder;
+  return encoder;
+}
+
+Result<std::vector<uint8_t>> EncodePngForMedia(const RgbaFrame& frame) {
+  internal::PngEncoder& encoder = PngEncoderOverride();
+  return encoder ? encoder(frame) : EncodePng(frame);
+}
+
 Result<std::vector<uint8_t>> PreviewPng(const RgbaFrame& frame,
                                         uint32_t max_edge,
                                         const IsCancelled& cancelled) {
@@ -213,7 +224,14 @@ Result<std::vector<uint8_t>> PreviewPng(const RgbaFrame& frame,
   if (IsCancellationRequested(cancelled)) {
     return Cancelled<std::vector<uint8_t>>();
   }
-  return EncodePng(*resized.value);
+  Result<std::vector<uint8_t>> png = EncodePngForMedia(*resized.value);
+  if (!png.ok()) {
+    return png;
+  }
+  if (IsCancellationRequested(cancelled)) {
+    return Cancelled<std::vector<uint8_t>>();
+  }
+  return png;
 }
 
 Result<std::vector<uint8_t>> ReadFile(const std::filesystem::path& path,
@@ -294,6 +312,82 @@ Result<MediaJobResult> Promote(Result<T> concrete) {
 
 }  // namespace
 
+namespace internal {
+
+ForwardFrameSampler::ForwardFrameSampler(FrameSource* source) : source_(source) {}
+
+Result<std::reference_wrapper<const RgbaFrame>> ForwardFrameSampler::Sample(
+    int64_t target_pts_100ns, const IsCancelled& cancelled) {
+  using SampleResult = Result<std::reference_wrapper<const RgbaFrame>>;
+  if (source_ == nullptr || target_pts_100ns < 0 ||
+      (last_target_pts_100ns_ &&
+       target_pts_100ns < *last_target_pts_100ns_)) {
+    return Failure<std::reference_wrapper<const RgbaFrame>>(
+        Status::kInvalidArgument,
+        "forward frame sample targets must be nonnegative and monotonic");
+  }
+  const auto read_pending = [&]() -> Result<bool> {
+    if (eof_) {
+      return Result<bool>{false, std::nullopt};
+    }
+    if (IsCancellationRequested(cancelled)) {
+      return Cancelled<bool>();
+    }
+    RgbaFrame next{};
+    Result<bool> read = source_->ReadNext(&next);
+    if (!read.ok()) {
+      return read;
+    }
+    if (IsCancellationRequested(cancelled)) {
+      return Cancelled<bool>();
+    }
+    if (!*read.value) {
+      eof_ = true;
+      return Result<bool>{false, std::nullopt};
+    }
+    pending_ = std::move(next);
+    return Result<bool>{true, std::nullopt};
+  };
+
+  if (!current_) {
+    Result<bool> read = read_pending();
+    if (!read.ok()) {
+      return SampleResult{std::nullopt, std::move(read.error)};
+    }
+    if (!pending_) {
+      return Failure<std::reference_wrapper<const RgbaFrame>>(
+          Status::kDecodeFailed, "media source has no frames");
+    }
+    current_ = std::move(pending_);
+    pending_.reset();
+  }
+  for (;;) {
+    if (!pending_ && !eof_) {
+      Result<bool> read = read_pending();
+      if (!read.ok()) {
+        return SampleResult{std::nullopt, std::move(read.error)};
+      }
+    }
+    if (!pending_ || pending_->pts_100ns > target_pts_100ns) {
+      break;
+    }
+    current_ = std::move(pending_);
+    pending_.reset();
+  }
+  last_target_pts_100ns_ = target_pts_100ns;
+  return SampleResult{std::cref(*current_), std::nullopt};
+}
+
+ScopedPngEncoderOverride::ScopedPngEncoderOverride(PngEncoder encoder) {
+  PngEncoderOverride() = std::move(encoder);
+}
+
+ScopedPngEncoderOverride::~ScopedPngEncoderOverride() {
+  PngEncoderOverride() = PngEncoder{};
+}
+
+}  // namespace internal
+
 Result<ConversionResult> ConvertMedia(const ConversionRequest& request,
                                       Progress progress,
                                       IsCancelled cancelled) {
@@ -329,9 +423,10 @@ Result<ConversionResult> ConvertMedia(const ConversionRequest& request,
       1U, static_cast<uint32_t>(std::floor(fps + 0.5)));
   const uint32_t frame_count =
       PlannedFrameCount(info.duration_100ns, fps, request.max_frames);
+  internal::ForwardFrameSampler sampler(source);
   RgbaFrame generated{};
   const auto produce =
-      [source, info, width, height, &request, fps, &generated,
+      [&sampler, info, width, height, &request, fps, &generated,
        cancelled](uint32_t index)
       -> Result<std::reference_wrapper<const RgbaFrame>> {
     if (IsCancellationRequested(cancelled)) {
@@ -340,31 +435,15 @@ Result<ConversionResult> ConvertMedia(const ConversionRequest& request,
     }
     const int64_t pts =
         PresentationTimestamp(index, fps, info.duration_100ns);
-    Outcome seek = source->Seek(pts);
-    if (!seek.ok()) {
+    Result<std::reference_wrapper<const RgbaFrame>> sampled =
+        sampler.Sample(pts, cancelled);
+    if (!sampled.ok()) {
       return Result<std::reference_wrapper<const RgbaFrame>>{
-          std::nullopt, std::move(seek.error)};
-    }
-    if (IsCancellationRequested(cancelled)) {
-      return Failure<std::reference_wrapper<const RgbaFrame>>(
-          Status::kCancelled, "media conversion cancelled");
-    }
-    RgbaFrame decoded{};
-    Result<bool> read = source->ReadNext(&decoded);
-    if (!read.ok()) {
-      return Result<std::reference_wrapper<const RgbaFrame>>{
-          std::nullopt, std::move(read.error)};
-    }
-    if (!*read.value) {
-      return Failure<std::reference_wrapper<const RgbaFrame>>(
-          Status::kDecodeFailed, "source ended before planned presentation time");
-    }
-    if (IsCancellationRequested(cancelled)) {
-      return Failure<std::reference_wrapper<const RgbaFrame>>(
-          Status::kCancelled, "media conversion cancelled");
+          std::nullopt, std::move(sampled.error)};
     }
     Result<RgbaFrame> transformed = TransformRgba(
-        decoded, TransformRequest{width, height, request.fit, request.crop,
+        sampled.value->get(),
+        TransformRequest{width, height, request.fit, request.crop,
                                   request.background_argb, 0});
     if (!transformed.ok()) {
       return Result<std::reference_wrapper<const RgbaFrame>>{
@@ -417,9 +496,12 @@ Result<ThumbnailResult> MakeThumbnail(const ThumbnailRequest& request,
   if (IsCancellationRequested(cancelled)) {
     return Cancelled<ThumbnailResult>();
   }
-  Result<std::vector<uint8_t>> png = EncodePng(frame);
+  Result<std::vector<uint8_t>> png = EncodePngForMedia(frame);
   if (!png.ok()) {
     return ForwardError<ThumbnailResult>(std::move(png));
+  }
+  if (IsCancellationRequested(cancelled)) {
+    return Cancelled<ThumbnailResult>();
   }
   return Result<ThumbnailResult>{
       ThumbnailResult{std::move(*png.value), frame.width, frame.height,
@@ -449,6 +531,7 @@ Result<PreviewResult> MakePreview(const PreviewRequest& request,
   preview_fps = std::min(12.0, preview_fps);
   const uint32_t count = PlannedFrameCount(
       info.duration_100ns, preview_fps, request.max_count);
+  internal::ForwardFrameSampler sampler(source);
   try {
     if (IsCancellationRequested(cancelled)) {
       return Cancelled<PreviewResult>();
@@ -465,26 +548,20 @@ Result<PreviewResult> MakePreview(const PreviewRequest& request,
             static_cast<long double>(info.duration_100ns) * index / count;
         pts = static_cast<int64_t>(std::floor(target + 0.5L));
       }
-      Outcome seek = source->Seek(pts);
-      if (!seek.ok()) {
-        return Result<PreviewResult>{std::nullopt, std::move(seek.error)};
+      Result<std::reference_wrapper<const RgbaFrame>> sampled =
+          sampler.Sample(pts, cancelled);
+      if (!sampled.ok()) {
+        return Result<PreviewResult>{std::nullopt,
+                                     std::move(sampled.error)};
+      }
+      Result<std::vector<uint8_t>> png =
+          PreviewPng(sampled.value->get(), request.max_edge,
+                     cancelled);
+      if (!png.ok()) {
+        return ForwardError<PreviewResult>(std::move(png));
       }
       if (IsCancellationRequested(cancelled)) {
         return Cancelled<PreviewResult>();
-      }
-      RgbaFrame decoded{};
-      Result<bool> read = source->ReadNext(&decoded);
-      if (!read.ok()) {
-        return ForwardError<PreviewResult>(std::move(read));
-      }
-      if (!*read.value) {
-        return Failure<PreviewResult>(Status::kDecodeFailed,
-                                      "media preview sample is missing");
-      }
-      Result<std::vector<uint8_t>> png =
-          PreviewPng(decoded, request.max_edge, cancelled);
-      if (!png.ok()) {
-        return ForwardError<PreviewResult>(std::move(png));
       }
       frames.push_back(std::move(*png.value));
     }
@@ -494,6 +571,9 @@ Result<PreviewResult> MakePreview(const PreviewRequest& request,
           static_cast<uint64_t>(info.duration_100ns) / 10000U;
       interval_ms = static_cast<uint32_t>(
           std::clamp<uint64_t>(duration_ms / count, 50U, 200U));
+    }
+    if (IsCancellationRequested(cancelled)) {
+      return Cancelled<PreviewResult>();
     }
     return Result<PreviewResult>{
         PreviewResult{std::move(frames), interval_ms}, std::nullopt};
@@ -564,8 +644,10 @@ Result<PreviewResult> DecodeCachedCvid(const DecodeCvidRequest& request,
         std::min(request.max_count, info.frame_count);
     std::vector<bool> selected(info.frame_count, false);
     for (uint32_t index = 0; index < output_count; ++index) {
-      const uint32_t selected_index = static_cast<uint32_t>(
-          static_cast<uint64_t>(index) * info.frame_count / output_count);
+      const uint32_t selected_index =
+          output_count == 1 ? 0U :
+              static_cast<uint32_t>(static_cast<uint64_t>(index) *
+                  (info.frame_count - 1U) / (output_count - 1U));
       selected[selected_index] = true;
     }
     std::vector<uint32_t> argb(pixel_count);
@@ -609,10 +691,16 @@ Result<PreviewResult> DecodeCachedCvid(const DecodeCvidRequest& request,
       if (!png.ok()) {
         return ForwardError<PreviewResult>(std::move(png));
       }
+      if (IsCancellationRequested(cancelled)) {
+        return Cancelled<PreviewResult>();
+      }
       frames.push_back(std::move(*png.value));
     }
     const uint32_t interval_ms = std::clamp(
         info.usec_per_frame / 1000U, UINT32_C(50), UINT32_C(200));
+    if (IsCancellationRequested(cancelled)) {
+      return Cancelled<PreviewResult>();
+    }
     return Result<PreviewResult>{
         PreviewResult{std::move(frames), interval_ms}, std::nullopt};
   } catch (const std::bad_alloc&) {
