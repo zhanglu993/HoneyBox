@@ -660,6 +660,129 @@ HMW_TEST(win32_dispatcher_teardown_reclaims_unconsumed_callback) {
   HMW_EXPECT(calls.load() == 0);
 }
 
+HMW_TEST(win32_dispatcher_teardown_waits_for_in_flight_callback) {
+  UINT posted_message = 0;
+  WPARAM posted_wparam = 0;
+  LPARAM posted_lparam = 0;
+  std::mutex callback_mutex;
+  std::condition_variable callback_condition;
+  bool callback_entered = false;
+  bool release_callback = false;
+  std::atomic<bool> callback_exited{false};
+  auto retained = std::make_shared<uint32_t>(17U);
+  std::weak_ptr<uint32_t> retained_weak = retained;
+  std::mutex teardown_mutex;
+  std::condition_variable teardown_condition;
+  bool teardown_started = false;
+  bool teardown_returned = false;
+
+  auto dispatcher = std::make_unique<hmw::Win32PlatformDispatcher>(
+      reinterpret_cast<HWND>(static_cast<uintptr_t>(1)),
+      [&](HWND, UINT message, WPARAM wparam, LPARAM lparam) {
+        posted_message = message;
+        posted_wparam = wparam;
+        posted_lparam = lparam;
+        return true;
+      });
+  HMW_EXPECT(dispatcher->Post([&, retained] {
+    std::unique_lock<std::mutex> lock(callback_mutex);
+    callback_entered = true;
+    callback_condition.notify_all();
+    callback_condition.wait(lock, [&] { return release_callback; });
+    callback_exited = true;
+  }));
+  retained.reset();
+
+  std::optional<LRESULT> handled;
+  std::thread handler([&] {
+    handled = hmw::Win32PlatformDispatcher::HandleMessage(
+        posted_message, posted_wparam, posted_lparam);
+  });
+  {
+    std::unique_lock<std::mutex> lock(callback_mutex);
+    HMW_EXPECT(callback_condition.wait_for(
+        lock, 10s, [&] { return callback_entered; }));
+  }
+
+  std::thread teardown([&] {
+    {
+      std::lock_guard<std::mutex> lock(teardown_mutex);
+      teardown_started = true;
+    }
+    teardown_condition.notify_all();
+    dispatcher.reset();
+    {
+      std::lock_guard<std::mutex> lock(teardown_mutex);
+      teardown_returned = true;
+    }
+    teardown_condition.notify_all();
+  });
+  bool returned_before_callback_exit = false;
+  {
+    std::unique_lock<std::mutex> lock(teardown_mutex);
+    HMW_EXPECT(teardown_condition.wait_for(
+        lock, 10s, [&] { return teardown_started; }));
+    returned_before_callback_exit = teardown_condition.wait_for(
+        lock, 100ms, [&] { return teardown_returned; });
+  }
+  HMW_EXPECT(!returned_before_callback_exit);
+  HMW_EXPECT(!retained_weak.expired());
+
+  {
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    release_callback = true;
+  }
+  callback_condition.notify_all();
+  handler.join();
+  teardown.join();
+
+  HMW_EXPECT(callback_exited.load());
+  HMW_EXPECT(retained_weak.expired());
+  HMW_EXPECT(teardown_returned);
+  HMW_EXPECT(handled.has_value());
+}
+
+HMW_TEST(win32_dispatcher_callback_can_destroy_owner_without_deadlock) {
+  UINT posted_message = 0;
+  WPARAM posted_wparam = 0;
+  std::vector<LPARAM> posted_tokens;
+  auto dispatcher = std::make_unique<hmw::Win32PlatformDispatcher>(
+      reinterpret_cast<HWND>(static_cast<uintptr_t>(1)),
+      [&](HWND, UINT message, WPARAM wparam, LPARAM lparam) {
+        posted_message = message;
+        posted_wparam = wparam;
+        posted_tokens.push_back(lparam);
+        return true;
+      });
+  std::atomic<bool> self_destroy_completed{false};
+  std::atomic<uint32_t> queued_calls{0};
+  auto retained = std::make_shared<uint32_t>(13U);
+  std::weak_ptr<uint32_t> retained_weak = retained;
+  HMW_EXPECT(dispatcher->Post([&] {
+    dispatcher.reset();
+    self_destroy_completed = true;
+  }));
+  HMW_EXPECT(dispatcher->Post(
+      [retained, &queued_calls] { ++queued_calls; }));
+  retained.reset();
+  HMW_EXPECT(posted_tokens.size() == 2);
+  if (posted_tokens.size() != 2) {
+    dispatcher.reset();
+    return;
+  }
+
+  HMW_EXPECT(hmw::Win32PlatformDispatcher::HandleMessage(
+                 posted_message, posted_wparam, posted_tokens[0])
+                 .has_value());
+  HMW_EXPECT(self_destroy_completed.load());
+  HMW_EXPECT(dispatcher == nullptr);
+  HMW_EXPECT(retained_weak.expired());
+  HMW_EXPECT(hmw::Win32PlatformDispatcher::HandleMessage(
+                 posted_message, posted_wparam, posted_tokens[1])
+                 .has_value());
+  HMW_EXPECT(queued_calls.load() == 0);
+}
+
 HMW_TEST(win32_dispatcher_duplicate_message_executes_callback_once) {
   UINT posted_message = 0;
   WPARAM posted_wparam = 0;
