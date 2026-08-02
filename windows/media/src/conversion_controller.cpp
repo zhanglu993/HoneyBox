@@ -49,7 +49,7 @@ ConversionController::~ConversionController() { Shutdown(); }
 Result<uint64_t> ConversionController::Start(MediaJobRequest request,
                                              Progress progress,
                                              Completion completion) {
-  std::lock_guard<std::mutex> worker_lock(worker_mutex_);
+  std::unique_lock<std::mutex> worker_lock(worker_mutex_);
   {
     std::lock_guard<std::mutex> state_lock(state_->mutex);
     if (state_->shutting_down.load()) {
@@ -70,6 +70,8 @@ Result<uint64_t> ConversionController::Start(MediaJobRequest request,
       return StartFailure(Status::kInvalidState,
                           "platform dispatcher invoked callback inline");
     }
+    worker_condition_.wait(
+        worker_lock, [this] { return worker_finished_; });
     worker_.join();
   }
 
@@ -95,12 +97,20 @@ Result<uint64_t> ConversionController::Start(MediaJobRequest request,
     state_->current = session;
   }
 
+  worker_finished_ = false;
   try {
     worker_ = std::thread(
         [this, generation, request = std::move(request)]() mutable {
           RunWorker(generation, std::move(request));
+          {
+            std::lock_guard<std::mutex> worker_lock(worker_mutex_);
+            worker_finished_ = true;
+          }
+          worker_condition_.notify_all();
         });
   } catch (...) {
+    worker_finished_ = true;
+    worker_condition_.notify_all();
     std::lock_guard<std::mutex> state_lock(state_->mutex);
     if (state_->current == session) {
       state_->active = false;
@@ -121,6 +131,30 @@ void ConversionController::Cancel() {
   }
 }
 
+Outcome ConversionController::WaitForCurrentJob(
+    std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> worker_lock(worker_mutex_);
+  if (!worker_.joinable()) {
+    return {std::nullopt};
+  }
+  if (worker_.get_id() == std::this_thread::get_id()) {
+    return {Error{Status::kInvalidState,
+                  "conversion worker cannot wait for itself"}};
+  }
+  if (!worker_condition_.wait_for(
+          worker_lock, timeout, [this] { return worker_finished_; })) {
+    return {Error{Status::kBusy,
+                  "conversion worker did not finish before timeout"}};
+  }
+  try {
+    worker_.join();
+  } catch (const std::system_error&) {
+    return {Error{Status::kInvalidState,
+                  "conversion worker could not be joined"}};
+  }
+  return {std::nullopt};
+}
+
 void ConversionController::Shutdown() {
   {
     std::lock_guard<std::mutex> state_lock(state_->mutex);
@@ -129,11 +163,13 @@ void ConversionController::Shutdown() {
       state_->generation.fetch_add(1);
     }
   }
-  std::lock_guard<std::mutex> worker_lock(worker_mutex_);
+  std::unique_lock<std::mutex> worker_lock(worker_mutex_);
   if (worker_.joinable()) {
     if (worker_.get_id() == std::this_thread::get_id()) {
       return;
     }
+    worker_condition_.wait(
+        worker_lock, [this] { return worker_finished_; });
     worker_.join();
   }
   std::lock_guard<std::mutex> state_lock(state_->mutex);

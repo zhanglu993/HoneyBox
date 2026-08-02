@@ -18,7 +18,8 @@ struct CancellationMeasurementHooks {
   std::function<Result<uint64_t>(Progress, BenchmarkCompletion)> start;
   std::function<void()> cancel;
   std::function<bool(std::chrono::milliseconds)> pump;
-  std::function<void()> quiesce;
+  std::function<Outcome()> wait_for_worker;
+  std::function<void()> shutdown;
 };
 
 using AtomicEvidenceReplace = std::function<bool(

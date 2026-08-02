@@ -324,6 +324,115 @@ HMW_TEST(controller_rejects_inline_dispatcher_reentry_without_self_join) {
   controller.Shutdown();
 }
 
+HMW_TEST(controller_wait_for_current_job_preserves_queued_completion) {
+  QueueDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<bool> completed{false};
+  std::atomic<bool> succeeded{false};
+
+  const hmw::Result<uint64_t> started = controller.Start(
+      SmallSlideshow(), IgnoreProgress,
+      [&](hmw::Result<hmw::MediaJobResult> result) {
+        succeeded = result.ok();
+        completed = true;
+      });
+  HMW_EXPECT(started.ok());
+  if (!started.ok()) {
+    return;
+  }
+
+  const hmw::Outcome waited = controller.WaitForCurrentJob(10s);
+  HMW_EXPECT(waited.ok());
+  HMW_EXPECT(!completed.load());
+  dispatcher.Drain();
+  HMW_EXPECT(completed.load());
+  HMW_EXPECT(succeeded.load());
+}
+
+HMW_TEST(controller_wait_for_current_job_times_out_and_can_retry) {
+  BlockingDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<bool> completed{false};
+
+  const hmw::Result<uint64_t> started = controller.Start(
+      SmallSlideshow(), IgnoreProgress,
+      [&](hmw::Result<hmw::MediaJobResult>) { completed = true; });
+  HMW_EXPECT(started.ok());
+  if (!started.ok()) {
+    return;
+  }
+  HMW_EXPECT(dispatcher.WaitUntilEntered());
+
+  const hmw::Outcome timed_out = controller.WaitForCurrentJob(10ms);
+  HMW_EXPECT(!timed_out.ok());
+  HMW_EXPECT(timed_out.error.has_value());
+  if (timed_out.error) {
+    HMW_EXPECT(timed_out.error->status == hmw::Status::kBusy);
+  }
+  HMW_EXPECT(!completed.load());
+
+  dispatcher.Release();
+  const hmw::Outcome waited = controller.WaitForCurrentJob(10s);
+  HMW_EXPECT(waited.ok());
+  HMW_EXPECT(!completed.load());
+  dispatcher.Drain();
+  HMW_EXPECT(completed.load());
+}
+
+HMW_TEST(controller_completion_can_wait_for_current_job_without_deadlock) {
+  QueueDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<bool> completed{false};
+  hmw::Outcome waited{
+      hmw::Error{hmw::Status::kInvalidState, "completion did not run"}};
+
+  const hmw::Result<uint64_t> started = controller.Start(
+      SmallSlideshow(), IgnoreProgress,
+      [&](hmw::Result<hmw::MediaJobResult> result) {
+        HMW_EXPECT(result.ok());
+        waited = controller.WaitForCurrentJob(10s);
+        completed = true;
+      });
+  HMW_EXPECT(started.ok());
+  if (!started.ok()) {
+    return;
+  }
+
+  HMW_EXPECT(PumpUntil(dispatcher, completed));
+  HMW_EXPECT(waited.ok());
+}
+
+HMW_TEST(controller_wait_for_current_job_rejects_worker_self_join) {
+  InlineDispatcher dispatcher;
+  hmw::ConversionController controller(dispatcher);
+  std::atomic<bool> completed{false};
+  hmw::Outcome waited{std::nullopt};
+
+  const hmw::Result<uint64_t> started = controller.Start(
+      SmallSlideshow(), IgnoreProgress,
+      [&](hmw::Result<hmw::MediaJobResult> result) {
+        HMW_EXPECT(result.ok());
+        waited = controller.WaitForCurrentJob(10s);
+        completed = true;
+      });
+  HMW_EXPECT(started.ok());
+  if (!started.ok()) {
+    return;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  while (!completed.load() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  HMW_EXPECT(completed.load());
+  HMW_EXPECT(!waited.ok());
+  HMW_EXPECT(waited.error.has_value());
+  if (waited.error) {
+    HMW_EXPECT(waited.error->status == hmw::Status::kInvalidState);
+  }
+  controller.Shutdown();
+}
+
 HMW_TEST(controller_rejects_empty_completion_before_starting_worker) {
   CountingDispatcher dispatcher;
   hmw::ConversionController controller(dispatcher);

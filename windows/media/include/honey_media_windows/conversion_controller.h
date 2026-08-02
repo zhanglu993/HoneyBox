@@ -3,6 +3,8 @@
 #include "honey_media_windows/media_converter.h"
 #include "honey_media_windows/platform_dispatcher.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -24,6 +26,9 @@ class ConversionController {
   Result<uint64_t> Start(MediaJobRequest request, Progress progress,
                          Completion completion);
   void Cancel();
+  // Waits without invalidating queued callbacks. A timeout leaves the worker
+  // joinable so the caller may wait again; worker self-wait is invalid.
+  Outcome WaitForCurrentJob(std::chrono::milliseconds timeout);
   void Shutdown();
 
  private:
@@ -41,6 +46,8 @@ class ConversionController {
   std::shared_ptr<SharedState> state_;
   std::thread worker_;
   std::mutex worker_mutex_;
+  std::condition_variable worker_condition_;
+  bool worker_finished_ = true;
 };
 
 }  // namespace hmw

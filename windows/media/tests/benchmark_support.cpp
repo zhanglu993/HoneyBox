@@ -287,7 +287,8 @@ std::string BenchmarkEvidenceJson(const BenchmarkEvidence& evidence) {
 
 Result<uint64_t> MeasureCancellationMillisecondsWithHooks(
     CancellationMeasurementHooks hooks) {
-  if (!hooks.start || !hooks.cancel || !hooks.pump || !hooks.quiesce) {
+  if (!hooks.start || !hooks.cancel || !hooks.pump ||
+      !hooks.wait_for_worker || !hooks.shutdown) {
     return {std::nullopt,
             BenchmarkError(Status::kInvalidArgument,
                            "benchmark cancellation hooks are incomplete")};
@@ -308,7 +309,7 @@ Result<uint64_t> MeasureCancellationMillisecondsWithHooks(
         }
       });
   if (!started.ok()) {
-    hooks.quiesce();
+    hooks.shutdown();
     return {std::nullopt, std::move(started.error)};
   }
 
@@ -318,7 +319,16 @@ Result<uint64_t> MeasureCancellationMillisecondsWithHooks(
     (void)hooks.pump(std::chrono::milliseconds(100));
   }
   if (!saw_progress) {
-    hooks.quiesce();
+    hooks.cancel();
+    Outcome waited = hooks.wait_for_worker();
+    if (waited.ok()) {
+      while (hooks.pump(std::chrono::milliseconds(0))) {
+      }
+    }
+    hooks.shutdown();
+    if (!waited.ok()) {
+      return {std::nullopt, std::move(waited.error)};
+    }
     return {std::nullopt,
             BenchmarkError(Status::kInvalidState,
                            "benchmark did not report progress")};
@@ -326,18 +336,12 @@ Result<uint64_t> MeasureCancellationMillisecondsWithHooks(
 
   const auto cancelled_at = std::chrono::steady_clock::now();
   hooks.cancel();
-  const auto completion_deadline = cancelled_at + std::chrono::seconds(5);
-  while (!first_completion.has_value() &&
-         std::chrono::steady_clock::now() < completion_deadline) {
-    (void)hooks.pump(std::chrono::milliseconds(100));
+  Outcome waited = hooks.wait_for_worker();
+  if (!waited.ok()) {
+    hooks.shutdown();
+    return {std::nullopt, std::move(waited.error)};
   }
-
-  if (first_completion.has_value()) {
-    const auto drain_deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
-    while (std::chrono::steady_clock::now() < drain_deadline &&
-           hooks.pump(std::chrono::milliseconds(50))) {
-    }
+  while (hooks.pump(std::chrono::milliseconds(0))) {
   }
 
   const bool completion_is_unique_cancel =
@@ -347,10 +351,7 @@ Result<uint64_t> MeasureCancellationMillisecondsWithHooks(
       first_completion->error->status == Status::kCancelled &&
       *first_completed_at >= cancelled_at;
 
-  // The completion callback means the real worker has finished its terminal
-  // work. Drain dispatcher callbacks and validate uniqueness before Shutdown
-  // invalidates the controller's callbacks.
-  hooks.quiesce();
+  hooks.shutdown();
   if (!completion_is_unique_cancel) {
     return {std::nullopt,
             BenchmarkError(Status::kInvalidState,
@@ -378,7 +379,10 @@ Result<uint64_t> MeasureRealCancellationMilliseconds(
   hooks.pump = [&dispatcher](std::chrono::milliseconds timeout) {
     return dispatcher.RunOne(timeout);
   };
-  hooks.quiesce = [&controller] { controller.Shutdown(); };
+  hooks.wait_for_worker = [&controller] {
+    return controller.WaitForCurrentJob(std::chrono::seconds(5));
+  };
+  hooks.shutdown = [&controller] { controller.Shutdown(); };
   return MeasureCancellationMillisecondsWithHooks(std::move(hooks));
 }
 

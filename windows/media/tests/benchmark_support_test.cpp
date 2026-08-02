@@ -194,11 +194,12 @@ HMW_TEST(benchmark_atomic_move_failure_preserves_old_file_and_cleans_temp) {
   HMW_EXPECT(!std::filesystem::exists(observed_temporary));
 }
 
-HMW_TEST(benchmark_cancellation_drains_duplicate_completion_before_quiesce) {
+HMW_TEST(benchmark_cancellation_drains_duplicate_after_worker_wait) {
   std::deque<std::function<void()>> queue;
   hmw::Progress progress_callback;
   hmw::test::BenchmarkCompletion completion_callback;
-  bool quiesced = false;
+  bool worker_waited = false;
+  bool shut_down = false;
   hmw::test::CancellationMeasurementHooks hooks;
   hooks.start = [&queue, &progress_callback, &completion_callback](
                     hmw::Progress progress,
@@ -223,8 +224,12 @@ HMW_TEST(benchmark_cancellation_drains_duplicate_completion_before_quiesce) {
     callback();
     return true;
   };
-  hooks.quiesce = [&queue, &quiesced] {
-    quiesced = true;
+  hooks.wait_for_worker = [&worker_waited] {
+    worker_waited = true;
+    return hmw::Outcome{std::nullopt};
+  };
+  hooks.shutdown = [&queue, &shut_down] {
+    shut_down = true;
     queue.clear();
   };
 
@@ -235,6 +240,70 @@ HMW_TEST(benchmark_cancellation_drains_duplicate_completion_before_quiesce) {
   if (measured.error) {
     HMW_EXPECT(measured.error->status == hmw::Status::kInvalidState);
   }
-  HMW_EXPECT(quiesced);
+  HMW_EXPECT(worker_waited);
+  HMW_EXPECT(shut_down);
+  HMW_EXPECT(queue.empty());
+}
+
+HMW_TEST(benchmark_cancellation_waits_for_worker_before_draining_completion) {
+  std::deque<std::function<void()>> queue;
+  hmw::Progress progress_callback;
+  hmw::test::BenchmarkCompletion completion_callback;
+  bool worker_waited = false;
+  bool completion_delivered_before_wait = false;
+  bool delayed_completion_delivered = false;
+  bool shut_down = false;
+  hmw::test::CancellationMeasurementHooks hooks;
+  hooks.start = [&queue, &progress_callback, &completion_callback](
+                    hmw::Progress progress,
+                    hmw::test::BenchmarkCompletion completion) {
+    progress_callback = std::move(progress);
+    completion_callback = std::move(completion);
+    queue.push_back([&progress_callback] { progress_callback(1U, 2U); });
+    return hmw::Result<uint64_t>{1U, std::nullopt};
+  };
+  hooks.cancel = [&queue, &completion_callback, &worker_waited,
+                  &completion_delivered_before_wait] {
+    queue.push_back([&completion_callback, &worker_waited,
+                     &completion_delivered_before_wait] {
+      completion_delivered_before_wait = !worker_waited;
+      completion_callback(CancelledResult());
+    });
+  };
+  hooks.wait_for_worker = [&queue, &completion_callback, &worker_waited,
+                           &delayed_completion_delivered] {
+    worker_waited = true;
+    queue.push_back(
+        [&completion_callback, &delayed_completion_delivered] {
+          delayed_completion_delivered = true;
+          completion_callback(CancelledResult());
+        });
+    return hmw::Outcome{std::nullopt};
+  };
+  hooks.pump = [&queue](std::chrono::milliseconds) {
+    if (queue.empty()) {
+      return false;
+    }
+    std::function<void()> callback = std::move(queue.front());
+    queue.pop_front();
+    callback();
+    return true;
+  };
+  hooks.shutdown = [&queue, &shut_down] {
+    shut_down = true;
+    queue.clear();
+  };
+
+  const hmw::Result<uint64_t> measured =
+      hmw::test::MeasureCancellationMillisecondsWithHooks(std::move(hooks));
+  HMW_EXPECT(!measured.ok());
+  HMW_EXPECT(measured.error.has_value());
+  if (measured.error) {
+    HMW_EXPECT(measured.error->status == hmw::Status::kInvalidState);
+  }
+  HMW_EXPECT(worker_waited);
+  HMW_EXPECT(!completion_delivered_before_wait);
+  HMW_EXPECT(delayed_completion_delivered);
+  HMW_EXPECT(shut_down);
   HMW_EXPECT(queue.empty());
 }
