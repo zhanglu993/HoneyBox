@@ -108,6 +108,10 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Test Windows media adapter
+        shell: pwsh
+        run: .\scripts\test-media-windows-adapter.ps1
+
       - name: Build Windows (release)
         run: flutter build windows --release
 

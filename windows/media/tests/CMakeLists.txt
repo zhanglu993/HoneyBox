@@ -42,3 +42,53 @@ add_test(NAME media_foundation_source COMMAND honey_media_windows_tests media_fo
 add_test(NAME playback_clock COMMAND honey_media_windows_tests clock_)
 add_test(NAME video_player_state COMMAND honey_media_windows_tests player_)
 add_test(NAME forward_sampler COMMAND honey_media_windows_tests forward_sampler_)
+
+add_executable(hmw_windows_media_smoke
+  test_main.cpp
+  windows_media_smoke.cpp
+)
+
+target_include_directories(hmw_windows_media_smoke PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/../include"
+  "${CMAKE_CURRENT_LIST_DIR}/../src"
+  "${CMAKE_CURRENT_LIST_DIR}"
+)
+
+target_compile_features(hmw_windows_media_smoke PRIVATE cxx_std_17)
+target_link_libraries(hmw_windows_media_smoke PRIVATE
+  honey_media_windows_core
+  honey_media_core
+)
+target_compile_definitions(hmw_windows_media_smoke PRIVATE
+  HMW_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/../../.."
+  HMW_TEST_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}"
+)
+if(MSVC)
+  target_compile_options(hmw_windows_media_smoke PRIVATE /W4 /WX /permissive-)
+endif()
+add_test(NAME windows_media_smoke COMMAND hmw_windows_media_smoke)
+
+add_executable(hmw_windows_media_benchmark
+  benchmark_support.cpp
+  windows_media_benchmark.cpp
+)
+
+target_include_directories(hmw_windows_media_benchmark PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/../include"
+  "${CMAKE_CURRENT_LIST_DIR}/../src"
+  "${CMAKE_CURRENT_LIST_DIR}"
+)
+
+target_compile_features(hmw_windows_media_benchmark PRIVATE cxx_std_17)
+target_link_libraries(hmw_windows_media_benchmark PRIVATE
+  honey_media_windows_core
+  honey_media_core
+  advapi32
+)
+target_compile_definitions(hmw_windows_media_benchmark PRIVATE
+  HMW_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/../../.."
+)
+if(MSVC)
+  target_compile_options(hmw_windows_media_benchmark
+    PRIVATE /W4 /WX /permissive-)
+endif()

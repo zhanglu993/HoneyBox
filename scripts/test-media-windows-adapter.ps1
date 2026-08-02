@@ -1,7 +1,9 @@
 param(
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo', 'MinSizeRel')]
     [string[]]$Configuration,
-    [string]$TestRegex
+    [string]$TestRegex,
+    [switch]$Performance,
+    [string]$EvidencePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,7 +39,10 @@ if (-not (Test-Path -LiteralPath $ctest)) {
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $sourceDirectory = Join-Path $repositoryRoot 'windows/media'
 $buildDirectory = Join-Path $repositoryRoot 'build/media-windows-adapter-msvc-x64'
-$configurations = if ($PSBoundParameters.ContainsKey('Configuration')) {
+$configurations = if ($Performance) {
+    @('Release')
+}
+elseif ($PSBoundParameters.ContainsKey('Configuration')) {
     @($Configuration)
 }
 else {
@@ -79,4 +84,26 @@ foreach ($currentConfiguration in $configurations) {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+}
+
+if ($Performance) {
+    $benchmark = Join-Path $buildDirectory 'tests/Release/hmw_windows_media_benchmark.exe'
+    if (-not (Test-Path -LiteralPath $benchmark -PathType Leaf)) {
+        throw "Benchmark executable was not produced at $benchmark."
+    }
+    $requestedEvidencePath = if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
+        Join-Path $repositoryRoot 'output/windows-media-performance.json'
+    }
+    elseif ([System.IO.Path]::IsPathRooted($EvidencePath)) {
+        $EvidencePath
+    }
+    else {
+        Join-Path $repositoryRoot $EvidencePath
+    }
+    $resolvedEvidencePath =
+        [System.IO.Path]::GetFullPath($requestedEvidencePath)
+    Write-Host "Running Windows media reference benchmark..."
+    & $benchmark --json $resolvedEvidencePath
+    $benchmarkExitCode = $LASTEXITCODE
+    exit $benchmarkExitCode
 }

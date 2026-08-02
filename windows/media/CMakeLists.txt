@@ -86,10 +86,12 @@ endif()
 if(BUILD_TESTING)
   add_subdirectory(tests)
   target_sources(honey_media_windows_tests PRIVATE
+    tests/benchmark_support.cpp
+    tests/benchmark_support_test.cpp
     tests/conversion_controller_test.cpp
     tests/media_converter_test.cpp
   )
-  target_link_libraries(honey_media_windows_tests PRIVATE honey_media_core)
+  target_link_libraries(honey_media_windows_tests PRIVATE honey_media_core advapi32)
   add_test(NAME media_converter_convert_mov
     COMMAND honey_media_windows_tests convert_mov_produces_readable_cvid_avi)
   add_test(NAME media_converter_convert_gif
@@ -108,6 +110,8 @@ if(BUILD_TESTING)
     COMMAND honey_media_windows_tests cached_cvid_decodes_stateful_frames_in_order)
   add_test(NAME media_converter_thumbnail_preview
     COMMAND honey_media_windows_tests thumbnail_and_preview_obey_max_edge_and_count)
+  add_test(NAME benchmark_support
+    COMMAND honey_media_windows_tests benchmark_)
   add_test(NAME media_converter_dispatch
     COMMAND honey_media_windows_tests job_dispatch_covers_every_converter_channel_operation)
   add_test(NAME conversion_controller_state
@@ -148,9 +152,11 @@ if(BUILD_TESTING)
         "${HMW_FLUTTER_CPP_WRAPPER_DIR}/.."
     )
     target_link_libraries(honey_media_windows_flutter_value_reader_tests
-      PRIVATE honey_media_windows_core)
+      PRIVATE honey_media_windows_core honey_media_core)
     target_compile_definitions(honey_media_windows_flutter_value_reader_tests
-      PRIVATE HMW_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/../.."
+      PRIVATE
+        HMW_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/../.."
+        HMW_TEST_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/tests"
     )
     if(MSVC)
       target_compile_options(honey_media_windows_flutter_value_reader_tests
