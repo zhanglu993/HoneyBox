@@ -28,6 +28,7 @@ add_library(honey_media_windows_core
   src/platform_dispatcher.cpp
   src/png_codec.cpp
   src/rgba_transform.cpp
+  src/status.cpp
   src/video_texture_player.cpp
   src/wic_helpers.cpp
   src/windows_media_plugin_internal.cpp

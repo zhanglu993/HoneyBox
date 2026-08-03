@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace hmw {
 
@@ -12,6 +13,9 @@ enum class Status {
   kUnsupportedMedia,
   kDecodeFailed,
   kEncodeFailed,
+  kPermissionDenied,
+  kDeviceUnavailable,
+  kDeviceLost,
   kIoError,
   kBusy,
   kCancelled,
@@ -22,6 +26,8 @@ struct Error {
   Status status;
   std::string message;
 };
+
+std::string_view StatusCode(Status status);
 
 template <typename T>
 struct Result {

@@ -368,19 +368,7 @@ flutter::EncodableValue EncodeConverterResult(const MediaJobResult& result) {
 }
 
 std::string_view FlutterErrorCode(Status status) {
-  switch (status) {
-    case Status::kOk: return "invalid_state";
-    case Status::kInvalidArgument: return "invalid_argument";
-    case Status::kNotFound: return "not_found";
-    case Status::kUnsupportedMedia: return "unsupported_media";
-    case Status::kDecodeFailed: return "decode_failed";
-    case Status::kEncodeFailed: return "encode_failed";
-    case Status::kIoError: return "io_error";
-    case Status::kBusy: return "busy";
-    case Status::kCancelled: return "cancelled";
-    case Status::kInvalidState: return "invalid_state";
-  }
-  return "invalid_state";
+  return StatusCode(status);
 }
 
 }  // namespace hmw
