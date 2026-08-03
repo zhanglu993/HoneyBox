@@ -28,7 +28,9 @@ constexpr int kQuadX[4] = {0, 2, 0, 2};
 constexpr int kQuadY[4] = {0, 0, 2, 2};
 
 #if defined(HMC_ENABLE_TEST_HOOKS)
-CinepakNearestConversionDiagnostics g_nearest_conversion_diagnostics{};
+// Conversion diagnostics belong to the calling test thread so concurrent
+// encoder handles cannot race or reset one another's observations.
+thread_local CinepakNearestConversionDiagnostics g_nearest_conversion_diagnostics{};
 #endif
 
 template <typename T>

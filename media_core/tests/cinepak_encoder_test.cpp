@@ -3,6 +3,7 @@
 #include "cinepak_encoder.hpp"
 #include "test_support.hpp"
 
+#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -747,6 +749,84 @@ HMC_TEST(cinepak_nearest_codebook_counts_zero_match_and_first_term_rejection)
     conversions = honey::media::cinepak_encoder_test_nearest_conversion_diagnostics();
     HMC_EXPECT(conversions.data_conversions == 0u);
     HMC_EXPECT(conversions.weight_conversions == 1u);
+}
+
+HMC_TEST(cinepak_nearest_conversion_diagnostics_are_isolated_per_thread)
+{
+    std::atomic<bool> first_ready{false};
+    std::atomic<bool> second_done{false};
+    honey::media::CinepakNearestConversionDiagnostics first{};
+    honey::media::CinepakNearestConversionDiagnostics second{};
+    bool first_calls_ok = false;
+    bool second_calls_ok = false;
+
+    const auto exercise = [](
+        std::size_t direct_nearest_calls,
+        honey::media::CinepakNearestConversionDiagnostics *result,
+        bool *calls_ok,
+        std::atomic<bool> *ready,
+        std::atomic<bool> *wait_for) {
+        const std::int32_t data[6]{};
+        const double centroid[6]{};
+        std::size_t terms = 0u;
+        bool ok = true;
+        honey::media::cinepak_encoder_test_reset_nearest_conversion_diagnostics();
+        for (std::size_t call = 0u; call < direct_nearest_calls; ++call) {
+            const auto nearest =
+                honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+                    data, centroid, 1u, 4, &terms);
+            ok = nearest == 0u && ok;
+        }
+        std::int32_t codebook[6]{};
+        std::uint32_t label = 0u;
+        const auto status = honey::media::cinepak_encoder_test_lloyd_refine(
+            data, 1u, codebook, 1u, 1, 4, &label);
+        *calls_ok = ok && status == HMC_STATUS_OK;
+        ready->store(true, std::memory_order_release);
+        while (!wait_for->load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        *result =
+            honey::media::cinepak_encoder_test_nearest_conversion_diagnostics();
+    };
+
+    honey::media::cinepak_encoder_test_reset_nearest_conversion_diagnostics();
+    std::thread first_thread(
+        exercise, 1u, &first, &first_calls_ok, &first_ready, &second_done);
+    std::thread second_thread([&] {
+        while (!first_ready.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        const std::int32_t data[6]{};
+        const double centroid[6]{};
+        std::size_t terms = 0u;
+        bool ok = true;
+        honey::media::cinepak_encoder_test_reset_nearest_conversion_diagnostics();
+        for (std::size_t call = 0u; call < 2u; ++call) {
+            const auto nearest =
+                honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+                    data, centroid, 1u, 4, &terms);
+            ok = nearest == 0u && ok;
+        }
+        std::int32_t codebook[6]{};
+        std::uint32_t label = 0u;
+        const auto status = honey::media::cinepak_encoder_test_lloyd_refine(
+            data, 1u, codebook, 1u, 1, 4, &label);
+        second_calls_ok = ok && status == HMC_STATUS_OK;
+        second =
+            honey::media::cinepak_encoder_test_nearest_conversion_diagnostics();
+        second_done.store(true, std::memory_order_release);
+    });
+    first_thread.join();
+    second_thread.join();
+
+    const auto main =
+        honey::media::cinepak_encoder_test_nearest_conversion_diagnostics();
+    HMC_EXPECT(first_calls_ok);
+    HMC_EXPECT(second_calls_ok);
+    HMC_EXPECT(first.data_conversions == 12u && first.weight_conversions == 2u);
+    HMC_EXPECT(second.data_conversions == 18u && second.weight_conversions == 3u);
+    HMC_EXPECT(main.data_conversions == 0u && main.weight_conversions == 0u);
 }
 
 HMC_TEST(cinepak_nearest_codebook_matches_ordered_full_distance_corpus)
