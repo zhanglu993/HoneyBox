@@ -62,3 +62,30 @@
 ### 跟进提交
 
 - 评审修复：本提交（中文 commit：`fix: 保证摄像头纹理可靠解绑`）。
+
+## FIX_REQUIRED 二次跟进：持久化清理租约与显式 teardown
+
+### 严格 RED
+
+- controller 析构后，dispatcher 已接受但随后丢弃 cleanup callback：原实现只由 queued task 持有清理状态，task 被丢弃后没有可重试所有者；RED 先以缺少 `CameraTextureCleanupCoordinator` API 的 `C3083/C2039` 稳定失败。
+- controller 析构后 cleanup 执行但首次 `UnregisterTexture=false`：RED 要求 registry provider 继续持有 coordinator，后续显式 `RetryPending()` 成功且底层只解绑一次。
+- 同步 `Post`/`UnregisterTexture` 栈内重入 `Shutdown()`：严格 RED 先因 `void Shutdown()` 无法转换为 `Outcome` 的 `C2440` 失败，防止用阻塞等待掩盖同线程自等待。
+
+### 所有权与生命周期
+
+- 引用关系为 `controller -> coordinator`、`registry provider -> coordinator`、`queued DispatchAttempt -> coordinator`；coordinator 仅以受 shutdown 门禁保护的非 owning 指针访问 registry/dispatcher，不反向强持有 registry，因此无强引用环。
+- dispatcher 丢弃 callback 时，`DispatchAttempt` 析构只把该 ID 的 `queued` 复位；pending ID 与重试所有权仍由 registry provider 持有的 coordinator 保存。首次 `UnregisterTexture=false` 同样保留 pending，后续显式 `RetryPending()` 才开启下一轮。
+- 每个 `RetryPending()` 固定 pending snapshot，同一 ID 每个显式 trigger 最多投递一次；callback 不自重排，registry 长期返回 false 时不会自旋。
+- `Shutdown()` 返回 `Outcome` 明确区分 stopped 与 quiesced：重入调用先停止新操作，但返回 `invalid_state`，不允许调用方据此销毁依赖；待外层操作退出后再次调用并返回成功，才表示 in-flight operation 为零且已脱离 registry/dispatcher。
+- teardown 顺序为：销毁 controller，等待/取消已接收任务，调用 `Shutdown()` 直至成功，再销毁 dispatcher 与 registry。shutdown 后晚到 callback 只观察 inactive 状态，不再解引用依赖。
+- stale registration、首次 mark 失败回滚、generation 门禁、平台线程调用约束与 Android 兼容 payload 均保持不变；未实现 Task 5。
+
+### GREEN 与最终回归
+
+- 首个 GREEN 编译仅暴露 `/WX` 下 `C4458`（局部变量遮蔽状态成员），改名后 `camera_texture_` Debug 1/1 通过；重入 shutdown 用例无阻塞。
+- Camera + channel：`camera_|encoder_channel_` Debug 8/8、Release 8/8。
+- Media adapter：非并行完整构建后，Debug 32/32、Release 32/32。
+
+### 二次跟进提交
+
+- 本提交：`fix: 持久化摄像头纹理清理所有权`。

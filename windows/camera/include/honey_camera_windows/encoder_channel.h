@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "honey_camera_windows/camera_preview.h"
+#include "honey_camera_windows/camera_texture_cleanup.h"
 #include "honey_media_windows/platform_dispatcher.h"
 #include "honey_media_windows/texture_registry.h"
 
@@ -31,9 +32,9 @@ struct CameraControllerCallbacks {
 
 class CameraTextureController final {
  public:
-  CameraTextureController(hmw::TextureRegistry& texture_registry,
-                          hmw::PlatformDispatcher& dispatcher,
-                          CameraSourceFactory source_factory);
+  CameraTextureController(
+      std::shared_ptr<CameraTextureCleanupCoordinator> cleanup,
+      CameraSourceFactory source_factory);
   ~CameraTextureController();
 
   CameraTextureController(const CameraTextureController&) = delete;
@@ -50,15 +51,7 @@ class CameraTextureController final {
                            CameraFrame frame) noexcept;
   static void PublishError(const std::weak_ptr<State>& weak_state,
                            hmw::Error error) noexcept;
-  static hmw::Outcome ScheduleUnregisters(const std::shared_ptr<State>& state);
-  static void RetainUnregisterLocked(State& state, int64_t texture_id);
-  static bool ClaimPendingUnregister(const std::shared_ptr<State>& state,
-                                     int64_t texture_id);
-  static void UnregisterOwnedTextureOnPlatform(
-      const std::shared_ptr<State>& state, int64_t texture_id);
-  static void ResetPendingUnregister(const std::shared_ptr<State>& state,
-                                     int64_t texture_id);
-
+  std::shared_ptr<CameraTextureCleanupCoordinator> cleanup_;
   std::shared_ptr<State> state_;
   std::unique_ptr<CameraPreviewSession> session_;
 };

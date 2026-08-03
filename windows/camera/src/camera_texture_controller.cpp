@@ -2,6 +2,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -10,17 +11,16 @@
 namespace hcw {
 
 struct CameraTextureController::State {
-  struct PendingUnregister {
-    int64_t texture_id;
-    bool queued;
-  };
-
   State(hmw::TextureRegistry& texture_registry,
-        hmw::PlatformDispatcher& platform_dispatcher)
-      : registry(texture_registry), dispatcher(platform_dispatcher) {}
+        hmw::PlatformDispatcher& platform_dispatcher,
+        std::shared_ptr<CameraTextureCleanupCoordinator> cleanup_owner)
+      : registry(texture_registry),
+        dispatcher(platform_dispatcher),
+        cleanup(std::move(cleanup_owner)) {}
 
   hmw::TextureRegistry& registry;
   hmw::PlatformDispatcher& dispatcher;
+  std::shared_ptr<CameraTextureCleanupCoordinator> cleanup;
   std::mutex mutex;
   bool alive = true;
   bool open = false;
@@ -32,7 +32,6 @@ struct CameraTextureController::State {
   uint32_t height = 0;
   std::shared_ptr<const std::vector<uint8_t>> latest_bgra;
   CameraControllerCallbacks callbacks;
-  std::vector<PendingUnregister> pending_unregisters;
 };
 
 namespace {
@@ -53,9 +52,15 @@ bool ValidFrame(const CameraFrame& frame) {
 }  // namespace
 
 CameraTextureController::CameraTextureController(
-    hmw::TextureRegistry& texture_registry, hmw::PlatformDispatcher& dispatcher,
+    std::shared_ptr<CameraTextureCleanupCoordinator> cleanup,
     CameraSourceFactory source_factory)
-    : state_(std::make_shared<State>(texture_registry, dispatcher)) {
+    : cleanup_(std::move(cleanup)) {
+  if (!cleanup_) {
+    throw std::invalid_argument("camera texture cleanup is required");
+  }
+  state_ =
+      std::make_shared<State>(cleanup_->RegistryForController(),
+                              cleanup_->DispatcherForController(), cleanup_);
   const std::weak_ptr<State> weak_state = state_;
   session_ = std::make_unique<CameraPreviewSession>(
       std::move(source_factory),
@@ -110,6 +115,7 @@ hmw::Outcome CameraTextureController::Open(
 }
 
 hmw::Outcome CameraTextureController::Close() {
+  int64_t retired_texture_id = -1;
   {
     std::lock_guard<std::mutex> lock(state_->mutex);
     ++state_->generation;
@@ -121,108 +127,17 @@ hmw::Outcome CameraTextureController::Close() {
     state_->width = 0;
     state_->height = 0;
     if (state_->texture_id >= 0) {
-      RetainUnregisterLocked(*state_, state_->texture_id);
+      retired_texture_id = state_->texture_id;
       state_->texture_id = -1;
     }
   }
+  if (retired_texture_id >= 0) {
+    cleanup_->Retain(retired_texture_id);
+  }
 
   hmw::Outcome closed = session_ ? session_->Close() : hmw::Outcome{};
-  hmw::Outcome unregistered = ScheduleUnregisters(state_);
+  hmw::Outcome unregistered = cleanup_->RetryPending();
   return !closed.ok() ? closed : unregistered;
-}
-
-void CameraTextureController::RetainUnregisterLocked(State& state,
-                                                     int64_t texture_id) {
-  if (texture_id < 0) {
-    return;
-  }
-  const auto duplicate = std::find_if(
-      state.pending_unregisters.begin(), state.pending_unregisters.end(),
-      [texture_id](const State::PendingUnregister& item) {
-        return item.texture_id == texture_id;
-      });
-  if (duplicate == state.pending_unregisters.end()) {
-    state.pending_unregisters.push_back(
-        State::PendingUnregister{texture_id, false});
-  }
-}
-
-bool CameraTextureController::ClaimPendingUnregister(
-    const std::shared_ptr<State>& state, int64_t texture_id) {
-  std::lock_guard<std::mutex> lock(state->mutex);
-  const auto pending = std::find_if(
-      state->pending_unregisters.begin(), state->pending_unregisters.end(),
-      [texture_id](const State::PendingUnregister& item) {
-        return item.texture_id == texture_id;
-      });
-  if (pending == state->pending_unregisters.end() || pending->queued) {
-    return false;
-  }
-  pending->queued = true;
-  return true;
-}
-
-void CameraTextureController::UnregisterOwnedTextureOnPlatform(
-    const std::shared_ptr<State>& state, int64_t texture_id) {
-  const bool accepted = state->registry.UnregisterTexture(texture_id);
-  std::lock_guard<std::mutex> lock(state->mutex);
-  const auto pending = std::find_if(
-      state->pending_unregisters.begin(), state->pending_unregisters.end(),
-      [texture_id](const State::PendingUnregister& item) {
-        return item.texture_id == texture_id;
-      });
-  if (pending == state->pending_unregisters.end()) {
-    return;
-  }
-  if (accepted) {
-    state->pending_unregisters.erase(pending);
-  } else {
-    pending->queued = false;
-  }
-}
-
-void CameraTextureController::ResetPendingUnregister(
-    const std::shared_ptr<State>& state, int64_t texture_id) {
-  std::lock_guard<std::mutex> lock(state->mutex);
-  const auto pending = std::find_if(
-      state->pending_unregisters.begin(), state->pending_unregisters.end(),
-      [texture_id](const State::PendingUnregister& item) {
-        return item.texture_id == texture_id;
-      });
-  if (pending != state->pending_unregisters.end()) {
-    pending->queued = false;
-  }
-}
-
-hmw::Outcome CameraTextureController::ScheduleUnregisters(
-    const std::shared_ptr<State>& state) {
-  std::vector<int64_t> attempted;
-  for (;;) {
-    int64_t texture_id = -1;
-    {
-      std::lock_guard<std::mutex> lock(state->mutex);
-      const auto pending = std::find_if(
-          state->pending_unregisters.begin(), state->pending_unregisters.end(),
-          [&attempted](const State::PendingUnregister& item) {
-            return !item.queued &&
-                   std::find(attempted.begin(), attempted.end(),
-                             item.texture_id) == attempted.end();
-          });
-      if (pending == state->pending_unregisters.end()) {
-        return {};
-      }
-      pending->queued = true;
-      texture_id = pending->texture_id;
-      attempted.push_back(texture_id);
-    }
-
-    if (!state->dispatcher.Post([state, texture_id] {
-          UnregisterOwnedTextureOnPlatform(state, texture_id);
-        })) {
-      ResetPendingUnregister(state, texture_id);
-      return DispatchFailure("unable to dispatch texture unregister");
-    }
-  }
 }
 
 void CameraTextureController::PublishFrame(
@@ -275,20 +190,23 @@ void CameraTextureController::PublishFrame(
           }
 
           const int64_t registered =
-              current->registry.RegisterPixelBufferTexture([weak_state] {
-                const std::shared_ptr<State> provider_state = weak_state.lock();
-                if (!provider_state) {
-                  return hmw::PixelBufferView{};
-                }
-                std::lock_guard<std::mutex> lock(provider_state->mutex);
-                const auto snapshot = provider_state->latest_bgra;
-                if (!snapshot) {
-                  return hmw::PixelBufferView{};
-                }
-                return hmw::PixelBufferView{
-                    snapshot, snapshot->data(), snapshot->size(),
-                    provider_state->width, provider_state->height};
-              });
+              current->registry.RegisterPixelBufferTexture(
+                  [weak_state, cleanup = current->cleanup] {
+                    (void)cleanup;
+                    const std::shared_ptr<State> provider_state =
+                        weak_state.lock();
+                    if (!provider_state) {
+                      return hmw::PixelBufferView{};
+                    }
+                    std::lock_guard<std::mutex> lock(provider_state->mutex);
+                    const auto snapshot = provider_state->latest_bgra;
+                    if (!snapshot) {
+                      return hmw::PixelBufferView{};
+                    }
+                    return hmw::PixelBufferView{
+                        snapshot, snapshot->data(), snapshot->size(),
+                        provider_state->width, provider_state->height};
+                  });
           if (registered < 0) {
             {
               std::lock_guard<std::mutex> lock(current->mutex);
@@ -314,14 +232,10 @@ void CameraTextureController::PublishFrame(
               current->registration_pending = false;
               callbacks = current->callbacks;
               ready = CameraReady{registered, current->width, current->height};
-            } else {
-              RetainUnregisterLocked(*current, registered);
             }
           }
           if (!active) {
-            if (ClaimPendingUnregister(current, registered)) {
-              UnregisterOwnedTextureOnPlatform(current, registered);
-            }
+            current->cleanup->RetainAndUnregisterOnPlatform(registered);
             return;
           }
           if (!current->registry.MarkFrameAvailable(registered)) {
@@ -330,12 +244,9 @@ void CameraTextureController::PublishFrame(
               if (current->generation == generation &&
                   current->texture_id == registered) {
                 current->texture_id = -1;
-                RetainUnregisterLocked(*current, registered);
               }
             }
-            if (ClaimPendingUnregister(current, registered)) {
-              UnregisterOwnedTextureOnPlatform(current, registered);
-            }
+            current->cleanup->RetainAndUnregisterOnPlatform(registered);
             PublishError(weak_state,
                          hmw::Error{hmw::Status::kInvalidState,
                                     "Flutter rejected the camera frame"});

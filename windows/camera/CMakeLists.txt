@@ -19,6 +19,7 @@ endif()
 add_library(honey_camera_windows_preview STATIC
   src/camera_preview_session.cpp
   src/camera_texture_controller.cpp
+  src/camera_texture_cleanup.cpp
   src/media_foundation_camera.cpp
 )
 

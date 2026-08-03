@@ -206,6 +206,11 @@ hcw::CameraFrame Frame(uint8_t marker, uint32_t width = 2,
               static_cast<size_t>(width) * height * 4U, marker)};
 }
 
+std::shared_ptr<hcw::CameraTextureCleanupCoordinator> Cleanup(
+    hmw::TextureRegistry& registry, hmw::PlatformDispatcher& dispatcher) {
+  return hcw::CameraTextureCleanupCoordinator::Create(registry, dispatcher);
+}
+
 }  // namespace
 
 HMW_TEST(encoder_channel_open_accepts_then_emits_exact_ready_payload) {
@@ -215,7 +220,7 @@ HMW_TEST(encoder_channel_open_accepts_then_emits_exact_ready_payload) {
   std::vector<hcw::CameraPreviewConfig> requested;
   std::vector<EncodableValue> events;
   hcw::CameraTextureController controller(
-      registry, dispatcher,
+      Cleanup(registry, dispatcher),
       [&](const hcw::CameraPreviewConfig& config) {
         requested.push_back(config);
         return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
@@ -264,7 +269,7 @@ HMW_TEST(encoder_channel_uses_android_defaults_and_validates_explicit_values) {
   QueueDispatcher dispatcher;
   std::optional<hcw::CameraPreviewConfig> requested;
   hcw::CameraTextureController controller(
-      registry, dispatcher,
+      Cleanup(registry, dispatcher),
       [&](const hcw::CameraPreviewConfig& config) {
         requested = config;
         return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
@@ -298,7 +303,7 @@ HMW_TEST(encoder_channel_close_is_idempotent_and_other_methods_are_unimplemented
   Registry registry;
   QueueDispatcher dispatcher;
   hcw::CameraTextureController controller(
-      registry, dispatcher,
+      Cleanup(registry, dispatcher),
       [&](const hcw::CameraPreviewConfig&) {
         return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
             std::make_unique<Source>(source), std::nullopt};
@@ -322,7 +327,7 @@ HMW_TEST(encoder_channel_emits_one_android_error_map_and_honors_cancelled_sink) 
   bool listening = true;
   std::vector<EncodableValue> events;
   hcw::CameraTextureController controller(
-      registry, dispatcher,
+      Cleanup(registry, dispatcher),
       [&](const hcw::CameraPreviewConfig&) {
         return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
             std::make_unique<Source>(source), std::nullopt};
@@ -365,7 +370,7 @@ HMW_TEST(encoder_channel_shutdown_suppresses_queued_ready_event) {
   QueueDispatcher dispatcher;
   std::vector<EncodableValue> events;
   hcw::CameraTextureController controller(
-      registry, dispatcher,
+      Cleanup(registry, dispatcher),
       [&](const hcw::CameraPreviewConfig&) {
         return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
             std::make_unique<Source>(source), std::nullopt};
