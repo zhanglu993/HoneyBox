@@ -4,12 +4,14 @@ add_executable(honey_camera_windows_tests
   camera_preview_session_test.cpp
   camera_preview_session_reentrancy_test.cpp
   camera_preview_queue_test.cpp
+  media_foundation_camera_test.cpp
 )
 
 target_include_directories(honey_camera_windows_tests PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../../../media_core/include"
   "${CMAKE_CURRENT_LIST_DIR}/../../media/include"
   "${CMAKE_CURRENT_LIST_DIR}/../../media/tests"
+  "${CMAKE_CURRENT_LIST_DIR}/../src"
 )
 
 target_compile_features(honey_camera_windows_tests PRIVATE cxx_std_17)
@@ -35,3 +37,12 @@ add_test(NAME camera_status
 
 add_test(NAME camera_preview_session
   COMMAND honey_camera_windows_tests camera_preview_)
+
+add_test(NAME camera_mode_helpers
+  COMMAND honey_camera_windows_tests camera_mode_)
+
+add_test(NAME camera_bgra_helpers
+  COMMAND honey_camera_windows_tests camera_bgra_)
+
+add_test(NAME camera_rgba_helpers
+  COMMAND honey_camera_windows_tests camera_rgba_)

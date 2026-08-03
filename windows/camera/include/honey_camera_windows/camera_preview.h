@@ -36,6 +36,8 @@ using CameraSourceFactory = std::function<
     hmw::Result<std::unique_ptr<CameraFrameSource>>(
         const CameraPreviewConfig&)>;
 
+CameraSourceFactory CreateMediaFoundationCameraFactory();
+
 struct CameraPreviewCallbacks {
   std::function<void(uint64_t, CameraFrame)> on_frame;
   std::function<void(uint64_t, hmw::Error)> on_error;
