@@ -26,10 +26,29 @@
 - Windows Debug：`flutter_tools.snapshot build windows --debug --no-pub`，成功生成 `build\windows\x64\runner\Debug\HoneyBox.exe`；未修改 Windows 原生/Task 5 文件。
 - `git diff --check` 与 staged diff check 均通过。
 
+## 独立终审修复
+
+### RED
+
+- Dart 新增“dispose 的事件订阅 cancel 永不完成”与“cancel 超时后 native close 抛异常”两个确定性用例；修复前两项都在 100 ms 外层保护处失败：`TimeoutException: Future not completed`，证明 `dispose()` 永远到不了 `closeCamera()`。
+- Android 新增可在本地 JVM 运行的 `CameraSessionCallbackGateTest`；修复前 `:app:compileDebugUnitTestKotlin` 失败：`CameraSessionCallbackGateTest.kt:10:29 Unresolved reference 'CameraSessionCallbackGate'`。
+- 原 `CameraSessionGenerationContractTest` 的宽泛全文件 `contains` / DOTALL 检查被替换；新契约按 `openCamera`、GL lambda、CameraDevice callbacks、CaptureSession callback、ready/error emitter 的具体函数块和副作用顺序检查。
+
+### GREEN
+
+- `EncoderService.dispose()` 对 subscription cancel 复用 `_eventCancellationTimeout`；cancel 永挂或报错后仍继续 native close，native close 报错也被吸收，Dart focused 8/8 passed。
+- Android 新增纯 Kotlin `CameraSessionCallbackGate`，`CameraEncoder` 在 GL surface、CameraDevice opened、CaptureSession configured、ready/error 主线程投递的真实副作用位置调用它；stale device/session 分别执行 close，不写全局状态或发事件。
+- Android focused：`CameraSessionCallbackGateTest` 5、精确集成契约 2、generation gate 3，共 10/10 passed，failures/errors=0，`BUILD SUCCESSFUL`。
+- 精确契约内置 14 个负向 mutation：删除 7 个具体 gate，以及把对应 surface/global write/emit 移到 gate 前 7 个；14 个 mutation 均被契约拒绝，不能再由文件其它位置的无关 gate 蒙混通过。
+- Flutter full：149/149 passed。
+- Windows Debug：成功生成 `build\windows\x64\runner\Debug\HoneyBox.exe`。
+- 最终 `git diff --check` 与 staged diff check 均通过；未修改 wire、Windows 原生/Task 5 文件。
+
 ## Commits
 
 - 初始实现：`9392474 fix: 修复Windows摄像头启动卡死`
 - Review 修复：`ef00845 fix: 修复摄像头重试旧回调竞争`
+- 独立终审修复：`cd1fb97 fix: 完善摄像头会话终审保护`
 
 ## 边界
 
