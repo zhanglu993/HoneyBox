@@ -38,6 +38,14 @@ hmc_status_t cinepak_encoder_encode(
     hmc_frame_flags_t *output_frame_flags) noexcept;
 
 #if defined(HMC_ENABLE_TEST_HOOKS)
+struct CinepakNearestConversionDiagnostics {
+    std::size_t data_conversions;
+    std::size_t weight_conversions;
+};
+
+HMC_API void cinepak_encoder_test_reset_nearest_conversion_diagnostics() noexcept;
+HMC_API CinepakNearestConversionDiagnostics
+cinepak_encoder_test_nearest_conversion_diagnostics() noexcept;
 HMC_API std::int32_t cinepak_encoder_test_floor_divide_power_of_two(
     std::int64_t value) noexcept;
 HMC_API std::int32_t cinepak_encoder_test_kotlin_round(double value) noexcept;

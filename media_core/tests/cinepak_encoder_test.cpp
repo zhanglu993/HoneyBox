@@ -175,6 +175,76 @@ std::size_t reference_nearest_codebook(
     return best;
 }
 
+std::size_t reference_pruned_nearest_codebook(
+    const std::int32_t *data,
+    const double *centroids,
+    std::size_t codebook_count,
+    std::int32_t chroma_weight,
+    std::size_t *evaluated_terms)
+{
+    constexpr std::size_t dimensions = 6u;
+    if (evaluated_terms != nullptr) {
+        *evaluated_terms = 0u;
+    }
+    if (codebook_count == 0u) {
+        return 0u;
+    }
+    const double values[dimensions] = {
+        static_cast<double>(data[0]),
+        static_cast<double>(data[1]),
+        static_cast<double>(data[2]),
+        static_cast<double>(data[3]),
+        static_cast<double>(data[4]),
+        static_cast<double>(data[5]),
+    };
+    const double weight = static_cast<double>(chroma_weight);
+    std::size_t best = 0u;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (std::size_t c = 0u; c < codebook_count; ++c) {
+        const std::size_t cb = c * dimensions;
+        double distance = 0.0;
+        bool rejected = false;
+        for (std::size_t d = 0u; d < 4u; ++d) {
+            const double delta = values[d] - centroids[cb + d];
+            distance += delta * delta;
+            if (evaluated_terms != nullptr) {
+                ++*evaluated_terms;
+            }
+            if (distance >= best_distance) {
+                rejected = true;
+                break;
+            }
+        }
+        if (rejected) {
+            continue;
+        }
+        double delta = values[4] - centroids[cb + 4u];
+        distance += weight * delta * delta;
+        if (evaluated_terms != nullptr) {
+            ++*evaluated_terms;
+        }
+        if (distance >= best_distance) {
+            continue;
+        }
+        delta = values[5] - centroids[cb + 5u];
+        distance += weight * delta * delta;
+        if (evaluated_terms != nullptr) {
+            ++*evaluated_terms;
+        }
+        if (distance >= best_distance) {
+            continue;
+        }
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = c;
+            if (best_distance == 0.0) {
+                return best;
+            }
+        }
+    }
+    return best;
+}
+
 } // namespace
 
 HMC_TEST(cinepak_encoder_config_init_freezes_v1_defaults_and_tail_rules)
@@ -662,6 +732,21 @@ HMC_TEST(cinepak_nearest_codebook_counts_zero_match_and_first_term_rejection)
         data, rejected_after_first, 3u, 4, &evaluated_terms) == 0u);
     HMC_EXPECT(evaluated_terms == 8u);
     HMC_EXPECT(evaluated_terms < 6u * 3u);
+
+    honey::media::cinepak_encoder_test_reset_nearest_conversion_diagnostics();
+    evaluated_terms = 0u;
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        data, rejected_after_first, 3u, 4, &evaluated_terms) == 0u);
+    auto conversions =
+        honey::media::cinepak_encoder_test_nearest_conversion_diagnostics();
+    HMC_EXPECT(conversions.data_conversions == 6u);
+    HMC_EXPECT(conversions.weight_conversions == 1u);
+    honey::media::cinepak_encoder_test_reset_nearest_conversion_diagnostics();
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        nullptr, nullptr, 0u, 4, &evaluated_terms) == 0u);
+    conversions = honey::media::cinepak_encoder_test_nearest_conversion_diagnostics();
+    HMC_EXPECT(conversions.data_conversions == 0u);
+    HMC_EXPECT(conversions.weight_conversions == 1u);
 }
 
 HMC_TEST(cinepak_nearest_codebook_matches_ordered_full_distance_corpus)
@@ -741,6 +826,73 @@ HMC_TEST(cinepak_nearest_codebook_matches_ordered_full_distance_corpus)
                 chroma_weight, &terms) == expected);
         }
     }
+}
+
+HMC_TEST(cinepak_nearest_codebook_preserves_extremes_nan_signed_zero_and_each_prune)
+{
+    constexpr std::size_t dimensions = 6u;
+    const auto expect_match = [](
+        const std::int32_t *data,
+        const double *centroids,
+        std::size_t codebook_count,
+        std::int32_t weight) {
+        std::size_t expected_terms = 0u;
+        std::size_t actual_terms = std::numeric_limits<std::size_t>::max();
+        const std::size_t expected = reference_pruned_nearest_codebook(
+            data, centroids, codebook_count, weight, &expected_terms);
+        HMC_EXPECT(reference_nearest_codebook(
+            data, centroids, codebook_count, weight) == expected);
+        HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+            data, centroids, codebook_count, weight, &actual_terms) == expected);
+        HMC_EXPECT(actual_terms == expected_terms);
+    };
+
+    const std::int32_t extremes[] = {
+        std::numeric_limits<std::int32_t>::min(),
+        std::numeric_limits<std::int32_t>::max(),
+        std::numeric_limits<std::int32_t>::min(),
+        std::numeric_limits<std::int32_t>::max(),
+        std::numeric_limits<std::int32_t>::min(),
+        std::numeric_limits<std::int32_t>::max(),
+    };
+    double extreme_centroids[2u * dimensions]{};
+    for (std::size_t d = 0u; d < dimensions; ++d) {
+        extreme_centroids[dimensions + d] = static_cast<double>(extremes[d]);
+    }
+    expect_match(extremes, extreme_centroids, 2u, 4);
+
+    double nan_centroids[2u * dimensions]{};
+    nan_centroids[0] = std::numeric_limits<double>::quiet_NaN();
+    for (std::size_t d = 0u; d < dimensions; ++d) {
+        nan_centroids[dimensions + d] = static_cast<double>(extremes[d]);
+    }
+    expect_match(extremes, nan_centroids, 2u, 4);
+
+    const std::int32_t zeros[dimensions]{};
+    const double signed_zero_centroid[] = {
+        -0.0, +0.0, -0.0, +0.0, -0.0, +0.0,
+    };
+    expect_match(zeros, signed_zero_centroid, 1u, 4);
+
+    const double prune_after_each_term[] = {
+        0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        2.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 2.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 2.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 2.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 2.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 2.0,
+    };
+    std::size_t expected_terms = 0u;
+    HMC_EXPECT(reference_pruned_nearest_codebook(
+        zeros, prune_after_each_term, 7u, 1, &expected_terms) == 0u);
+    HMC_EXPECT(expected_terms == 27u);
+    std::size_t actual_terms = 0u;
+    HMC_EXPECT(honey::media::cinepak_encoder_test_nearest_codebook_with_term_count(
+        zeros, prune_after_each_term, 7u, 1, &actual_terms) == 0u);
+    HMC_EXPECT(actual_terms == expected_terms);
+
+    expect_match(nullptr, nullptr, 0u, 4);
 }
 
 HMC_TEST(cinepak_encoder_quality_boundaries_control_v4_and_strict_zero_threshold)
