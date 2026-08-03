@@ -2,6 +2,7 @@ add_executable(honey_camera_windows_tests
   "${CMAKE_CURRENT_LIST_DIR}/../../media/tests/test_main.cpp"
   camera_status_test.cpp
   camera_preview_session_test.cpp
+  camera_preview_session_reentrancy_test.cpp
 )
 
 target_include_directories(honey_camera_windows_tests PRIVATE

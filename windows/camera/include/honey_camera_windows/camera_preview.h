@@ -52,18 +52,31 @@ class CameraPreviewSession final {
   uint64_t generation() const;
 
  private:
-  hmw::Outcome CloseLocked();
-  void RunWorker(uint64_t worker_generation, CameraPreviewConfig config);
-  void PublishFrameIfActive(uint64_t worker_generation, CameraFrame frame);
-  void PublishErrorIfActive(uint64_t worker_generation, hmw::Error error);
+  struct State;
+  struct CallbackQueue;
 
-  CameraSourceFactory source_factory_;
-  CameraPreviewCallbacks callbacks_;
-  mutable std::mutex state_mutex_;
+  hmw::Outcome CloseLocked();
+  void StopCallbackWorker() noexcept;
+  static void RunWorker(std::shared_ptr<State> state,
+                        std::shared_ptr<CallbackQueue> callback_queue,
+                        uint64_t worker_generation,
+                        CameraPreviewConfig config) noexcept;
+  static void RunCallbackWorker(
+      std::shared_ptr<CallbackQueue> callback_queue) noexcept;
+  static void DispatchFrame(std::shared_ptr<State> state,
+                            std::shared_ptr<CallbackQueue> callback_queue,
+                            uint64_t worker_generation,
+                            CameraFrame frame) noexcept;
+  static void DispatchError(std::shared_ptr<State> state,
+                            std::shared_ptr<CallbackQueue> callback_queue,
+                            uint64_t worker_generation,
+                            hmw::Error error) noexcept;
+
+  std::shared_ptr<State> state_;
+  std::shared_ptr<CallbackQueue> callback_queue_;
   std::mutex operation_mutex_;
-  uint64_t generation_ = 0;
-  std::shared_ptr<CameraFrameSource> source_;
   std::thread worker_;
+  std::thread callback_worker_;
 };
 
 }  // namespace hcw
