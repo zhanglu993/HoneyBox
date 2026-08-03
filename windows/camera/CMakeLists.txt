@@ -35,6 +35,7 @@ target_link_libraries(honey_camera_windows_preview PUBLIC
 )
 
 add_library(honey_camera_windows_channel STATIC
+  src/windows_encoder_registration.cpp
   src/encoder_channel.cpp
 )
 
@@ -68,6 +69,11 @@ endif()
 target_link_libraries(honey_camera_windows_preview PRIVATE
   mf mfplat mfreadwrite mfuuid ole32
 )
+if(TARGET honey_media_windows_plugin)
+  target_link_libraries(honey_media_windows_plugin PRIVATE
+    honey_camera_windows_channel
+  )
+endif()
 
 if(MSVC)
   target_compile_options(honey_camera_windows_preview PRIVATE /W4 /WX /permissive- /EHsc)

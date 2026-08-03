@@ -7,6 +7,7 @@ add_executable(honey_camera_windows_tests
   media_foundation_camera_test.cpp
   camera_texture_controller_test.cpp
   encoder_channel_contract_test.cpp
+  windows_encoder_registration_test.cpp
 )
 
 target_include_directories(honey_camera_windows_tests PRIVATE
@@ -21,6 +22,8 @@ if(HMW_FLUTTER_CPP_WRAPPER_DIR)
     "${HMW_FLUTTER_CPP_WRAPPER_DIR}/include"
     "${HMW_FLUTTER_CPP_WRAPPER_DIR}/.."
   )
+  target_sources(honey_camera_windows_tests PRIVATE
+    "${HMW_FLUTTER_CPP_WRAPPER_DIR}/standard_codec.cc")
 endif()
 
 target_compile_features(honey_camera_windows_tests PRIVATE cxx_std_17)
@@ -65,3 +68,6 @@ add_test(NAME camera_texture_controller
 
 add_test(NAME encoder_channel_contract
   COMMAND honey_camera_windows_tests encoder_channel_)
+
+add_test(NAME windows_encoder_registration
+  COMMAND honey_camera_windows_tests windows_encoder_registration_)

@@ -1,5 +1,7 @@
 #include "honey_media_windows/windows_media_plugin.h"
 
+#include "honey_camera_windows/encoder_channel.h"
+#include "honey_camera_windows/windows_encoder_registration.h"
 #include "windows_media_plugin_internal.h"
 
 #include <flutter/method_channel.h>
@@ -37,6 +39,28 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
               SendProgress(done, total);
             }),
         player_channel_(*texture_registry_, dispatcher_) {
+    camera_cleanup_ = hcw::CameraTextureCleanupCoordinator::Create(
+        *texture_registry_, dispatcher_);
+    camera_controller_ = std::make_unique<hcw::CameraTextureController>(
+        camera_cleanup_, hcw::CreateMediaFoundationCameraFactory());
+    encoder_channel_ = std::make_unique<hcw::EncoderChannel>(
+        *camera_controller_, [this](flutter::EncodableValue event) {
+          if (encoder_registration_) {
+            encoder_registration_->SendEvent(std::move(event));
+          }
+        });
+    encoder_registration_ = std::make_unique<hcw::WindowsEncoderRegistration>(
+        *registrar_->messenger(), dispatcher_,
+        [this](std::string_view method,
+               const flutter::EncodableValue* arguments,
+               std::unique_ptr<hmw::FlutterResult> result) {
+          if (!encoder_channel_) {
+            result->NotImplemented();
+            return;
+          }
+          encoder_channel_->Handle(method, arguments, std::move(result));
+        });
+
     window_proc_delegate_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
         [](HWND, UINT message, WPARAM wparam,
            LPARAM lparam) -> std::optional<LRESULT> {
@@ -58,8 +82,28 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
   }
 
   ~HoneyMediaWindowsPlugin() override {
+    if (encoder_registration_) {
+      encoder_registration_->Shutdown();
+    }
     player_method_channel_.SetMethodCallHandler(nullptr);
     converter_method_channel_.SetMethodCallHandler(nullptr);
+
+    if (encoder_channel_) {
+      encoder_channel_->Shutdown();
+    }
+    encoder_registration_.reset();
+    encoder_channel_.reset();
+    camera_controller_.reset();
+
+    if (camera_cleanup_) {
+      // Win32PlatformDispatcher owns accepted callbacks. Shutdown closes the
+      // cleanup dependency gate first; any callback still queued is then
+      // canceled by dispatcher teardown without touching registry/dispatcher.
+      // FlutterTextureRegistry retains and unregisters any remaining entries.
+      (void)camera_cleanup_->Shutdown();
+      camera_cleanup_.reset();
+    }
+
     player_channel_.Shutdown();
     converter_channel_.Shutdown();
     if (window_proc_delegate_id_ != 0) {
@@ -89,6 +133,10 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
   hmw::Win32PlatformDispatcher dispatcher_;
   hmw::ConversionController controller_;
   std::unique_ptr<hmw::TextureRegistry> texture_registry_;
+  std::shared_ptr<hcw::CameraTextureCleanupCoordinator> camera_cleanup_;
+  std::unique_ptr<hcw::CameraTextureController> camera_controller_;
+  std::unique_ptr<hcw::EncoderChannel> encoder_channel_;
+  std::unique_ptr<hcw::WindowsEncoderRegistration> encoder_registration_;
   flutter::MethodChannel<flutter::EncodableValue>
       converter_method_channel_;
   flutter::MethodChannel<flutter::EncodableValue>
