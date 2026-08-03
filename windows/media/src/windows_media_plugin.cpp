@@ -110,8 +110,14 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
     camera_cleanup_.reset();
     // A reentrant cleanup keeps this owner alive until the outer operation
     // ends, then retries Shutdown before releasing registry and dispatcher.
-    camera_teardown_owner_->Teardown();
-    camera_teardown_owner_.reset();
+    const hmw::Outcome teardown = camera_teardown_owner_->Teardown();
+    // The concrete coordinator returns only success or reentrant invalid_state;
+    // this owner exclusively owns its completion slot and accepts that
+    // invalid_state as deferred work. Keep the owner until member teardown if
+    // that closed contract is ever violated.
+    if (teardown.ok()) {
+      camera_teardown_owner_.reset();
+    }
   }
 
   HoneyMediaWindowsPlugin(const HoneyMediaWindowsPlugin&) = delete;
@@ -131,10 +137,10 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
   }
 
   flutter::PluginRegistrarWindows* registrar_;
-  std::unique_ptr<hmw::Win32PlatformDispatcher> dispatcher_;
-  hmw::ConversionController controller_;
   std::shared_ptr<hcw::CameraPluginTeardownOwner>
       camera_teardown_owner_;
+  std::unique_ptr<hmw::Win32PlatformDispatcher> dispatcher_;
+  hmw::ConversionController controller_;
   std::unique_ptr<hmw::TextureRegistry> texture_registry_;
   std::shared_ptr<hcw::CameraTextureCleanupCoordinator> camera_cleanup_;
   std::unique_ptr<hcw::CameraTextureController> camera_controller_;

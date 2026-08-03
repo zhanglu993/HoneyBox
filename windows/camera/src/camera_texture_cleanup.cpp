@@ -218,26 +218,21 @@ hmw::Outcome CameraTextureCleanupCoordinator::Shutdown() noexcept {
   return {};
 }
 
-void CameraTextureCleanupCoordinator::RunAfterCurrentOperation(
+CameraOperationCompletionRegistration
+CameraTextureCleanupCoordinator::RunAfterCurrentOperation(
     std::function<void()> callback) noexcept {
   if (!callback) {
-    return;
+    return CameraOperationCompletionRegistration::kRunNow;
   }
-  std::function<void()> run_now;
-  {
-    std::lock_guard<std::mutex> lock(state_->mutex);
-    if (state_->operations == 0) {
-      run_now.swap(callback);
-    } else if (!state_->after_operation) {
-      state_->after_operation.swap(callback);
-    }
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (state_->operations == 0) {
+    return CameraOperationCompletionRegistration::kRunNow;
   }
-  if (run_now) {
-    try {
-      run_now();
-    } catch (...) {
-    }
+  if (state_->after_operation) {
+    return CameraOperationCompletionRegistration::kOccupied;
   }
+  state_->after_operation.swap(callback);
+  return CameraOperationCompletionRegistration::kRegistered;
 }
 
 void CameraTextureCleanupCoordinator::Retain(int64_t texture_id) {

@@ -671,11 +671,13 @@ HMW_TEST(camera_texture_cleanup_reentrant_shutdown_retries_after_operation) {
     const hmw::Outcome result = cleanup->Shutdown();
     reentrant_called = true;
     reentrant_succeeded = result.ok();
-    cleanup->RunAfterCurrentOperation([&] {
+    const auto registration = cleanup->RunAfterCurrentOperation([&] {
       ++completion_calls;
       HMW_EXPECT(!inside_unregister);
       retry_succeeded = cleanup->Shutdown().ok();
     });
+    HMW_EXPECT(registration ==
+               hcw::CameraOperationCompletionRegistration::kRegistered);
     inside_unregister = false;
   };
   HMW_EXPECT(controller.Close().ok());

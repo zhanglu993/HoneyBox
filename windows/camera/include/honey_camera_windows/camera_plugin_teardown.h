@@ -1,5 +1,7 @@
 #pragma once
 
+#include "honey_camera_windows/camera_texture_cleanup.h"
+
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -10,14 +12,12 @@
 
 namespace hcw {
 
-class CameraTextureCleanupCoordinator;
-
 class CameraPluginCleanupGate {
  public:
   virtual ~CameraPluginCleanupGate() = default;
 
   virtual hmw::Outcome Shutdown() noexcept = 0;
-  virtual void RunAfterCurrentOperation(
+  virtual CameraOperationCompletionRegistration RunAfterCurrentOperation(
       std::function<void()> callback) noexcept = 0;
 };
 
@@ -32,11 +32,12 @@ class CameraPluginTeardownOwner final
       std::unique_ptr<hmw::TextureRegistry> texture_registry,
       std::unique_ptr<hmw::PlatformDispatcher> dispatcher);
 
+  ~CameraPluginTeardownOwner();
   CameraPluginTeardownOwner(const CameraPluginTeardownOwner&) = delete;
   CameraPluginTeardownOwner& operator=(const CameraPluginTeardownOwner&) =
       delete;
 
-  void Teardown() noexcept;
+  hmw::Outcome Teardown() noexcept;
 
  private:
   CameraPluginTeardownOwner(
@@ -45,6 +46,7 @@ class CameraPluginTeardownOwner final
       std::unique_ptr<hmw::PlatformDispatcher> dispatcher);
 
   void ResumeAfterCurrentOperation() noexcept;
+  hmw::Outcome CompleteShutdown() noexcept;
 
   std::mutex mutex_;
   bool attempting_ = false;

@@ -11,6 +11,11 @@
 namespace hcw {
 
 class CameraTextureController;
+enum class CameraOperationCompletionRegistration {
+  kRegistered,
+  kRunNow,
+  kOccupied,
+};
 
 // Durable owner for camera texture IDs that are awaiting platform-thread
 // unregistration. The plugin must retain this coordinator for at least as long
@@ -36,7 +41,8 @@ class CameraTextureCleanupCoordinator final
   // failure has fully exited. The callback runs on that operation's thread.
   // Task 5 uses this to retry Shutdown without blocking or posting a
   // cancelable platform message.
-  void RunAfterCurrentOperation(std::function<void()> callback) noexcept;
+  CameraOperationCompletionRegistration RunAfterCurrentOperation(
+      std::function<void()> callback) noexcept;
 
   // Cancels future access to the non-owning registry/dispatcher dependencies.
   // Call only after camera controllers are destroyed and before either

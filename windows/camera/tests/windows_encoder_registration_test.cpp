@@ -321,9 +321,12 @@ HMW_TEST(
        "player_channel_.Shutdown()",
        "converter_channel_.Shutdown()",
        "camera_cleanup_.reset()",
-       "camera_teardown_owner_->Teardown()",
+       "const hmw::Outcome teardown = camera_teardown_owner_->Teardown()",
+       "if (teardown.ok())",
        "camera_teardown_owner_.reset()"}));
   HMW_EXPECT(source.find("(void)camera_cleanup_->Shutdown()") ==
+             std::string::npos);
+  HMW_EXPECT(source.find("(void)camera_teardown_owner_->Teardown()") ==
              std::string::npos);
   HMW_EXPECT(source.find("std::move(camera_cleanup_)") != std::string::npos);
   HMW_EXPECT(source.find("std::move(texture_registry_)") != std::string::npos);
