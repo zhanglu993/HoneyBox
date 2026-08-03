@@ -90,6 +90,22 @@ hmw::Error IoError(std::string message) {
   return {hmw::Status::kIoError, std::move(message)};
 }
 
+class WorkerSourceTeardown final {
+ public:
+  explicit WorkerSourceTeardown(
+      std::shared_ptr<CameraFrameSource>* source) noexcept
+      : source_(source) {}
+
+  ~WorkerSourceTeardown() {
+    if (*source_) {
+      (*source_)->TeardownOnWorker();
+    }
+  }
+
+ private:
+  std::shared_ptr<CameraFrameSource>* source_;
+};
+
 }  // namespace
 
 CameraPreviewSession::CameraPreviewSession(
@@ -192,6 +208,7 @@ void CameraPreviewSession::RunWorker(
     std::shared_ptr<CallbackQueue> callback_queue,
     uint64_t worker_generation, CameraPreviewConfig config) noexcept {
   std::shared_ptr<CameraFrameSource> source;
+  WorkerSourceTeardown teardown(&source);
   try {
     hmw::Result<std::unique_ptr<CameraFrameSource>> created =
         state->source_factory(config);

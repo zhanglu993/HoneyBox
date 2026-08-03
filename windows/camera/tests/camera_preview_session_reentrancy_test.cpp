@@ -37,6 +37,17 @@ class FrameState final {
     return condition_.wait_for(lock, 2s, [this] { return stop_requests_ != 0; });
   }
 
+  bool WaitForTeardown() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 2s, [this] { return teardown_count_ != 0; });
+  }
+
+  bool TeardownRanExactlyOnceOnReadThread() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return teardown_count_ == 1 && read_thread_.has_value() &&
+           teardown_thread_.has_value() && *read_thread_ == *teardown_thread_;
+  }
+
   void Push(hcw::CameraFrame frame) {
     std::lock_guard<std::mutex> lock(mutex_);
     frame_ = std::move(frame);
@@ -45,6 +56,7 @@ class FrameState final {
 
   hmw::Result<hcw::CameraFrame> ReadNext() {
     std::unique_lock<std::mutex> lock(mutex_);
+    read_thread_ = std::this_thread::get_id();
     read_started_ = true;
     condition_.notify_all();
     condition_.wait(lock, [this] { return stop_requested_ || frame_; });
@@ -63,6 +75,20 @@ class FrameState final {
     condition_.notify_all();
   }
 
+  void RecordReadThread() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    read_thread_ = std::this_thread::get_id();
+    read_started_ = true;
+    condition_.notify_all();
+  }
+
+  void RecordTeardown() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    teardown_thread_ = std::this_thread::get_id();
+    ++teardown_count_;
+    condition_.notify_all();
+  }
+
   size_t stop_requests() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return stop_requests_;
@@ -72,6 +98,9 @@ class FrameState final {
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::optional<hcw::CameraFrame> frame_;
+  std::optional<std::thread::id> read_thread_;
+  std::optional<std::thread::id> teardown_thread_;
+  size_t teardown_count_ = 0;
   bool read_started_ = false;
   bool stop_requested_ = false;
   size_t stop_requests_ = 0;
@@ -132,6 +161,8 @@ class FrameSource final : public hcw::CameraFrameSource {
 
   void RequestStop() noexcept override { state_->RequestStop(); }
 
+  void TeardownOnWorker() noexcept override { state_->RecordTeardown(); }
+
  private:
   std::shared_ptr<FrameState> state_;
 };
@@ -153,11 +184,20 @@ class DelayedFrameSource final : public hcw::CameraFrameSource {
 
 class ThrowingSource final : public hcw::CameraFrameSource {
  public:
+  explicit ThrowingSource(std::shared_ptr<FrameState> state)
+      : state_(std::move(state)) {}
+
   hmw::Result<hcw::CameraFrame> ReadNext() override {
+    state_->RecordReadThread();
     throw std::runtime_error("read failed");
   }
 
   void RequestStop() noexcept override {}
+
+  void TeardownOnWorker() noexcept override { state_->RecordTeardown(); }
+
+ private:
+  std::shared_ptr<FrameState> state_;
 };
 
 bool WaitFor(std::condition_variable& condition, std::mutex& mutex,
@@ -310,10 +350,11 @@ HMW_TEST(camera_preview_worker_exceptions_report_io_error) {
     std::lock_guard<std::mutex> lock(mutex);
     errors.clear();
   }
+  const auto read_state = std::make_shared<FrameState>();
   hcw::CameraPreviewSession read_session(
-      [](const hcw::CameraPreviewConfig&) {
+      [read_state](const hcw::CameraPreviewConfig&) {
         return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
-            std::make_unique<ThrowingSource>(), std::nullopt};
+            std::make_unique<ThrowingSource>(read_state), std::nullopt};
       }, {{}, record_error});
   HMW_EXPECT(read_session.Open({2, 1, 15}).ok());
   HMW_EXPECT(WaitFor(condition, mutex, [&] { return errors.size() == 1; }));
@@ -322,6 +363,8 @@ HMW_TEST(camera_preview_worker_exceptions_report_io_error) {
     HMW_EXPECT(errors.front().status == hmw::Status::kIoError);
   }
   HMW_EXPECT(read_session.Close().ok());
+  HMW_EXPECT(read_state->WaitForTeardown());
+  HMW_EXPECT(read_state->TeardownRanExactlyOnceOnReadThread());
 }
 
 HMW_TEST(camera_preview_frame_callback_can_destroy_session) {
@@ -378,4 +421,6 @@ HMW_TEST(camera_preview_frame_callback_exception_reports_io_error) {
     HMW_EXPECT(errors.front().status == hmw::Status::kIoError);
   }
   HMW_EXPECT(session.Close().ok());
+  HMW_EXPECT(state->WaitForTeardown());
+  HMW_EXPECT(state->TeardownRanExactlyOnceOnReadThread());
 }

@@ -93,9 +93,15 @@ class BlockingSource final : public hcw::CameraFrameSource {
   std::shared_ptr<BlockingSourceState> state_;
 };
 
-class AffinitySourceState final {
+class AffinitySourceState final
+    : public std::enable_shared_from_this<AffinitySourceState> {
  public:
   hmw::Result<hcw::CameraFrame> ReadNext() {
+    thread_local std::shared_ptr<void> worker_exit_signal;
+    worker_exit_signal = std::shared_ptr<void>(
+        nullptr, [state = shared_from_this()](void*) {
+          state->RecordWorkerExit();
+        });
     std::unique_lock<std::mutex> lock(mutex_);
     worker_thread_ = std::this_thread::get_id();
     read_started_ = true;
@@ -106,8 +112,23 @@ class AffinitySourceState final {
   }
 
   void RequestStop() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     stop_requested_ = true;
+    condition_.notify_all();
+    stop_observed_worker_exit_ = condition_.wait_for(
+        lock, 2s, [this] { return worker_exited_; });
+  }
+
+  void RecordWorkerExit() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    worker_exited_ = true;
+    condition_.notify_all();
+  }
+
+  void RecordWorkerTeardown() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++teardown_count_;
+    teardown_thread_ = std::this_thread::get_id();
     condition_.notify_all();
   }
 
@@ -122,16 +143,22 @@ class AffinitySourceState final {
     return condition_.wait_for(lock, 2s, [this] { return read_started_; });
   }
 
-  bool WaitForDestruction() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return condition_.wait_for(
-        lock, 2s, [this] { return destruction_thread_.has_value(); });
+  bool StopObservedWorkerExit() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stop_observed_worker_exit_;
   }
 
-  bool WasDestroyedOnWorkerThread() const {
+  bool TeardownRanExactlyOnceOnWorker() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return teardown_count_ == 1 && worker_thread_.has_value() &&
+           teardown_thread_.has_value() &&
+           *worker_thread_ == *teardown_thread_;
+  }
+
+  bool ShellWasDestroyedOffWorker() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return worker_thread_.has_value() && destruction_thread_.has_value() &&
-           *worker_thread_ == *destruction_thread_;
+           *worker_thread_ != *destruction_thread_;
   }
 
  private:
@@ -139,8 +166,12 @@ class AffinitySourceState final {
   std::condition_variable condition_;
   std::optional<std::thread::id> worker_thread_;
   std::optional<std::thread::id> destruction_thread_;
+  std::optional<std::thread::id> teardown_thread_;
   bool read_started_ = false;
+  size_t teardown_count_ = 0;
   bool stop_requested_ = false;
+  bool worker_exited_ = false;
+  bool stop_observed_worker_exit_ = false;
 };
 
 class AffinitySource final : public hcw::CameraFrameSource {
@@ -154,6 +185,8 @@ class AffinitySource final : public hcw::CameraFrameSource {
   }
 
   void RequestStop() noexcept override { state_->RequestStop(); }
+
+  void TeardownOnWorker() noexcept override { state_->RecordWorkerTeardown(); }
 
  private:
   std::shared_ptr<AffinitySourceState> state_;
@@ -212,7 +245,7 @@ HMW_TEST(camera_preview_close_is_idempotent_and_joins_worker) {
   HMW_EXPECT(state->stop_requests() == 1);
 }
 
-HMW_TEST(camera_preview_source_is_destroyed_on_capture_worker) {
+HMW_TEST(camera_preview_resources_teardown_on_worker_before_ui_shell_release) {
   const auto state = std::make_shared<AffinitySourceState>();
   hcw::CameraPreviewSession session(
       [state](const hcw::CameraPreviewConfig&) {
@@ -224,8 +257,9 @@ HMW_TEST(camera_preview_source_is_destroyed_on_capture_worker) {
   HMW_EXPECT(session.Open({2, 1, 15}).ok());
   HMW_EXPECT(state->WaitForRead());
   HMW_EXPECT(session.Close().ok());
-  HMW_EXPECT(state->WaitForDestruction());
-  HMW_EXPECT(state->WasDestroyedOnWorkerThread());
+  HMW_EXPECT(state->StopObservedWorkerExit());
+  HMW_EXPECT(state->TeardownRanExactlyOnceOnWorker());
+  HMW_EXPECT(state->ShellWasDestroyedOffWorker());
 }
 
 HMW_TEST(camera_preview_new_open_suppresses_old_generation) {

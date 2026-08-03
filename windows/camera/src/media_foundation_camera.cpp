@@ -639,6 +639,11 @@ class AsyncReadState final {
     condition_.notify_all();
   }
 
+  void ReleaseCompletedSampleOnWorker() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    completion_.reset();
+  }
+
  private:
   std::mutex mutex_;
   std::condition_variable condition_;
@@ -716,19 +721,7 @@ class MediaFoundationCameraSource final : public CameraFrameSource {
         source_height_(source_height),
         default_stride_(default_stride) {}
 
-  ~MediaFoundationCameraSource() override {
-    RequestStop();
-    if (reader_) {
-      (void)reader_->Flush(kVideoStream);
-    }
-    reader_.Reset();
-    if (media_source_) {
-      (void)media_source_->Shutdown();
-    }
-    media_source_.Reset();
-    callback_.Reset();
-    read_state_.reset();
-  }
+  ~MediaFoundationCameraSource() override = default;
 
   hmw::Result<CameraFrame> ReadNext() override {
     for (;;) {
@@ -830,6 +823,26 @@ class MediaFoundationCameraSource final : public CameraFrameSource {
 
   void RequestStop() noexcept override { read_state_->Stop(); }
 
+  void TeardownOnWorker() noexcept override {
+    if (teardown_completed_) {
+      return;
+    }
+    teardown_completed_ = true;
+    read_state_->Stop();
+    if (reader_) {
+      (void)reader_->Flush(kVideoStream);
+    }
+    read_state_->ReleaseCompletedSampleOnWorker();
+    reader_.Reset();
+    if (media_source_) {
+      (void)media_source_->Shutdown();
+    }
+    media_source_.Reset();
+    callback_.Reset();
+    runtime_ = MediaFoundationRuntime{};
+    apartment_.reset();
+  }
+
  private:
   std::unique_ptr<ComApartment> apartment_;
   MediaFoundationRuntime runtime_;
@@ -841,6 +854,7 @@ class MediaFoundationCameraSource final : public CameraFrameSource {
   uint32_t source_width_;
   uint32_t source_height_;
   LONG default_stride_;
+  bool teardown_completed_ = false;
 };
 
 hmw::Result<std::unique_ptr<CameraFrameSource>> OpenCamera(

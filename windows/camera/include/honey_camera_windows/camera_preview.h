@@ -30,6 +30,7 @@ class CameraFrameSource {
 
   virtual hmw::Result<CameraFrame> ReadNext() = 0;
   virtual void RequestStop() noexcept = 0;
+  virtual void TeardownOnWorker() noexcept {}
 };
 
 using CameraSourceFactory = std::function<
