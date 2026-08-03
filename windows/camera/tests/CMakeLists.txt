@@ -1,6 +1,7 @@
 add_executable(honey_camera_windows_tests
   "${CMAKE_CURRENT_LIST_DIR}/../../media/tests/test_main.cpp"
   camera_status_test.cpp
+  camera_preview_session_test.cpp
 )
 
 target_include_directories(honey_camera_windows_tests PRIVATE
@@ -13,6 +14,7 @@ target_compile_features(honey_camera_windows_tests PRIVATE cxx_std_17)
 
 target_link_libraries(honey_camera_windows_tests PRIVATE
   honey_media_windows_core
+  honey_camera_windows_preview
 )
 
 target_compile_definitions(honey_camera_windows_tests PRIVATE
@@ -28,3 +30,6 @@ endif()
 
 add_test(NAME camera_status
   COMMAND honey_camera_windows_tests camera_status)
+
+add_test(NAME camera_preview_session
+  COMMAND honey_camera_windows_tests camera_preview_)
