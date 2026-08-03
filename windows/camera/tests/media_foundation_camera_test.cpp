@@ -2,12 +2,17 @@
 
 #include "test_support.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
 
+using namespace std::chrono_literals;
 using hcw::internal::BgraBufferView;
 using hcw::internal::CaptureMode;
 
@@ -67,6 +72,78 @@ HMW_TEST(camera_mode_hresult_detail_is_hexadecimal_and_bounded) {
 
   HMW_EXPECT(message.size() < 160);
   HMW_EXPECT(message.find("HRESULT 0x80004005") != std::string::npos);
+}
+
+HMW_TEST(camera_flush_waits_until_matching_callback_completion) {
+  hcw::internal::AsyncFlushBarrier barrier;
+  const auto generation = barrier.Arm();
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool wait_entered = false;
+  bool wait_returned = false;
+
+  std::thread waiter([&] {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      wait_entered = true;
+      condition.notify_all();
+    }
+    barrier.Wait(generation);
+    std::lock_guard<std::mutex> lock(mutex);
+    wait_returned = true;
+    condition.notify_all();
+  });
+
+  bool returned_before_completion = false;
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    HMW_EXPECT(condition.wait_for(lock, 2s, [&] { return wait_entered; }));
+    returned_before_completion =
+        condition.wait_for(lock, 50ms, [&] { return wait_returned; });
+  }
+  barrier.Complete();
+  bool returned_after_completion = false;
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    returned_after_completion =
+        condition.wait_for(lock, 2s, [&] { return wait_returned; });
+  }
+  if (!returned_after_completion) {
+    barrier.Cancel(generation);
+  }
+  waiter.join();
+
+  HMW_EXPECT(!returned_before_completion);
+  HMW_EXPECT(returned_after_completion);
+}
+
+HMW_TEST(camera_flush_keeps_completion_that_arrives_before_wait) {
+  hcw::internal::AsyncFlushBarrier barrier;
+  const auto generation = barrier.Arm();
+  barrier.Complete();
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool wait_returned = false;
+
+  std::thread waiter([&] {
+    barrier.Wait(generation);
+    std::lock_guard<std::mutex> lock(mutex);
+    wait_returned = true;
+    condition.notify_all();
+  });
+
+  bool preserved_early_completion = false;
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    preserved_early_completion =
+        condition.wait_for(lock, 2s, [&] { return wait_returned; });
+  }
+  if (!preserved_early_completion) {
+    barrier.Cancel(generation);
+  }
+  waiter.join();
+
+  HMW_EXPECT(preserved_early_completion);
 }
 
 HMW_TEST(camera_bgra_copies_positive_padded_stride_to_tight_rows) {

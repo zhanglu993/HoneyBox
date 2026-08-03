@@ -4,9 +4,11 @@
 #include "honey_media_windows/status.h"
 #include "honey_media_windows/types.h"
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -40,6 +42,24 @@ std::optional<CaptureMode> SelectNegotiatedCaptureMode(
     const CaptureModeNegotiator& negotiate);
 
 std::string FormatHresultDetail(std::string_view context, uint32_t result);
+
+class AsyncFlushBarrier final {
+ public:
+  using Generation = uint64_t;
+
+  Generation Arm() noexcept;
+  void Complete() noexcept;
+  void Cancel(Generation generation) noexcept;
+  void Wait(Generation generation) noexcept;
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  Generation next_generation_ = 0;
+  Generation active_generation_ = 0;
+  Generation completed_generation_ = 0;
+  Generation cancelled_generation_ = 0;
+};
 
 // scanline_zero always addresses the logical top row. A negative stride means
 // subsequent logical rows live at lower addresses in the backing buffer.

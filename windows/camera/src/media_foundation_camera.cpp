@@ -174,6 +174,42 @@ std::string FormatHresultDetail(std::string_view context, uint32_t result) {
   return message;
 }
 
+AsyncFlushBarrier::Generation AsyncFlushBarrier::Arm() noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const Generation generation = ++next_generation_;
+  active_generation_ = generation;
+  return generation;
+}
+
+void AsyncFlushBarrier::Complete() noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (active_generation_ == 0) {
+    return;
+  }
+  completed_generation_ = active_generation_;
+  active_generation_ = 0;
+  condition_.notify_all();
+}
+
+void AsyncFlushBarrier::Cancel(Generation generation) noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (active_generation_ == generation) {
+    active_generation_ = 0;
+  }
+  if (generation > cancelled_generation_) {
+    cancelled_generation_ = generation;
+  }
+  condition_.notify_all();
+}
+
+void AsyncFlushBarrier::Wait(Generation generation) noexcept {
+  std::unique_lock<std::mutex> lock(mutex_);
+  condition_.wait(lock, [this, generation] {
+    return completed_generation_ >= generation ||
+           cancelled_generation_ >= generation;
+  });
+}
+
 hmw::Result<std::vector<uint8_t>> CopyBgraRows(const BgraBufferView& view,
                                                uint32_t width,
                                                uint32_t height) {
@@ -597,6 +633,8 @@ struct AsyncReadCompletion {
 
 class AsyncReadState final {
  public:
+  using FlushGeneration = internal::AsyncFlushBarrier::Generation;
+
   bool BeginRead() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopped_) {
@@ -644,11 +682,24 @@ class AsyncReadState final {
     completion_.reset();
   }
 
+  FlushGeneration ArmFlush() noexcept { return flush_barrier_.Arm(); }
+
+  void CompleteFlush() noexcept { flush_barrier_.Complete(); }
+
+  void CancelFlush(FlushGeneration generation) noexcept {
+    flush_barrier_.Cancel(generation);
+  }
+
+  void WaitForFlush(FlushGeneration generation) noexcept {
+    flush_barrier_.Wait(generation);
+  }
+
  private:
   std::mutex mutex_;
   std::condition_variable condition_;
   std::optional<AsyncReadCompletion> completion_;
   bool stopped_ = false;
+  internal::AsyncFlushBarrier flush_barrier_;
 };
 
 class SourceReaderCallback final : public IMFSourceReaderCallback {
@@ -695,7 +746,10 @@ class SourceReaderCallback final : public IMFSourceReaderCallback {
     return S_OK;
   }
 
-  HRESULT STDMETHODCALLTYPE OnFlush(DWORD) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE OnFlush(DWORD) override {
+    state_->CompleteFlush();
+    return S_OK;
+  }
 
  private:
   std::atomic<ULONG> references_{1};
@@ -830,7 +884,14 @@ class MediaFoundationCameraSource final : public CameraFrameSource {
     teardown_completed_ = true;
     read_state_->Stop();
     if (reader_) {
-      (void)reader_->Flush(kVideoStream);
+      const AsyncReadState::FlushGeneration generation =
+          read_state_->ArmFlush();
+      const HRESULT result = reader_->Flush(kVideoStream);
+      if (SUCCEEDED(result)) {
+        read_state_->WaitForFlush(generation);
+      } else {
+        read_state_->CancelFlush(generation);
+      }
     }
     read_state_->ReleaseCompletedSampleOnWorker();
     reader_.Reset();

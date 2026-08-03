@@ -41,6 +41,9 @@ add_test(NAME camera_preview_session
 add_test(NAME camera_mode_helpers
   COMMAND honey_camera_windows_tests camera_mode_)
 
+add_test(NAME camera_flush_barrier
+  COMMAND honey_camera_windows_tests camera_flush_)
+
 add_test(NAME camera_bgra_helpers
   COMMAND honey_camera_windows_tests camera_bgra_)
 
