@@ -389,6 +389,27 @@ HMW_TEST(convert_mov_produces_readable_cvid_avi) {
   }));
 }
 
+HMW_TEST(frame_plan_preserves_a_short_gif_tail_without_changing_mov) {
+  constexpr int64_t kDuration100ns = 1'400'000;
+  HMW_EXPECT(
+      hmw::internal::PlannedFrameCount(kDuration100ns, 10.0, 10, true) == 2);
+  HMW_EXPECT(
+      hmw::internal::PlannedFrameCount(kDuration100ns, 10.0, 10, false) == 1);
+  HMW_EXPECT(
+      hmw::internal::PresentationTimestamp(0, 10.0, kDuration100ns) == 0);
+  HMW_EXPECT(
+      hmw::internal::PresentationTimestamp(1, 10.0, kDuration100ns) == 1'000'000);
+  const double native_fps = 2.0 / 0.14;
+  HMW_EXPECT(hmw::internal::PlannedFrameCount(
+                 kDuration100ns, native_fps, 10, true) == 2);
+  constexpr int64_t kThreeFrameDuration100ns = 1'800'000;
+  const double three_frame_native_fps = 3.0 / 0.18;
+  HMW_EXPECT(hmw::internal::PlannedFrameCount(
+                 kThreeFrameDuration100ns, three_frame_native_fps, 10, true) == 3);
+  HMW_EXPECT(hmw::internal::PlannedFrameCount(
+                 kThreeFrameDuration100ns, three_frame_native_fps, 1, true) == 1);
+}
+
 HMW_TEST(convert_gif_uses_requested_background_and_timeline) {
   hmw::ConversionRequest request = SmallConversion(GifFixturePath());
   request.width = 4;
@@ -411,6 +432,31 @@ HMW_TEST(convert_gif_uses_requested_background_and_timeline) {
   if (pixels.size() == 16) {
     HMW_EXPECT(ChannelNear(pixels[6], 255, 0, 255, 70));
   }
+}
+
+HMW_TEST(convert_gif_keeps_a_partial_tail_on_the_sampling_timeline) {
+  hmw::ConversionRequest request = SmallConversion(GifFixturePath());
+  request.width = 4;
+  request.height = 4;
+  request.fps = 5;
+  request.max_frames = 10;
+
+  const hmw::Result<hmw::ConversionResult> converted =
+      hmw::ConvertMedia(request, IgnoreProgress, NeverCancel);
+  HMW_EXPECT(converted.ok());
+  if (!converted.ok()) {
+    return;
+  }
+  HMW_EXPECT(converted.value->frame_count == 2);
+  if (converted.value->frame_count != 2) {
+    return;
+  }
+  OpenedAvi avi = OpenAvi(*converted.value);
+  const std::vector<uint32_t> first = DecodeThrough(&avi, 0);
+  const std::vector<uint32_t> second = DecodeThrough(&avi, 1);
+  HMW_EXPECT(!first.empty());
+  HMW_EXPECT(!second.empty());
+  HMW_EXPECT(first != second);
 }
 
 HMW_TEST(convert_progress_is_monotonic_and_finishes_at_total) {

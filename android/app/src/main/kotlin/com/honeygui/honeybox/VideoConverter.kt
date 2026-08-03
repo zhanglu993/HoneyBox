@@ -31,7 +31,9 @@ import kotlin.math.floor
  *   4) Cinepak-encode (first frame key, rest inter) and mux to AVI.
  *
  * outFps = min(targetFps, nativeFps); estTotal = floor(duration · outFps),
- * capped at maxFrames. width/height must be multiples of 4 (Cinepak).
+ * capped at maxFrames. GIF conversion uses ceil instead so a valid final
+ * partial sampling interval is not discarded. width/height must be multiples
+ * of 4 (Cinepak).
  */
 class VideoConverter {
 
@@ -543,9 +545,9 @@ class VideoConverter {
         if (nativeFps <= 0) nativeFps = 10.0
 
         val outFps = minOf(targetFps.toDouble(), nativeFps)
-        var estTotal = if (durationSec > 0) floor(durationSec * outFps).toInt() else 1
-        if (estTotal > maxFrames) estTotal = maxFrames
-        val plannedTotal = maxOf(1, estTotal)
+        val plannedTotal = MediaFramePlanner.plannedFrameCount(
+            durationMs.toLong(), outFps, maxFrames, preservePartialInterval = true,
+        )
 
         val opaqueBg = bgColor or 0xFF000000.toInt()
         val srcBmp = Bitmap.createBitmap(gw, gh, Bitmap.Config.ARGB_8888)
@@ -566,15 +568,16 @@ class VideoConverter {
                 var j = 0
                 while (j < plannedTotal && encodedCount < maxFrames) {
                     if (cancel.get()) throw Cancelled()
-                    var tMs = if (durationMs > 0) Math.round(j / outFps * 1000.0).toInt() else 0
-                    if (durationMs > 0 && tMs >= durationMs) tMs = durationMs - 1
+                    val tMs = MediaFramePlanner.presentationTimestampMs(
+                        j, outFps, durationMs.toLong(),
+                    ).toInt()
                     srcCanvas.drawColor(opaqueBg, PorterDuff.Mode.SRC)
                     movie.setTime(tMs)
                     movie.draw(srcCanvas, 0f, 0f)
                     resizeFrame(srcBmp, dst, canvas, dstW, dstH, cropMode, crop, bgColor, pixels, rgba)
                     session.encodeAndAdd(rgba)
                     encodedCount++
-                    progress?.onProgress(encodedCount, maxOf(estTotal, encodedCount))
+                    progress?.onProgress(encodedCount, maxOf(plannedTotal, encodedCount))
                     j++
                 }
 

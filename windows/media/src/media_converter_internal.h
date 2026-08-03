@@ -10,6 +10,13 @@
 
 namespace hmw::internal {
 
+uint32_t PlannedFrameCount(int64_t duration_100ns, double fps,
+                           uint32_t maximum,
+                           bool preserve_partial_interval);
+
+int64_t PresentationTimestamp(uint32_t index, double fps,
+                              int64_t duration_100ns);
+
 class ForwardFrameSampler {
  public:
   explicit ForwardFrameSampler(FrameSource* source);

@@ -96,8 +96,12 @@ if(BUILD_TESTING)
   target_link_libraries(honey_media_windows_tests PRIVATE honey_media_core advapi32 bcrypt)
   add_test(NAME media_converter_convert_mov
     COMMAND honey_media_windows_tests convert_mov_produces_readable_cvid_avi)
+  add_test(NAME media_converter_frame_plan
+    COMMAND honey_media_windows_tests frame_plan_preserves_a_short_gif_tail_without_changing_mov)
   add_test(NAME media_converter_convert_gif
     COMMAND honey_media_windows_tests convert_gif_uses_requested_background_and_timeline)
+  add_test(NAME media_converter_convert_short_gif
+    COMMAND honey_media_windows_tests convert_gif_keeps_a_partial_tail_on_the_sampling_timeline)
   add_test(NAME media_converter_progress
     COMMAND honey_media_windows_tests convert_progress_is_monotonic_and_finishes_at_total)
   add_test(NAME media_converter_cancel

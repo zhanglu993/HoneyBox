@@ -105,33 +105,6 @@ bool ValidFps(uint32_t fps) {
 
 bool ValidQuality(uint32_t quality) { return quality <= 100U; }
 
-uint32_t PlannedFrameCount(int64_t duration_100ns, double fps,
-                           uint32_t maximum) {
-  if (duration_100ns <= 0) {
-    return 1;
-  }
-  const long double count =
-      static_cast<long double>(duration_100ns) *
-      static_cast<long double>(fps) / 10000000.0L;
-  if (count >= static_cast<long double>(maximum)) {
-    return maximum;
-  }
-  const uint32_t whole = static_cast<uint32_t>(std::floor(count));
-  return std::max(1U, whole);
-}
-
-int64_t PresentationTimestamp(uint32_t index, double fps,
-                              int64_t duration_100ns) {
-  const long double timestamp =
-      static_cast<long double>(index) * 10000000.0L /
-      static_cast<long double>(fps);
-  int64_t rounded = static_cast<int64_t>(std::floor(timestamp + 0.5L));
-  if (duration_100ns > 0 && rounded >= duration_100ns) {
-    rounded = duration_100ns - 1;
-  }
-  return std::max<int64_t>(0, rounded);
-}
-
 void CompositeOverOpaqueBackground(RgbaFrame* frame, uint32_t background_argb) {
   const uint32_t opaque = background_argb | UINT32_C(0xff000000);
   const uint32_t background_red = (opaque >> 16U) & 0xffU;
@@ -314,6 +287,40 @@ Result<MediaJobResult> Promote(Result<T> concrete) {
 
 namespace internal {
 
+uint32_t PlannedFrameCount(int64_t duration_100ns, double fps,
+                           uint32_t maximum,
+                           bool preserve_partial_interval) {
+  if (duration_100ns <= 0) {
+    return 1;
+  }
+  const long double count =
+      static_cast<long double>(duration_100ns) *
+      static_cast<long double>(fps) / 10000000.0L;
+  const long double nearest_integer = std::round(count);
+  const long double tolerance =
+      1.0e-9L * std::max(1.0L, std::abs(count));
+  const long double normalized =
+      std::abs(count - nearest_integer) <= tolerance ? nearest_integer : count;
+  if (normalized >= static_cast<long double>(maximum)) {
+    return maximum;
+  }
+  const long double planned =
+      preserve_partial_interval ? std::ceil(normalized) : std::floor(normalized);
+  return std::max(1U, static_cast<uint32_t>(planned));
+}
+
+int64_t PresentationTimestamp(uint32_t index, double fps,
+                              int64_t duration_100ns) {
+  const long double timestamp =
+      static_cast<long double>(index) * 10000000.0L /
+      static_cast<long double>(fps);
+  int64_t rounded = static_cast<int64_t>(std::floor(timestamp + 0.5L));
+  if (duration_100ns > 0 && rounded >= duration_100ns) {
+    rounded = duration_100ns - 1;
+  }
+  return std::max<int64_t>(0, rounded);
+}
+
 ForwardFrameSampler::ForwardFrameSampler(FrameSource* source) : source_(source) {}
 
 Result<std::reference_wrapper<const RgbaFrame>> ForwardFrameSampler::Sample(
@@ -437,7 +444,8 @@ Result<ConversionResult> ConvertMedia(const ConversionRequest& request,
   const uint32_t mux_fps = std::max(
       1U, static_cast<uint32_t>(std::floor(fps + 0.5)));
   const uint32_t frame_count =
-      PlannedFrameCount(info.duration_100ns, fps, request.max_frames);
+      internal::PlannedFrameCount(info.duration_100ns, fps, request.max_frames,
+                                  info.is_gif);
   internal::ForwardFrameSampler sampler(source);
   RgbaFrame generated{};
   const auto produce =
@@ -449,7 +457,7 @@ Result<ConversionResult> ConvertMedia(const ConversionRequest& request,
           Status::kCancelled, "media conversion cancelled");
     }
     const int64_t pts =
-        PresentationTimestamp(index, fps, info.duration_100ns);
+        internal::PresentationTimestamp(index, fps, info.duration_100ns);
     Result<std::reference_wrapper<const RgbaFrame>> sampled =
         sampler.Sample(pts, cancelled);
     if (!sampled.ok()) {
@@ -550,8 +558,8 @@ Result<PreviewResult> MakePreview(const PreviewRequest& request,
     preview_fps = 10.0;
   }
   preview_fps = std::min(12.0, preview_fps);
-  const uint32_t count = PlannedFrameCount(
-      info.duration_100ns, preview_fps, request.max_count);
+  const uint32_t count = internal::PlannedFrameCount(
+      info.duration_100ns, preview_fps, request.max_count, info.is_gif);
   internal::ForwardFrameSampler sampler(source);
   try {
     if (IsCancellationRequested(cancelled)) {
