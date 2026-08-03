@@ -137,6 +137,7 @@ class CameraEncoder(
     @Volatile private var streaming = false   // emit frames to Dart
     @Volatile private var recordToFile = false // mux frames into a local file
     private val softwareSessionGate = CameraSoftwareSessionGate()
+    private val cameraSessionGeneration = CameraSessionGeneration()
 
     private data class SoftwareCodecSession(
         val token: CameraSoftwareSessionGate.Token,
@@ -202,6 +203,7 @@ class CameraEncoder(
 
     fun openCamera(facingFront: Boolean, cfg: EncoderConfig) {
         closeCamera()
+        val token = cameraSessionGeneration.beginSession()
         config = cfg
         this.facingFront = facingFront
         startCameraThread()
@@ -213,7 +215,7 @@ class CameraEncoder(
                 CameraCharacteristics.LENS_FACING_BACK
             }
             val id = pickCameraId(lensFacing) ?: run {
-                emitError("未找到摄像头")
+                emitCameraError("未找到摄像头", token)
                 return
             }
             val chars = cameraManager.getCameraCharacteristics(id)
@@ -225,15 +227,16 @@ class CameraEncoder(
             captureSize = chooseSize(supportedSizes, 1280, 720)
 
             // Focus / exposure capabilities.
-            sensorActiveArray =
-                chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            sensorActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
             maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
-            aeCompRange =
-                chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+            aeCompRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
             val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
-            aeCompStep =
-                if (step != null) step.numerator.toDouble() / step.denominator else 0.0
+            aeCompStep = if (step != null) {
+                step.numerator.toDouble() / step.denominator
+            } else {
+                0.0
+            }
             evSteps = 0
             afRegion = null
 
@@ -248,69 +251,91 @@ class CameraEncoder(
 
             // Spin up the GL stage; it creates the camera input surface.
             val gl = GlRenderer(
-                onError = { msg -> emitError(msg) },
-                onInfo = { msg -> emitInfo(msg) },
+                onError = { msg -> emitCameraError(msg, token) },
+                onInfo = { msg -> emitCameraInfo(msg, token) },
             )
             renderer = gl
             gl.setParams(
                 sensorOrientation, facingFront, cfg.width, cfg.height, cfg.cropZoom,
             )
             gl.start(captureSize.width, captureSize.height) { camSurface ->
+                if (!cameraSessionGeneration.isCurrent(token)) return@start
                 gl.setPreviewSurface(previewSurface, previewSize.width, previewSize.height)
-                openDevice(id, camSurface)
+                openDevice(id, camSurface, token)
             }
         } catch (e: Exception) {
-            emitError("打开摄像头失败: ${e.message}")
+            emitCameraError("打开摄像头失败: ${e.message}", token)
         }
     }
 
-    private fun openDevice(id: String, cameraSurface: Surface) {
+    private fun openDevice(
+        id: String,
+        cameraSurface: Surface,
+        token: CameraSessionGeneration.Token,
+    ) {
         try {
             cameraManager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
-                    cameraDevice = device
-                    buildSession(cameraSurface)
+                    val accepted = cameraSessionGeneration.commitIfCurrent(token) {
+                        cameraDevice = device
+                    }
+                    if (!accepted) {
+                        device.close()
+                        return
+                    }
+                    buildSession(cameraSurface, device, token)
                 }
 
                 override fun onDisconnected(device: CameraDevice) {
                     device.close()
-                    cameraDevice = null
+                    cameraSessionGeneration.commitIfCurrent(token) {
+                        if (cameraDevice === device) cameraDevice = null
+                    }
                 }
 
                 override fun onError(device: CameraDevice, error: Int) {
                     device.close()
-                    cameraDevice = null
-                    emitError("摄像头错误: $error")
+                    cameraSessionGeneration.commitIfCurrent(token) {
+                        if (cameraDevice === device) cameraDevice = null
+                    }
+                    emitCameraError("摄像头错误: $error", token)
                 }
             }, cameraHandler)
         } catch (e: SecurityException) {
-            emitError("缺少相机权限")
+            emitCameraError("缺少相机权限", token)
         } catch (e: Exception) {
-            emitError("打开摄像头失败: ${e.message}")
+            emitCameraError("打开摄像头失败: ${e.message}", token)
         }
     }
 
-    private fun buildSession(cameraSurface: Surface) {
-        val device = cameraDevice ?: return
+    private fun buildSession(
+        cameraSurface: Surface,
+        device: CameraDevice,
+        token: CameraSessionGeneration.Token,
+    ) {
         try {
             @Suppress("DEPRECATION")
             device.createCaptureSession(
                 listOf(cameraSurface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
-                        captureSession = session
-                        issueRepeating()
-                        emitCameraReady()
+                        val accepted = cameraSessionGeneration.commitIfCurrent(token) {
+                            captureSession = session
+                            issueRepeating(token)
+                            emitCameraReady(token)
+                        }
+                        if (!accepted) session.close()
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
-                        emitError("会话配置失败")
+                        session.close()
+                        emitCameraError("会话配置失败", token)
                     }
                 },
                 cameraHandler,
             )
         } catch (e: Exception) {
-            emitError("创建会话失败: ${e.message}")
+            emitCameraError("创建会话失败: ${e.message}", token)
         }
     }
 
@@ -343,7 +368,10 @@ class CameraEncoder(
         }
     }
 
-    private fun issueRepeating() {
+    private fun issueRepeating(
+        token: CameraSessionGeneration.Token? = cameraSessionGeneration.currentToken(),
+    ) {
+        if (token == null || !cameraSessionGeneration.isCurrent(token)) return
         val device = cameraDevice ?: return
         val session = captureSession ?: return
         val surface = renderer?.cameraSurface() ?: return
@@ -353,7 +381,7 @@ class CameraEncoder(
             applyRequest(builder)
             session.setRepeatingRequest(builder.build(), null, cameraHandler)
         } catch (e: Exception) {
-            emitError("启动取景失败: ${e.message}")
+            emitCameraError("启动取景失败: ${e.message}", token)
         }
     }
 
@@ -537,7 +565,7 @@ class CameraEncoder(
                 previewSurface = s
                 renderer?.setPreviewSurface(s, newPreview.width, newPreview.height)
             }
-            emitCameraReady()
+            cameraSessionGeneration.currentToken()?.let(::emitCameraReady)
         }
 
         // Re-issue the repeating request so an updated FPS takes effect.
@@ -548,6 +576,7 @@ class CameraEncoder(
     }
 
     fun closeCamera() {
+        cameraSessionGeneration.invalidate()
         stopEncodingInternal()
         try {
             captureSession?.close()
@@ -1512,7 +1541,8 @@ class CameraEncoder(
         } ?: android.util.Range(target, target)
     }
 
-    private fun emitCameraReady() {
+    private fun emitCameraReady(token: CameraSessionGeneration.Token) {
+        if (!cameraSessionGeneration.isCurrent(token)) return
         val id = textureEntry?.id() ?: -1L
         val pw = previewSize.width
         val ph = previewSize.height
@@ -1521,6 +1551,7 @@ class CameraEncoder(
         val evMax = if (range != null) range.upper * aeCompStep else 0.0
         val focusSupported = maxAfRegions > 0 || maxAeRegions > 0
         mainHandler.post {
+            if (!cameraSessionGeneration.isCurrent(token)) return@post
             events.onEvent(
                 mapOf(
                     "event" to "camera",
@@ -1536,6 +1567,26 @@ class CameraEncoder(
                     "focusSupported" to focusSupported,
                 ),
             )
+        }
+    }
+
+    private fun emitCameraError(
+        message: String,
+        token: CameraSessionGeneration.Token,
+    ) {
+        mainHandler.post {
+            if (!cameraSessionGeneration.isCurrent(token)) return@post
+            events.onEvent(mapOf("event" to "error", "message" to message))
+        }
+    }
+
+    private fun emitCameraInfo(
+        message: String,
+        token: CameraSessionGeneration.Token,
+    ) {
+        mainHandler.post {
+            if (!cameraSessionGeneration.isCurrent(token)) return@post
+            events.onEvent(mapOf("event" to "info", "message" to message))
         }
     }
 

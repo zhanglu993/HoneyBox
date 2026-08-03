@@ -249,17 +249,27 @@ class EncoderResult {
 ///
 /// Commands go out over a [MethodChannel]; camera-ready notices, live stats,
 /// completion, and errors arrive over an [EventChannel].
+typedef EncoderEventStreamFactory = Stream<dynamic> Function();
+
 class EncoderService {
   EncoderService({
     MethodChannel method = const MethodChannel('ebadge/encoder'),
     EventChannel events = const EventChannel('ebadge/encoder/events'),
+    EncoderEventStreamFactory? eventStreamFactory,
+    Duration eventCancellationTimeout = const Duration(milliseconds: 250),
   })  : _method = method,
-        _events = events;
+        _events = events,
+        _eventStreamFactory = eventStreamFactory,
+        _eventCancellationTimeout = eventCancellationTimeout;
 
   final MethodChannel _method;
   final EventChannel _events;
+  final EncoderEventStreamFactory? _eventStreamFactory;
+  final Duration _eventCancellationTimeout;
   StreamSubscription<dynamic>? _eventSub;
   int _listenerGeneration = 0;
+  int _operationGeneration = 0;
+  bool _disposed = false;
 
   // Callbacks — assigned by the page that owns the bench.
   void Function(CameraInfo info)? onCamera;
@@ -279,9 +289,11 @@ class EncoderService {
 
   /// Begin listening for native events. Call once before [openCamera].
   void listen() {
-    if (_eventSub != null) return;
+    if (_disposed || _eventSub != null) return;
     final generation = ++_listenerGeneration;
-    _eventSub = _events.receiveBroadcastStream().listen(
+    final stream =
+        _eventStreamFactory?.call() ?? _events.receiveBroadcastStream();
+    _eventSub = stream.listen(
       (event) {
         if (generation == _listenerGeneration) _handleEvent(event);
       },
@@ -297,22 +309,26 @@ class EncoderService {
   /// A cancelled subscription may already have queued an event, so each stream
   /// listener carries a generation and stale callbacks are ignored.
   Future<void> restartCameraSession() async {
+    if (_disposed) return;
+    final operation = ++_operationGeneration;
     final oldSubscription = _eventSub;
     _eventSub = null;
     _listenerGeneration++;
     try {
       await oldSubscription?.cancel().timeout(
-            const Duration(milliseconds: 250),
+            _eventCancellationTimeout,
             onTimeout: () {},
           );
     } catch (_) {
       // The generation gate already suppresses a stalled old event listener.
     }
+    if (_disposed || operation != _operationGeneration) return;
     try {
       await closeCamera();
     } catch (_) {
       // A failed close must not prevent a retry from replacing the session.
     }
+    if (_disposed || operation != _operationGeneration) return;
     listen();
   }
 
@@ -443,10 +459,17 @@ class EncoderService {
 
   /// Release the native camera and stop listening for events.
   Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    _operationGeneration++;
     final subscription = _eventSub;
     _eventSub = null;
     _listenerGeneration++;
-    await subscription?.cancel();
+    try {
+      await subscription?.cancel();
+    } catch (_) {
+      // Native close still has to run when event-stream cancellation fails.
+    }
     try {
       await closeCamera();
     } catch (_) {}

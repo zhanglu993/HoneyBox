@@ -50,6 +50,15 @@ class StreamPage extends ConsumerStatefulWidget {
   ConsumerState<StreamPage> createState() => _StreamPageState();
 }
 
+enum _CameraAttemptState { pending, ready, failed }
+
+class _CameraAttempt {
+  _CameraAttempt(this.id);
+
+  final int id;
+  _CameraAttemptState state = _CameraAttemptState.pending;
+}
+
 class _StreamPageState extends ConsumerState<StreamPage>
     with WidgetsBindingObserver {
   late final EncoderService _encoder;
@@ -64,7 +73,8 @@ class _StreamPageState extends ConsumerState<StreamPage>
   String? _error;
   bool _facingFront = false;
   bool _cameraStarting = true;
-  int _cameraGeneration = 0;
+  int _nextCameraAttemptId = 0;
+  _CameraAttempt? _cameraAttempt;
   Timer? _cameraReadyTimer;
 
   /// Latest captured JPEG bytes (single-slot demo cache). Populated by
@@ -171,24 +181,6 @@ class _StreamPageState extends ConsumerState<StreamPage>
     WidgetsBinding.instance.addObserver(this);
 
     _encoder
-      ..onCamera = (info) {
-        if (!mounted || _cameraGeneration == 0) return;
-        _cameraReadyTimer?.cancel();
-        setState(() {
-          _camera = info;
-          _cameraStarting = false;
-          _facingFront = info.facingFront;
-          _error = null;
-          _ev = _ev.clamp(info.evMin, info.evMax);
-        });
-        _remoteSession?.reportSnapshot(
-          recording: false,
-          facing: _facingFront ? 1 : 0,
-          zoom: _zoom,
-          hasLastShot: _lastShot != null,
-          lastShotId: 0,
-        );
-      }
       ..onStats = (stats) {
         if (!mounted) return;
         setState(() {
@@ -222,23 +214,6 @@ class _StreamPageState extends ConsumerState<StreamPage>
           _result = result;
         });
       }
-      ..onError = (message) {
-        if (_camera == null) {
-          _failCameraStartup(_cameraGeneration, message);
-          return;
-        }
-        _teardownSession();
-        _stopInfoTimer();
-        if (!mounted) return;
-        setState(() {
-          _error = message;
-          _encoding = false;
-          _streaming = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(message)),
-        );
-      }
       ..onInfo = (message) {
         if (!mounted || message.isEmpty) return;
         // Stash diagnostics silently; only rendered when the toggle is on.
@@ -269,19 +244,81 @@ class _StreamPageState extends ConsumerState<StreamPage>
     );
   }
 
-  bool _isCurrentCameraAttempt(int generation) =>
-      mounted && generation == _cameraGeneration;
+  bool _isCurrentCameraAttempt(_CameraAttempt attempt) =>
+      mounted && _cameraAttempt?.id == attempt.id;
+
+  _CameraAttempt _beginCameraAttempt() {
+    final attempt = _CameraAttempt(++_nextCameraAttemptId);
+    _cameraAttempt = attempt;
+    _encoder
+      ..onCamera = (info) {
+        _handleCameraReady(attempt, info);
+      }
+      ..onError = (message) {
+        _handleCameraError(attempt, message);
+      };
+    return attempt;
+  }
+
+  void _handleCameraReady(_CameraAttempt attempt, CameraInfo info) {
+    if (!_isCurrentCameraAttempt(attempt) ||
+        attempt.state == _CameraAttemptState.failed) {
+      return;
+    }
+    attempt.state = _CameraAttemptState.ready;
+    _cameraReadyTimer?.cancel();
+    setState(() {
+      _camera = info;
+      _cameraStarting = false;
+      _facingFront = info.facingFront;
+      _error = null;
+      _ev = _ev.clamp(info.evMin, info.evMax);
+    });
+    _remoteSession?.reportSnapshot(
+      recording: false,
+      facing: _facingFront ? 1 : 0,
+      zoom: _zoom,
+      hasLastShot: _lastShot != null,
+      lastShotId: 0,
+    );
+  }
+
+  void _handleCameraError(_CameraAttempt attempt, String message) {
+    if (!_isCurrentCameraAttempt(attempt) ||
+        attempt.state == _CameraAttemptState.failed) {
+      return;
+    }
+    if (attempt.state == _CameraAttemptState.pending || _camera == null) {
+      _failCameraStartup(attempt, message);
+      return;
+    }
+    _teardownSession();
+    _stopInfoTimer();
+    setState(() {
+      _error = message;
+      _encoding = false;
+      _streaming = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
 
   String _startupError(String? message) {
     final normalized = (message ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
     if (normalized.isEmpty) return '摄像头启动失败，请检查设备后重试。';
+    if (normalized.startsWith('摄像头启动超时')) return normalized;
     final bounded =
         normalized.length > 80 ? '${normalized.substring(0, 80)}…' : normalized;
     return bounded.startsWith('摄像头启动失败') ? bounded : '摄像头启动失败：$bounded';
   }
 
-  void _failCameraStartup(int generation, String message) {
-    if (!_isCurrentCameraAttempt(generation)) return;
+  void _failCameraStartup(_CameraAttempt attempt, String message) {
+    if (!_isCurrentCameraAttempt(attempt) ||
+        attempt.state != _CameraAttemptState.pending) {
+      return;
+    }
+    attempt.state = _CameraAttemptState.failed;
     _cameraReadyTimer?.cancel();
     setState(() {
       _camera = null;
@@ -290,20 +327,20 @@ class _StreamPageState extends ConsumerState<StreamPage>
     });
   }
 
-  void _startCameraReadyTimeout(int generation) {
+  void _startCameraReadyTimeout(_CameraAttempt attempt) {
     _cameraReadyTimer?.cancel();
     _cameraReadyTimer = Timer(widget.cameraReadyTimeout, () {
-      if (!_isCurrentCameraAttempt(generation) || _camera != null) return;
+      if (!_isCurrentCameraAttempt(attempt) ||
+          attempt.state != _CameraAttemptState.pending) {
+        return;
+      }
       _cameraReadyTimer = null;
-      setState(() {
-        _cameraStarting = false;
-        _error = '摄像头启动超时，请检查设备后重试。';
-      });
+      _failCameraStartup(attempt, '摄像头启动超时，请检查设备后重试。');
     });
   }
 
   Future<void> _bootstrapCamera({bool retry = false}) async {
-    final generation = ++_cameraGeneration;
+    final attempt = _beginCameraAttempt();
     _cameraReadyTimer?.cancel();
     if (!mounted) return;
     setState(() {
@@ -314,7 +351,7 @@ class _StreamPageState extends ConsumerState<StreamPage>
 
     if (retry) {
       await _encoder.restartCameraSession();
-      if (!_isCurrentCameraAttempt(generation)) return;
+      if (!_isCurrentCameraAttempt(attempt)) return;
     }
 
     try {
@@ -322,7 +359,7 @@ class _StreamPageState extends ConsumerState<StreamPage>
       // on entry — digital zoom is a per-session choice, not a preference.
       final saved =
           await (widget.loadEncoderConfig ?? EncoderConfigStore.load)();
-      if (!_isCurrentCameraAttempt(generation)) return;
+      if (!_isCurrentCameraAttempt(attempt)) return;
       setState(() {
         _config = saved.copyWith(cropZoom: _kMinZoom);
         _zoom = _kMinZoom;
@@ -331,8 +368,9 @@ class _StreamPageState extends ConsumerState<StreamPage>
       final requestPermission =
           widget.requestCameraPermission ?? Permission.camera.request;
       final status = await requestPermission();
-      if (!_isCurrentCameraAttempt(generation)) return;
+      if (!_isCurrentCameraAttempt(attempt)) return;
       if (!status.isGranted) {
+        attempt.state = _CameraAttemptState.failed;
         setState(() {
           _permissionDenied = true;
           _cameraStarting = false;
@@ -340,21 +378,21 @@ class _StreamPageState extends ConsumerState<StreamPage>
         return;
       }
       setState(() => _permissionDenied = false);
-      _startCameraReadyTimeout(generation);
+      _startCameraReadyTimeout(attempt);
       await _encoder.openCamera(_config, facingFront: _facingFront);
     } on MissingPluginException {
-      _failCameraStartup(generation, '当前平台未提供摄像头功能，请确认应用已正确安装。');
+      _failCameraStartup(attempt, '当前平台未提供摄像头功能，请确认应用已正确安装。');
     } on PlatformException catch (error) {
       if (error.code == 'MissingPluginException') {
         _failCameraStartup(
-          generation,
+          attempt,
           '当前平台未提供摄像头功能，请确认应用已正确安装。',
         );
       } else {
-        _failCameraStartup(generation, error.message ?? '摄像头不可用');
+        _failCameraStartup(attempt, error.message ?? '摄像头不可用');
       }
     } catch (_) {
-      _failCameraStartup(generation, '摄像头启动失败，请检查设备后重试。');
+      _failCameraStartup(attempt, '摄像头启动失败，请检查设备后重试。');
     }
   }
 
@@ -370,7 +408,8 @@ class _StreamPageState extends ConsumerState<StreamPage>
         unawaited(_bootstrapCamera(retry: true));
       }
     } else {
-      _cameraGeneration++;
+      _cameraAttempt?.state = _CameraAttemptState.failed;
+      _cameraAttempt = null;
       _cameraReadyTimer?.cancel();
       // Releasing in the background also stops any in-flight encode natively.
       if (_encoding) _encoder.stopEncoding();
@@ -393,7 +432,8 @@ class _StreamPageState extends ConsumerState<StreamPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _cameraGeneration++;
+    _cameraAttempt?.state = _CameraAttemptState.failed;
+    _cameraAttempt = null;
     _cameraReadyTimer?.cancel();
     _focusTimer?.cancel();
     _zoomTimer?.cancel();

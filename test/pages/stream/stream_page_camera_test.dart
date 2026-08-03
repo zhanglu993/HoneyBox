@@ -194,7 +194,6 @@ void main() {
     await pumpStartup(tester);
     await tester.pump(const Duration(milliseconds: 20));
     await tester.tap(find.text('重试'));
-    await tester.pump(const Duration(milliseconds: 300));
     await pumpStartup(tester);
     events.add(<String, dynamic>{
       'event': 'camera',
@@ -231,4 +230,95 @@ void main() {
 
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('error seals its attempt against a late ready event',
+      (tester) async {
+    final fake = _AttemptEncoderService();
+    encoder = fake;
+
+    await mount(tester);
+    await pumpStartup(tester);
+    fake.errorCallbacks.single?.call('初始化失败');
+    await tester.pump();
+    fake.cameraCallbacks.single?.call(_cameraInfo(41));
+    await tester.pump();
+
+    expect(find.text('摄像头启动失败：初始化失败'), findsWidgets);
+    expect(find.byType(Texture), findsNothing);
+  });
+
+  testWidgets('timeout seals its attempt against a late ready event',
+      (tester) async {
+    final fake = _AttemptEncoderService();
+    encoder = fake;
+
+    await mount(tester, timeout: const Duration(milliseconds: 10));
+    await pumpStartup(tester);
+    await tester.pump(const Duration(milliseconds: 20));
+    fake.cameraCallbacks.single?.call(_cameraInfo(41));
+    await tester.pump();
+
+    expect(find.text('摄像头启动超时，请检查设备后重试。'), findsWidgets);
+    expect(find.byType(Texture), findsNothing);
+  });
+
+  testWidgets('retry rejects ready and error callbacks from the old attempt',
+      (tester) async {
+    final fake = _AttemptEncoderService();
+    encoder = fake;
+
+    await mount(tester);
+    await pumpStartup(tester);
+    fake.errorCallbacks.first?.call('第一次失败');
+    await tester.pump();
+    await tester.tap(find.text('重试'));
+    await pumpStartup(tester);
+    expect(fake.openCount, 2);
+
+    fake.cameraCallbacks[1]?.call(_cameraInfo(42));
+    await tester.pump();
+    fake.cameraCallbacks.first?.call(_cameraInfo(41));
+    fake.errorCallbacks.first?.call('旧错误');
+    await tester.pump();
+
+    final texture = tester.widget<Texture>(find.byType(Texture));
+    expect(texture.textureId, 42);
+    expect(find.textContaining('旧错误'), findsNothing);
+  });
+}
+
+CameraInfo _cameraInfo(int textureId) => CameraInfo(
+      textureId: textureId,
+      previewWidth: 368,
+      previewHeight: 368,
+      sensorOrientation: 0,
+      facingFront: false,
+    );
+
+class _AttemptEncoderService extends EncoderService {
+  int openCount = 0;
+  final List<void Function(CameraInfo info)?> cameraCallbacks = [];
+  final List<void Function(String message)?> errorCallbacks = [];
+
+  @override
+  void listen() {}
+
+  @override
+  Future<void> restartCameraSession() async {}
+
+  @override
+  Future<void> openCamera(
+    EncoderConfig config, {
+    bool facingFront = false,
+  }) async {
+    openCount++;
+    cameraCallbacks.add(onCamera);
+    errorCallbacks.add(onError);
+  }
+
+  @override
+  Future<void> closeCamera() async {}
+
+  @override
+  Future<void> dispose() async {}
 }
