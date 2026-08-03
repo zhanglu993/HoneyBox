@@ -1,5 +1,6 @@
 #include "honey_camera_windows/camera_preview.h"
 
+#include <algorithm>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -25,26 +26,61 @@ struct CameraPreviewSession::State {
 };
 
 struct CameraPreviewSession::CallbackQueue {
-  bool Post(std::function<void()> task) {
+  struct Task {
+    uint64_t generation;
+    std::function<void()> callback;
+  };
+
+  bool PostFrame(uint64_t generation, std::function<void()> callback) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (stopping) {
+    if (stopping || generation < generation_floor) {
       return false;
     }
-    tasks.push_back(std::move(task));
+    latest_frame = Task{generation, std::move(callback)};
     condition.notify_one();
     return true;
+  }
+
+  bool PostError(uint64_t generation, std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (stopping || generation < generation_floor) {
+      return false;
+    }
+    errors.push_back(Task{generation, std::move(callback)});
+    condition.notify_one();
+    return true;
+  }
+
+  void AdvanceGeneration(uint64_t generation) noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (generation <= generation_floor) {
+      return;
+    }
+    generation_floor = generation;
+    if (latest_frame && latest_frame->generation < generation_floor) {
+      latest_frame.reset();
+    }
+    errors.erase(
+        std::remove_if(errors.begin(), errors.end(), [&](const Task& task) {
+          return task.generation < generation_floor;
+        }),
+        errors.end());
+    condition.notify_all();
   }
 
   void Stop() noexcept {
     std::lock_guard<std::mutex> lock(mutex);
     stopping = true;
-    tasks.clear();
+    latest_frame.reset();
+    errors.clear();
     condition.notify_all();
   }
 
   std::mutex mutex;
   std::condition_variable condition;
-  std::deque<std::function<void()>> tasks;
+  std::optional<Task> latest_frame;
+  std::deque<Task> errors;
+  uint64_t generation_floor = 0;
   bool stopping = false;
 };
 
@@ -82,6 +118,7 @@ hmw::Outcome CameraPreviewSession::Open(CameraPreviewConfig config) {
     std::lock_guard<std::mutex> state_lock(state_->mutex);
     worker_generation = ++state_->generation;
   }
+  callback_queue_->AdvanceGeneration(worker_generation);
   try {
     worker_ = std::thread(&CameraPreviewSession::RunWorker, state_,
                           callback_queue_, worker_generation, config);
@@ -114,14 +151,16 @@ uint64_t CameraPreviewSession::generation() const {
 hmw::Outcome CameraPreviewSession::CloseLocked() {
   std::shared_ptr<CameraFrameSource> source;
   std::thread worker;
+  uint64_t invalid_generation = 0;
   {
     std::lock_guard<std::mutex> state_lock(state_->mutex);
-    ++state_->generation;
+    invalid_generation = ++state_->generation;
     source = state_->source;
     state_->source.reset();
     worker = std::move(worker_);
   }
 
+  callback_queue_->AdvanceGeneration(invalid_generation);
   if (source) {
     source->RequestStop();
   }
@@ -209,13 +248,20 @@ void CameraPreviewSession::RunCallbackWorker(
       std::unique_lock<std::mutex> lock(callback_queue->mutex);
       callback_queue->condition.wait(
           lock, [&] {
-            return callback_queue->stopping || !callback_queue->tasks.empty();
+            return callback_queue->stopping ||
+                   !callback_queue->errors.empty() ||
+                   callback_queue->latest_frame.has_value();
           });
       if (callback_queue->stopping) {
         return;
       }
-      task = std::move(callback_queue->tasks.front());
-      callback_queue->tasks.pop_front();
+      if (!callback_queue->errors.empty()) {
+        task = std::move(callback_queue->errors.front().callback);
+        callback_queue->errors.pop_front();
+      } else {
+        task = std::move(callback_queue->latest_frame->callback);
+        callback_queue->latest_frame.reset();
+      }
     }
     try {
       task();
@@ -231,7 +277,7 @@ void CameraPreviewSession::DispatchFrame(
   try {
     const std::shared_ptr<State> task_state = state;
     const std::shared_ptr<CallbackQueue> task_queue = callback_queue;
-    callback_queue->Post(
+    callback_queue->PostFrame(worker_generation,
         [task_state, task_queue, worker_generation,
          frame = std::move(frame)]() mutable {
           std::function<void(uint64_t, CameraFrame)> callback;
@@ -265,7 +311,7 @@ void CameraPreviewSession::DispatchError(
     uint64_t worker_generation, hmw::Error error) noexcept {
   try {
     const std::shared_ptr<State> task_state = state;
-    callback_queue->Post(
+    callback_queue->PostError(worker_generation,
         [task_state, worker_generation, error = std::move(error)]() mutable {
           std::function<void(uint64_t, hmw::Error)> callback;
           {

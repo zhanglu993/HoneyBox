@@ -3,6 +3,7 @@ add_executable(honey_camera_windows_tests
   camera_status_test.cpp
   camera_preview_session_test.cpp
   camera_preview_session_reentrancy_test.cpp
+  camera_preview_queue_test.cpp
 )
 
 target_include_directories(honey_camera_windows_tests PRIVATE
