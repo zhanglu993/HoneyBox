@@ -250,10 +250,16 @@ class EncoderResult {
 /// Commands go out over a [MethodChannel]; camera-ready notices, live stats,
 /// completion, and errors arrive over an [EventChannel].
 class EncoderService {
-  static const _method = MethodChannel('ebadge/encoder');
-  static const _events = EventChannel('ebadge/encoder/events');
+  EncoderService({
+    MethodChannel method = const MethodChannel('ebadge/encoder'),
+    EventChannel events = const EventChannel('ebadge/encoder/events'),
+  })  : _method = method,
+        _events = events;
 
+  final MethodChannel _method;
+  final EventChannel _events;
   StreamSubscription<dynamic>? _eventSub;
+  int _listenerGeneration = 0;
 
   // Callbacks — assigned by the page that owns the bench.
   void Function(CameraInfo info)? onCamera;
@@ -273,10 +279,41 @@ class EncoderService {
 
   /// Begin listening for native events. Call once before [openCamera].
   void listen() {
-    _eventSub ??= _events.receiveBroadcastStream().listen(
-          _handleEvent,
-          onError: (Object e) => onError?.call('事件流错误: $e'),
-        );
+    if (_eventSub != null) return;
+    final generation = ++_listenerGeneration;
+    _eventSub = _events.receiveBroadcastStream().listen(
+      (event) {
+        if (generation == _listenerGeneration) _handleEvent(event);
+      },
+      onError: (Object error) {
+        if (generation == _listenerGeneration) {
+          onError?.call('事件流错误，请重试');
+        }
+      },
+    );
+  }
+
+  /// Discard callbacks from the prior native camera session before reopening.
+  /// A cancelled subscription may already have queued an event, so each stream
+  /// listener carries a generation and stale callbacks are ignored.
+  Future<void> restartCameraSession() async {
+    final oldSubscription = _eventSub;
+    _eventSub = null;
+    _listenerGeneration++;
+    try {
+      await oldSubscription?.cancel().timeout(
+            const Duration(milliseconds: 250),
+            onTimeout: () {},
+          );
+    } catch (_) {
+      // The generation gate already suppresses a stalled old event listener.
+    }
+    try {
+      await closeCamera();
+    } catch (_) {
+      // A failed close must not prevent a retry from replacing the session.
+    }
+    listen();
   }
 
   void _handleEvent(dynamic event) {
@@ -406,8 +443,10 @@ class EncoderService {
 
   /// Release the native camera and stop listening for events.
   Future<void> dispose() async {
-    await _eventSub?.cancel();
+    final subscription = _eventSub;
     _eventSub = null;
+    _listenerGeneration++;
+    await subscription?.cancel();
     try {
       await closeCamera();
     } catch (_) {}

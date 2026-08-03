@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -30,11 +31,19 @@ const Color _kDone = Color(0xFF34C759); // iOS green
 class StreamPage extends ConsumerStatefulWidget {
   final String deviceName;
   final String deviceId;
+  final EncoderService? encoder;
+  final Future<PermissionStatus> Function()? requestCameraPermission;
+  final Future<EncoderConfig> Function()? loadEncoderConfig;
+  final Duration cameraReadyTimeout;
 
   const StreamPage({
     super.key,
     required this.deviceName,
     required this.deviceId,
+    this.encoder,
+    this.requestCameraPermission,
+    this.loadEncoderConfig,
+    this.cameraReadyTimeout = const Duration(seconds: 10),
   });
 
   @override
@@ -43,7 +52,7 @@ class StreamPage extends ConsumerStatefulWidget {
 
 class _StreamPageState extends ConsumerState<StreamPage>
     with WidgetsBindingObserver {
-  final EncoderService _encoder = EncoderService();
+  late final EncoderService _encoder;
 
   EncoderConfig _config = const EncoderConfig();
   CameraInfo? _camera;
@@ -54,6 +63,9 @@ class _StreamPageState extends ConsumerState<StreamPage>
   bool _permissionDenied = false;
   String? _error;
   bool _facingFront = false;
+  bool _cameraStarting = true;
+  int _cameraGeneration = 0;
+  Timer? _cameraReadyTimer;
 
   /// Latest captured JPEG bytes (single-slot demo cache). Populated by
   /// [_takePicture] — invoked via a hidden long-press on the shutter, and in
@@ -155,13 +167,16 @@ class _StreamPageState extends ConsumerState<StreamPage>
   @override
   void initState() {
     super.initState();
+    _encoder = widget.encoder ?? EncoderService();
     WidgetsBinding.instance.addObserver(this);
 
     _encoder
       ..onCamera = (info) {
-        if (!mounted) return;
+        if (!mounted || _cameraGeneration == 0) return;
+        _cameraReadyTimer?.cancel();
         setState(() {
           _camera = info;
+          _cameraStarting = false;
           _facingFront = info.facingFront;
           _error = null;
           _ev = _ev.clamp(info.evMin, info.evMax);
@@ -208,6 +223,10 @@ class _StreamPageState extends ConsumerState<StreamPage>
         });
       }
       ..onError = (message) {
+        if (_camera == null) {
+          _failCameraStartup(_cameraGeneration, message);
+          return;
+        }
         _teardownSession();
         _stopInfoTimer();
         if (!mounted) return;
@@ -250,34 +269,109 @@ class _StreamPageState extends ConsumerState<StreamPage>
     );
   }
 
-  Future<void> _bootstrapCamera() async {
-    // Restore the last-used encoding parameters, but always reset zoom to 1×
-    // on entry — digital zoom is a per-session choice, not a preference. Users
-    // start every screen fresh at full field of view.
-    final saved = await EncoderConfigStore.load();
-    if (mounted) {
+  bool _isCurrentCameraAttempt(int generation) =>
+      mounted && generation == _cameraGeneration;
+
+  String _startupError(String? message) {
+    final normalized = (message ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (normalized.isEmpty) return '摄像头启动失败，请检查设备后重试。';
+    final bounded =
+        normalized.length > 80 ? '${normalized.substring(0, 80)}…' : normalized;
+    return bounded.startsWith('摄像头启动失败') ? bounded : '摄像头启动失败：$bounded';
+  }
+
+  void _failCameraStartup(int generation, String message) {
+    if (!_isCurrentCameraAttempt(generation)) return;
+    _cameraReadyTimer?.cancel();
+    setState(() {
+      _camera = null;
+      _cameraStarting = false;
+      _error = _startupError(message);
+    });
+  }
+
+  void _startCameraReadyTimeout(int generation) {
+    _cameraReadyTimer?.cancel();
+    _cameraReadyTimer = Timer(widget.cameraReadyTimeout, () {
+      if (!_isCurrentCameraAttempt(generation) || _camera != null) return;
+      _cameraReadyTimer = null;
+      setState(() {
+        _cameraStarting = false;
+        _error = '摄像头启动超时，请检查设备后重试。';
+      });
+    });
+  }
+
+  Future<void> _bootstrapCamera({bool retry = false}) async {
+    final generation = ++_cameraGeneration;
+    _cameraReadyTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _error = null;
+      _camera = null;
+      _cameraStarting = true;
+    });
+
+    if (retry) {
+      await _encoder.restartCameraSession();
+      if (!_isCurrentCameraAttempt(generation)) return;
+    }
+
+    try {
+      // Restore the last-used encoding parameters, but always reset zoom to 1×
+      // on entry — digital zoom is a per-session choice, not a preference.
+      final saved =
+          await (widget.loadEncoderConfig ?? EncoderConfigStore.load)();
+      if (!_isCurrentCameraAttempt(generation)) return;
       setState(() {
         _config = saved.copyWith(cropZoom: _kMinZoom);
         _zoom = _kMinZoom;
       });
-    }
 
-    final status = await Permission.camera.request();
-    if (!status.isGranted) {
-      if (mounted) setState(() => _permissionDenied = true);
-      return;
+      final requestPermission =
+          widget.requestCameraPermission ?? Permission.camera.request;
+      final status = await requestPermission();
+      if (!_isCurrentCameraAttempt(generation)) return;
+      if (!status.isGranted) {
+        setState(() {
+          _permissionDenied = true;
+          _cameraStarting = false;
+        });
+        return;
+      }
+      setState(() => _permissionDenied = false);
+      _startCameraReadyTimeout(generation);
+      await _encoder.openCamera(_config, facingFront: _facingFront);
+    } on MissingPluginException {
+      _failCameraStartup(generation, '当前平台未提供摄像头功能，请确认应用已正确安装。');
+    } on PlatformException catch (error) {
+      if (error.code == 'MissingPluginException') {
+        _failCameraStartup(
+          generation,
+          '当前平台未提供摄像头功能，请确认应用已正确安装。',
+        );
+      } else {
+        _failCameraStartup(generation, error.message ?? '摄像头不可用');
+      }
+    } catch (_) {
+      _failCameraStartup(generation, '摄像头启动失败，请检查设备后重试。');
     }
-    if (mounted) setState(() => _permissionDenied = false);
-    await _encoder.openCamera(_config, facingFront: _facingFront);
+  }
+
+  void _retryCamera() {
+    if (_cameraStarting) return;
+    unawaited(_bootstrapCamera(retry: true));
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      if (!_permissionDenied && _camera == null) {
-        _encoder.openCamera(_config, facingFront: _facingFront);
+      if (!_permissionDenied && _camera == null && !_cameraStarting) {
+        unawaited(_bootstrapCamera(retry: true));
       }
     } else {
+      _cameraGeneration++;
+      _cameraReadyTimer?.cancel();
       // Releasing in the background also stops any in-flight encode natively.
       if (_encoding) _encoder.stopEncoding();
       _teardownSession();
@@ -286,6 +380,7 @@ class _StreamPageState extends ConsumerState<StreamPage>
       if (mounted) {
         setState(() {
           _camera = null;
+          _cameraStarting = false;
           _encoding = false;
           _streaming = false;
           _encodedPreview = false;
@@ -298,6 +393,8 @@ class _StreamPageState extends ConsumerState<StreamPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _cameraGeneration++;
+    _cameraReadyTimer?.cancel();
     _focusTimer?.cancel();
     _zoomTimer?.cancel();
     _flashTimer?.cancel();
@@ -984,6 +1081,17 @@ class _StreamPageState extends ConsumerState<StreamPage>
     }
 
     final info = _camera;
+    if (_error != null && (info == null || info.textureId < 0)) {
+      return _centerInfo(
+        icon: Icons.videocam_off_outlined,
+        text: _error!,
+        action: TextButton.icon(
+          onPressed: _cameraStarting ? null : _retryCamera,
+          icon: const Icon(Icons.refresh, color: _kAccent),
+          label: const Text('重试', style: TextStyle(color: _kAccent)),
+        ),
+      );
+    }
     if (info == null || info.textureId < 0) {
       return _centerInfo(
         icon: Icons.videocam_outlined,
