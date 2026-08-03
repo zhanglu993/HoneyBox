@@ -646,7 +646,7 @@ HMW_TEST(camera_texture_cleanup_shutdown_precedes_dependency_teardown) {
   HMW_EXPECT(!cleanup->RetryPending().ok());
 }
 
-HMW_TEST(camera_texture_cleanup_reentrant_shutdown_reports_not_quiescent) {
+HMW_TEST(camera_texture_cleanup_reentrant_shutdown_retries_after_operation) {
   auto source = std::make_shared<SourceState>();
   RecordingRegistry registry;
   QueueDispatcher dispatcher;
@@ -663,16 +663,29 @@ HMW_TEST(camera_texture_cleanup_reentrant_shutdown_reports_not_quiescent) {
   bool reentrant_called = false;
   bool reentrant_succeeded = true;
   dispatcher.run_inline = true;
+  bool inside_unregister = false;
+  bool retry_succeeded = false;
+  size_t completion_calls = 0;
   registry.on_unregister = [&] {
+    inside_unregister = true;
     const hmw::Outcome result = cleanup->Shutdown();
     reentrant_called = true;
     reentrant_succeeded = result.ok();
+    cleanup->RunAfterCurrentOperation([&] {
+      ++completion_calls;
+      HMW_EXPECT(!inside_unregister);
+      retry_succeeded = cleanup->Shutdown().ok();
+    });
+    inside_unregister = false;
   };
   HMW_EXPECT(controller.Close().ok());
   HMW_EXPECT(reentrant_called);
   HMW_EXPECT(!reentrant_succeeded);
   registry.on_unregister = {};
+  HMW_EXPECT(completion_calls == 1);
+  HMW_EXPECT(retry_succeeded);
   HMW_EXPECT(cleanup->Shutdown().ok());
+  HMW_EXPECT(completion_calls == 1);
 }
 
 HMW_TEST(camera_texture_invalid_bgra_emits_one_platform_thread_error) {

@@ -8,6 +8,7 @@ add_executable(honey_camera_windows_tests
   camera_texture_controller_test.cpp
   encoder_channel_contract_test.cpp
   windows_encoder_registration_test.cpp
+  camera_plugin_teardown_test.cpp
 )
 
 target_include_directories(honey_camera_windows_tests PRIVATE
@@ -71,3 +72,6 @@ add_test(NAME encoder_channel_contract
 
 add_test(NAME windows_encoder_registration
   COMMAND honey_camera_windows_tests windows_encoder_registration_)
+
+add_test(NAME camera_plugin_teardown
+  COMMAND honey_camera_windows_tests camera_plugin_teardown_)

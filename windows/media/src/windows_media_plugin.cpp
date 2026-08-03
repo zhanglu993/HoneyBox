@@ -1,5 +1,6 @@
 #include "honey_media_windows/windows_media_plugin.h"
 
+#include "honey_camera_windows/camera_plugin_teardown.h"
 #include "honey_camera_windows/encoder_channel.h"
 #include "honey_camera_windows/windows_encoder_registration.h"
 #include "windows_media_plugin_internal.h"
@@ -19,11 +20,12 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
   explicit HoneyMediaWindowsPlugin(
       flutter::PluginRegistrarWindows* registrar)
       : registrar_(registrar),
-        dispatcher_(registrar->GetView() == nullptr
-                        ? nullptr
-                        : hmw::internal::ResolvePluginDispatchWindow(
-                              registrar->GetView()->GetNativeWindow())),
-        controller_(dispatcher_),
+        dispatcher_(std::make_unique<hmw::Win32PlatformDispatcher>(
+            registrar->GetView() == nullptr
+                ? nullptr
+                : hmw::internal::ResolvePluginDispatchWindow(
+                      registrar->GetView()->GetNativeWindow()))),
+        controller_(*dispatcher_),
         texture_registry_(
             hmw::CreateFlutterTextureRegistry(
                 registrar->texture_registrar())),
@@ -38,9 +40,9 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
             [this](uint32_t done, uint32_t total) {
               SendProgress(done, total);
             }),
-        player_channel_(*texture_registry_, dispatcher_) {
+        player_channel_(*texture_registry_, *dispatcher_) {
     camera_cleanup_ = hcw::CameraTextureCleanupCoordinator::Create(
-        *texture_registry_, dispatcher_);
+        *texture_registry_, *dispatcher_);
     camera_controller_ = std::make_unique<hcw::CameraTextureController>(
         camera_cleanup_, hcw::CreateMediaFoundationCameraFactory());
     encoder_channel_ = std::make_unique<hcw::EncoderChannel>(
@@ -50,7 +52,7 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
           }
         });
     encoder_registration_ = std::make_unique<hcw::WindowsEncoderRegistration>(
-        *registrar_->messenger(), dispatcher_,
+        *registrar_->messenger(), *dispatcher_,
         [this](std::string_view method,
                const flutter::EncodableValue* arguments,
                std::unique_ptr<hmw::FlutterResult> result) {
@@ -79,6 +81,9 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
           player_channel_.Handle(call.method_name(), call.arguments(),
                                  std::move(result));
         });
+    camera_teardown_owner_ = hcw::CameraPluginTeardownOwner::Create(
+        hcw::CreateCameraPluginCleanupGate(std::move(camera_cleanup_)),
+        std::move(texture_registry_), std::move(dispatcher_));
   }
 
   ~HoneyMediaWindowsPlugin() override {
@@ -95,15 +100,6 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
     encoder_channel_.reset();
     camera_controller_.reset();
 
-    if (camera_cleanup_) {
-      // Win32PlatformDispatcher owns accepted callbacks. Shutdown closes the
-      // cleanup dependency gate first; any callback still queued is then
-      // canceled by dispatcher teardown without touching registry/dispatcher.
-      // FlutterTextureRegistry retains and unregisters any remaining entries.
-      (void)camera_cleanup_->Shutdown();
-      camera_cleanup_.reset();
-    }
-
     player_channel_.Shutdown();
     converter_channel_.Shutdown();
     if (window_proc_delegate_id_ != 0) {
@@ -111,6 +107,11 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
           window_proc_delegate_id_);
       window_proc_delegate_id_ = 0;
     }
+    camera_cleanup_.reset();
+    // A reentrant cleanup keeps this owner alive until the outer operation
+    // ends, then retries Shutdown before releasing registry and dispatcher.
+    camera_teardown_owner_->Teardown();
+    camera_teardown_owner_.reset();
   }
 
   HoneyMediaWindowsPlugin(const HoneyMediaWindowsPlugin&) = delete;
@@ -130,8 +131,10 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
   }
 
   flutter::PluginRegistrarWindows* registrar_;
-  hmw::Win32PlatformDispatcher dispatcher_;
+  std::unique_ptr<hmw::Win32PlatformDispatcher> dispatcher_;
   hmw::ConversionController controller_;
+  std::shared_ptr<hcw::CameraPluginTeardownOwner>
+      camera_teardown_owner_;
   std::unique_ptr<hmw::TextureRegistry> texture_registry_;
   std::shared_ptr<hcw::CameraTextureCleanupCoordinator> camera_cleanup_;
   std::unique_ptr<hcw::CameraTextureController> camera_controller_;

@@ -309,7 +309,7 @@ HMW_TEST(
 }
 
 HMW_TEST(
-    windows_encoder_registration_plugin_tears_down_camera_before_existing_media) {
+    windows_encoder_registration_plugin_defers_dependencies_until_cleanup_quiesces) {
   const std::string source =
       ReadProjectFile("windows/media/src/windows_media_plugin.cpp");
   HMW_EXPECT(AppearsInOrder(
@@ -318,8 +318,18 @@ HMW_TEST(
        "encoder_channel_->Shutdown()",
        "encoder_channel_.reset()",
        "camera_controller_.reset()",
-       "camera_cleanup_->Shutdown()", "player_channel_.Shutdown()",
-       "converter_channel_.Shutdown()"}));
+       "player_channel_.Shutdown()",
+       "converter_channel_.Shutdown()",
+       "camera_cleanup_.reset()",
+       "camera_teardown_owner_->Teardown()",
+       "camera_teardown_owner_.reset()"}));
+  HMW_EXPECT(source.find("(void)camera_cleanup_->Shutdown()") ==
+             std::string::npos);
+  HMW_EXPECT(source.find("std::move(camera_cleanup_)") != std::string::npos);
+  HMW_EXPECT(source.find("std::move(texture_registry_)") != std::string::npos);
+  HMW_EXPECT(source.find("CameraPluginTeardownOwner::Create") !=
+             std::string::npos);
+  HMW_EXPECT(source.find("std::move(dispatcher_)") != std::string::npos);
 }
 
 HMW_TEST(windows_encoder_registration_leaves_generated_files_camera_free) {

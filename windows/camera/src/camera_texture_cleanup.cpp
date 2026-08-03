@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <utility>
@@ -67,6 +68,7 @@ struct CameraTextureCleanupCoordinator::State {
   }
 
   void EndOperation() noexcept {
+    std::function<void()> completion;
     {
       std::lock_guard<std::mutex> lock(mutex);
       if (operations != 0) {
@@ -77,8 +79,17 @@ struct CameraTextureCleanupCoordinator::State {
       if (active_entry != active_operations.rend()) {
         active_operations.erase(std::next(active_entry).base());
       }
+      if (!active && operations == 0 && this->after_operation) {
+        completion.swap(this->after_operation);
+      }
     }
     condition.notify_all();
+    if (completion) {
+      try {
+        completion();
+      } catch (...) {
+      }
+    }
   }
 
   size_t CurrentThreadDepth() const noexcept {
@@ -93,6 +104,7 @@ struct CameraTextureCleanupCoordinator::State {
   hmw::TextureRegistry* registry;
   hmw::PlatformDispatcher* dispatcher;
   std::vector<Pending> pending;
+  std::function<void()> after_operation;
   static thread_local std::vector<State*> active_operations;
 };
 
@@ -204,6 +216,28 @@ hmw::Outcome CameraTextureCleanupCoordinator::Shutdown() noexcept {
   state_->registry = nullptr;
   state_->dispatcher = nullptr;
   return {};
+}
+
+void CameraTextureCleanupCoordinator::RunAfterCurrentOperation(
+    std::function<void()> callback) noexcept {
+  if (!callback) {
+    return;
+  }
+  std::function<void()> run_now;
+  {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->operations == 0) {
+      run_now.swap(callback);
+    } else if (!state_->after_operation) {
+      state_->after_operation.swap(callback);
+    }
+  }
+  if (run_now) {
+    try {
+      run_now();
+    } catch (...) {
+    }
+  }
 }
 
 void CameraTextureCleanupCoordinator::Retain(int64_t texture_id) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "honey_media_windows/platform_dispatcher.h"
@@ -30,6 +31,12 @@ class CameraTextureCleanupCoordinator final
 
   // Schedules at most one attempt per pending texture for this trigger.
   hmw::Outcome RetryPending();
+
+  // Runs callback after the operation that caused a reentrant Shutdown()
+  // failure has fully exited. The callback runs on that operation's thread.
+  // Task 5 uses this to retry Shutdown without blocking or posting a
+  // cancelable platform message.
+  void RunAfterCurrentOperation(std::function<void()> callback) noexcept;
 
   // Cancels future access to the non-owning registry/dispatcher dependencies.
   // Call only after camera controllers are destroyed and before either
