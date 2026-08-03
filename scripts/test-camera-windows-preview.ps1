@@ -56,11 +56,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 foreach ($currentConfiguration in $configurations) {
-    Write-Host "Building honey_camera_windows ($currentConfiguration)..."
-    & $cmake `
-        --build $buildDirectory `
-        --config $currentConfiguration `
-        --target honey_camera_windows_tests
+    $buildArguments = @('--build', $buildDirectory, '--config', $currentConfiguration)
+    if (-not [string]::IsNullOrWhiteSpace($TestRegex)) {
+        Write-Host "Building honey_camera_windows focus target ($currentConfiguration)..."
+        $buildArguments += @('--target', 'honey_camera_windows_tests')
+    }
+    else {
+        Write-Host "Building all CTest targets ($currentConfiguration)..."
+    }
+    & $cmake @buildArguments
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
