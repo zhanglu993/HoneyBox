@@ -1,7 +1,3 @@
-#include "honey_camera_windows/encoder_channel.h"
-
-#include "test_support.h"
-
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -15,6 +11,9 @@
 #include <utility>
 #include <vector>
 
+#include "honey_camera_windows/encoder_channel.h"
+#include "test_support.h"
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -22,8 +21,7 @@ using namespace std::chrono_literals;
 hcw::CameraFrame TextureFrame(uint8_t marker) {
   return {2, 1, 10'000,
           std::make_shared<const std::vector<uint8_t>>(
-              std::vector<uint8_t>{marker, 0, 0, 255,
-                                   marker, 0, 0, 255})};
+              std::vector<uint8_t>{marker, 0, 0, 255, marker, 0, 0, 255})};
 }
 
 class SourceState final {
@@ -36,16 +34,14 @@ class SourceState final {
 
   bool WaitForRead(size_t minimum = 1) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return condition_.wait_for(lock, 2s,
-                               [&] { return reads_ >= minimum; });
+    return condition_.wait_for(lock, 2s, [&] { return reads_ >= minimum; });
   }
 
   hmw::Result<hcw::CameraFrame> ReadNext() {
     std::unique_lock<std::mutex> lock(mutex_);
     ++reads_;
     condition_.notify_all();
-    condition_.wait(lock,
-                    [&] { return stopped_ || !frames_.empty(); });
+    condition_.wait(lock, [&] { return stopped_ || !frames_.empty(); });
     if (stopped_) {
       return {std::nullopt,
               hmw::Error{hmw::Status::kCancelled, "source stopped"}};
@@ -85,6 +81,14 @@ class Source final : public hcw::CameraFrameSource {
 class QueueDispatcher final : public hmw::PlatformDispatcher {
  public:
   bool Post(std::function<void()> callback) override {
+    if (reject_next_post) {
+      reject_next_post = false;
+      return false;
+    }
+    if (run_inline) {
+      callback();
+      return true;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     callbacks_.push_back(std::move(callback));
     condition_.notify_all();
@@ -93,9 +97,8 @@ class QueueDispatcher final : public hmw::PlatformDispatcher {
 
   bool WaitForPending(size_t minimum = 1) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return condition_.wait_for(lock, 2s, [&] {
-      return callbacks_.size() >= minimum;
-    });
+    return condition_.wait_for(lock, 2s,
+                               [&] { return callbacks_.size() >= minimum; });
   }
 
   void Drain() {
@@ -112,6 +115,9 @@ class QueueDispatcher final : public hmw::PlatformDispatcher {
       callback();
     }
   }
+
+  bool reject_next_post = false;
+  bool run_inline = false;
 
  private:
   std::mutex mutex_;
@@ -131,6 +137,9 @@ class RecordingRegistry final : public hmw::TextureRegistry {
     }
     const int64_t id = next_id++;
     ids.push_back(id);
+    if (on_register) {
+      on_register();
+    }
     return id;
   }
 
@@ -138,6 +147,10 @@ class RecordingRegistry final : public hmw::TextureRegistry {
     threads.push_back(std::this_thread::get_id());
     events.push_back("mark");
     ++marks;
+    if (fail_next_mark) {
+      fail_next_mark = false;
+      return false;
+    }
     const size_t index = Find(id);
     return index < providers.size() && Valid(providers[index]());
   }
@@ -145,6 +158,11 @@ class RecordingRegistry final : public hmw::TextureRegistry {
   bool UnregisterTexture(int64_t id) override {
     threads.push_back(std::this_thread::get_id());
     events.push_back("unregister");
+    ++unregister_attempts;
+    if (reject_unregister || reject_next_unregister) {
+      reject_next_unregister = false;
+      return false;
+    }
     unregistered.push_back(id);
     return true;
   }
@@ -156,8 +174,8 @@ class RecordingRegistry final : public hmw::TextureRegistry {
   }
 
   static bool Valid(const hmw::PixelBufferView& view) {
-    return view.owner && view.bgra == view.owner->data() &&
-           view.width == 2 && view.height == 1 && view.byte_count == 8;
+    return view.owner && view.bgra == view.owner->data() && view.width == 2 &&
+           view.height == 1 && view.byte_count == 8;
   }
 
   size_t Find(int64_t id) const {
@@ -172,6 +190,11 @@ class RecordingRegistry final : public hmw::TextureRegistry {
   int64_t next_id = 41;
   size_t marks = 0;
   std::vector<int64_t> ids;
+  size_t unregister_attempts = 0;
+  bool fail_next_mark = false;
+  bool reject_next_unregister = false;
+  std::function<void()> on_register;
+  bool reject_unregister = false;
   std::vector<int64_t> unregistered;
   std::vector<hmw::PixelBufferProvider> providers;
   std::vector<std::thread::id> threads;
@@ -197,11 +220,12 @@ HMW_TEST(camera_texture_registers_once_marks_frames_and_readies_once) {
   hcw::CameraTextureController controller(registry, dispatcher,
                                           Factory(source));
 
-  HMW_EXPECT(controller.Open(
-      {2, 1, 15},
-      {[&](hcw::CameraReady event) { ready.push_back(event); },
-       [&](hmw::Error error) { errors.push_back(std::move(error)); }})
-                 .ok());
+  HMW_EXPECT(
+      controller
+          .Open({2, 1, 15},
+                {[&](hcw::CameraReady event) { ready.push_back(event); },
+                 [&](hmw::Error error) { errors.push_back(std::move(error)); }})
+          .ok());
   HMW_EXPECT(source->WaitForRead());
   source->Push(TextureFrame(11));
   HMW_EXPECT(dispatcher.WaitForPending());
@@ -265,9 +289,10 @@ HMW_TEST(camera_texture_close_suppresses_queued_mark_and_unregisters_once) {
   size_t ready_count = 0;
   hcw::CameraTextureController controller(registry, dispatcher,
                                           Factory(source));
-  HMW_EXPECT(controller.Open(
-      {2, 1, 15},
-      {[&](hcw::CameraReady) { ++ready_count; }, {}}).ok());
+  HMW_EXPECT(
+      controller
+          .Open({2, 1, 15}, {[&](hcw::CameraReady) { ++ready_count; }, {}})
+          .ok());
   HMW_EXPECT(source->WaitForRead());
   source->Push(TextureFrame(1));
   HMW_EXPECT(dispatcher.WaitForPending());
@@ -295,8 +320,7 @@ HMW_TEST(camera_texture_reopen_unregisters_old_before_registering_new) {
   QueueDispatcher dispatcher;
   std::vector<int64_t> ready_ids;
   hcw::CameraTextureController controller(
-      registry, dispatcher,
-      [&](const hcw::CameraPreviewConfig&) {
+      registry, dispatcher, [&](const hcw::CameraPreviewConfig&) {
         const auto state = factory_calls++ == 0 ? first : second;
         return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
             std::make_unique<Source>(state), std::nullopt};
@@ -319,9 +343,9 @@ HMW_TEST(camera_texture_reopen_unregisters_old_before_registering_new) {
   HMW_EXPECT(registry.ids == std::vector<int64_t>({41, 42}));
   HMW_EXPECT(registry.unregistered == std::vector<int64_t>({41}));
   HMW_EXPECT(ready_ids == std::vector<int64_t>({41, 42}));
-  HMW_EXPECT(registry.events == std::vector<std::string>(
-                                    {"register", "mark", "unregister",
-                                     "register", "mark"}));
+  HMW_EXPECT(registry.events ==
+             std::vector<std::string>(
+                 {"register", "mark", "unregister", "register", "mark"}));
   HMW_EXPECT(controller.Close().ok());
   dispatcher.Drain();
 }
@@ -334,9 +358,10 @@ HMW_TEST(camera_texture_destruction_suppresses_queued_ready_callback) {
   {
     auto controller = std::make_unique<hcw::CameraTextureController>(
         registry, dispatcher, Factory(source));
-    HMW_EXPECT(controller->Open(
-        {2, 1, 15},
-        {[&](hcw::CameraReady) { ++ready_count; }, {}}).ok());
+    HMW_EXPECT(
+        controller
+            ->Open({2, 1, 15}, {[&](hcw::CameraReady) { ++ready_count; }, {}})
+            .ok());
     HMW_EXPECT(source->WaitForRead());
     source->Push(TextureFrame(5));
     HMW_EXPECT(dispatcher.WaitForPending());
@@ -348,6 +373,168 @@ HMW_TEST(camera_texture_destruction_suppresses_queued_ready_callback) {
   HMW_EXPECT(ready_count == 0);
 }
 
+HMW_TEST(
+    camera_texture_registered_texture_unregisters_after_controller_destruction) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  auto controller = std::make_unique<hcw::CameraTextureController>(
+      registry, dispatcher, Factory(source));
+
+  HMW_EXPECT(controller->Open({2, 1, 15}, {}).ok());
+  HMW_EXPECT(source->WaitForRead());
+  source->Push(TextureFrame(6));
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.ids == std::vector<int64_t>({41}));
+
+  controller.reset();
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  HMW_EXPECT(registry.unregistered == std::vector<int64_t>({41}));
+}
+
+HMW_TEST(
+    camera_texture_stale_registration_keeps_rejected_unregister_for_retry) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  auto controller = std::make_unique<hcw::CameraTextureController>(
+      registry, dispatcher, Factory(source));
+  registry.reject_next_unregister = true;
+  registry.on_register = [&] {
+    registry.on_register = {};
+    HMW_EXPECT(controller->Close().ok());
+  };
+
+  HMW_EXPECT(controller->Open({2, 1, 15}, {}).ok());
+  HMW_EXPECT(source->WaitForRead());
+  source->Push(TextureFrame(7));
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  HMW_EXPECT(registry.unregistered.empty());
+
+  HMW_EXPECT(controller->Close().ok());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.unregister_attempts == 2);
+  HMW_EXPECT(registry.unregistered == std::vector<int64_t>({41}));
+  HMW_EXPECT(controller->Close().ok());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.unregister_attempts == 2);
+}
+
+HMW_TEST(
+    camera_texture_first_mark_failure_keeps_rejected_unregister_for_retry) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  size_t ready_count = 0;
+  hcw::CameraTextureController controller(registry, dispatcher,
+                                          Factory(source));
+  registry.fail_next_mark = true;
+  registry.reject_next_unregister = true;
+
+  HMW_EXPECT(
+      controller
+          .Open({2, 1, 15}, {[&](hcw::CameraReady) { ++ready_count; }, {}})
+          .ok());
+  HMW_EXPECT(source->WaitForRead());
+  source->Push(TextureFrame(8));
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+  HMW_EXPECT(ready_count == 0);
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  HMW_EXPECT(registry.unregistered.empty());
+
+  HMW_EXPECT(controller.Close().ok());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.unregister_attempts == 2);
+  HMW_EXPECT(registry.unregistered == std::vector<int64_t>({41}));
+  HMW_EXPECT(controller.Close().ok());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.unregister_attempts == 2);
+}
+
+HMW_TEST(
+    camera_texture_ready_callback_may_destroy_controller_before_unregister) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  size_t ready_count = 0;
+  auto controller = std::make_unique<hcw::CameraTextureController>(
+      registry, dispatcher, Factory(source));
+
+  HMW_EXPECT(controller
+                 ->Open({2, 1, 15}, {[&](hcw::CameraReady) {
+                                       ++ready_count;
+                                       controller.reset();
+                                     },
+                                     {}})
+                 .ok());
+  HMW_EXPECT(source->WaitForRead());
+  source->Push(TextureFrame(9));
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+
+  HMW_EXPECT(ready_count == 1);
+  HMW_EXPECT(controller == nullptr);
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  HMW_EXPECT(registry.unregistered == std::vector<int64_t>({41}));
+}
+
+HMW_TEST(camera_texture_dispatch_rejection_retains_unregister_for_retry) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  hcw::CameraTextureController controller(registry, dispatcher,
+                                          Factory(source));
+
+  HMW_EXPECT(controller.Open({2, 1, 15}, {}).ok());
+  HMW_EXPECT(source->WaitForRead());
+  source->Push(TextureFrame(10));
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+
+  dispatcher.reject_next_post = true;
+  HMW_EXPECT(!controller.Close().ok());
+  HMW_EXPECT(registry.unregister_attempts == 0);
+  HMW_EXPECT(registry.unregistered.empty());
+  HMW_EXPECT(controller.Close().ok());
+  dispatcher.Drain();
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  HMW_EXPECT(registry.unregistered == std::vector<int64_t>({41}));
+}
+
+HMW_TEST(camera_texture_persistent_unregister_rejection_is_bounded) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  hcw::CameraTextureController controller(registry, dispatcher,
+                                          Factory(source));
+
+  HMW_EXPECT(controller.Open({2, 1, 15}, {}).ok());
+  HMW_EXPECT(source->WaitForRead());
+  source->Push(TextureFrame(11));
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+
+  dispatcher.run_inline = true;
+  registry.reject_unregister = true;
+  HMW_EXPECT(controller.Close().ok());
+  HMW_EXPECT(registry.unregister_attempts == 1);
+  HMW_EXPECT(controller.Close().ok());
+  HMW_EXPECT(registry.unregister_attempts == 2);
+
+  registry.reject_unregister = false;
+  HMW_EXPECT(controller.Close().ok());
+  HMW_EXPECT(registry.unregister_attempts == 3);
+  HMW_EXPECT(registry.unregistered == std::vector<int64_t>({41}));
+  HMW_EXPECT(controller.Close().ok());
+  HMW_EXPECT(registry.unregister_attempts == 3);
+}
+
 HMW_TEST(camera_texture_invalid_bgra_emits_one_platform_thread_error) {
   auto source = std::make_shared<SourceState>();
   RecordingRegistry registry;
@@ -356,12 +543,14 @@ HMW_TEST(camera_texture_invalid_bgra_emits_one_platform_thread_error) {
   std::vector<std::thread::id> error_threads;
   hcw::CameraTextureController controller(registry, dispatcher,
                                           Factory(source));
-  HMW_EXPECT(controller.Open(
-      {2, 1, 15},
-      {{}, [&](hmw::Error error) {
-         errors.push_back(std::move(error));
-         error_threads.push_back(std::this_thread::get_id());
-       }}).ok());
+  HMW_EXPECT(controller
+                 .Open({2, 1, 15}, {{},
+                                    [&](hmw::Error error) {
+                                      errors.push_back(std::move(error));
+                                      error_threads.push_back(
+                                          std::this_thread::get_id());
+                                    }})
+                 .ok());
   HMW_EXPECT(source->WaitForRead());
   hcw::CameraFrame short_frame = TextureFrame(7);
   short_frame.bgra =

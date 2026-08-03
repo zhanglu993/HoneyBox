@@ -36,3 +36,29 @@
 ## 提交
 
 - 实现提交：`2bb7c58`（`feat: 打通Windows摄像头纹理与通道`）
+
+## FIX_REQUIRED 跟进：纹理解绑所有权
+
+### 严格 RED
+
+- 新增析构与回滚测试后，Debug `camera_texture_` 稳定失败：已注册纹理在 controller 析构后 `unregister_attempts=0`；ready 回调内销毁 controller 同样未解绑。
+- stale registration 与首次 `MarkFrameAvailable` 失败时，第一次 `UnregisterTexture=false` 后 ID 丢失；后续 `Close()` 的 attempts 仍停在 1，期望的第 2 次重试未发生。
+
+### 修复与有界语义
+
+- 所有已注册但不再 active 的 texture ID 先进入去重的 pending ownership；唯一底层 `UnregisterTexture` 调用只在平台线程完成函数中执行，返回 true 后才移除 ID。
+- dispatcher 接受的 cleanup task 强持有 `State`，所以 controller 析构或 ready callback 内销毁 controller 后仍能完成已排队解绑。task 不捕获 controller/raw `this`、不自我重排；`State` 也不持有 task，因此不存在永久引用环。
+- `UnregisterTexture=false` 只将 pending 的 `queued` 复位。每次 `ScheduleUnregisters` 记录本轮 attempted ID，即使 dispatcher 同步执行且 registry 长期返回 false，每个 ID 每轮也仅尝试一次；后续显式 `Close()` 才触发下一轮重试。
+- dispatcher 拒绝 Post 时，pending ownership 保留且 `Close()` 返回失败；controller 存活期间的下一次 `Close()` 可重试。
+- 剩余 teardown 边界：若析构时 dispatcher 直接拒绝 cleanup task，或析构后唯一 cleanup task 执行但 registry 持续返回 false，则已没有 controller 可再次触发重试。本实现保持有界且不在错误线程强行解绑，也不无限自调度；最终资源回收依赖 Flutter engine/registry teardown。
+
+### 跟进验证
+
+- Focused：`camera_texture_` Debug 1/1、Release 1/1。
+- Camera + channel：`camera_|encoder_channel_` Debug 8/8、Release 8/8。
+- Media adapter：去重构建进程的 `PATH`/`Path` 后非并行构建，Debug 32/32、Release 32/32。
+- 新增覆盖：已注册后析构、ready callback 内销毁、stale registration 回滚失败重试、首次 mark 失败回滚重试、dispatcher 拒绝后重试、同步 dispatcher 下长期 false 单轮不自旋。
+
+### 跟进提交
+
+- 评审修复：本提交（中文 commit：`fix: 保证摄像头纹理可靠解绑`）。

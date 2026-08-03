@@ -1,9 +1,5 @@
 #pragma once
 
-#include "honey_camera_windows/camera_preview.h"
-#include "honey_media_windows/platform_dispatcher.h"
-#include "honey_media_windows/texture_registry.h"
-
 #include <flutter/encodable_value.h>
 #include <flutter/method_result.h>
 
@@ -11,6 +7,10 @@
 #include <functional>
 #include <memory>
 #include <string_view>
+
+#include "honey_camera_windows/camera_preview.h"
+#include "honey_media_windows/platform_dispatcher.h"
+#include "honey_media_windows/texture_registry.h"
 
 namespace hmw {
 using FlutterResult = flutter::MethodResult<flutter::EncodableValue>;
@@ -50,15 +50,20 @@ class CameraTextureController final {
                            CameraFrame frame) noexcept;
   static void PublishError(const std::weak_ptr<State>& weak_state,
                            hmw::Error error) noexcept;
-  static hmw::Outcome ScheduleUnregisters(
-      const std::shared_ptr<State>& state);
+  static hmw::Outcome ScheduleUnregisters(const std::shared_ptr<State>& state);
+  static void RetainUnregisterLocked(State& state, int64_t texture_id);
+  static bool ClaimPendingUnregister(const std::shared_ptr<State>& state,
+                                     int64_t texture_id);
+  static void UnregisterOwnedTextureOnPlatform(
+      const std::shared_ptr<State>& state, int64_t texture_id);
+  static void ResetPendingUnregister(const std::shared_ptr<State>& state,
+                                     int64_t texture_id);
 
   std::shared_ptr<State> state_;
   std::unique_ptr<CameraPreviewSession> session_;
 };
 
-using EncoderEventSender =
-    std::function<void(flutter::EncodableValue event)>;
+using EncoderEventSender = std::function<void(flutter::EncodableValue event)>;
 
 class EncoderChannel final {
  public:
@@ -69,8 +74,7 @@ class EncoderChannel final {
   EncoderChannel(const EncoderChannel&) = delete;
   EncoderChannel& operator=(const EncoderChannel&) = delete;
 
-  void Handle(std::string_view method,
-              const flutter::EncodableValue* arguments,
+  void Handle(std::string_view method, const flutter::EncodableValue* arguments,
               std::unique_ptr<hmw::FlutterResult> result);
   void Shutdown();
 
