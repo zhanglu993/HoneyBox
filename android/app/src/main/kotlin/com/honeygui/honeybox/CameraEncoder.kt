@@ -138,6 +138,7 @@ class CameraEncoder(
     @Volatile private var recordToFile = false // mux frames into a local file
     private val softwareSessionGate = CameraSoftwareSessionGate()
     private val cameraSessionGeneration = CameraSessionGeneration()
+    private val cameraCallbacks = CameraSessionCallbackGate(cameraSessionGeneration)
 
     private data class SoftwareCodecSession(
         val token: CameraSoftwareSessionGate.Token,
@@ -259,9 +260,10 @@ class CameraEncoder(
                 sensorOrientation, facingFront, cfg.width, cfg.height, cfg.cropZoom,
             )
             gl.start(captureSize.width, captureSize.height) { camSurface ->
-                if (!cameraSessionGeneration.isCurrent(token)) return@start
-                gl.setPreviewSurface(previewSurface, previewSize.width, previewSize.height)
-                openDevice(id, camSurface, token)
+                cameraCallbacks.onGlSurface(token) {
+                    gl.setPreviewSurface(previewSurface, previewSize.width, previewSize.height)
+                    openDevice(id, camSurface, token)
+                }
             }
         } catch (e: Exception) {
             emitCameraError("打开摄像头失败: ${e.message}", token)
@@ -276,14 +278,13 @@ class CameraEncoder(
         try {
             cameraManager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
-                    val accepted = cameraSessionGeneration.commitIfCurrent(token) {
+                    cameraCallbacks.onCameraOpened(
+                        token,
+                        closeStale = device::close,
+                    ) {
                         cameraDevice = device
+                        buildSession(cameraSurface, device, token)
                     }
-                    if (!accepted) {
-                        device.close()
-                        return
-                    }
-                    buildSession(cameraSurface, device, token)
                 }
 
                 override fun onDisconnected(device: CameraDevice) {
@@ -319,12 +320,14 @@ class CameraEncoder(
                 listOf(cameraSurface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
-                        val accepted = cameraSessionGeneration.commitIfCurrent(token) {
+                        cameraCallbacks.onCaptureConfigured(
+                            token,
+                            closeStale = session::close,
+                        ) {
                             captureSession = session
                             issueRepeating(token)
                             emitCameraReady(token)
                         }
-                        if (!accepted) session.close()
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -1551,22 +1554,23 @@ class CameraEncoder(
         val evMax = if (range != null) range.upper * aeCompStep else 0.0
         val focusSupported = maxAfRegions > 0 || maxAeRegions > 0
         mainHandler.post {
-            if (!cameraSessionGeneration.isCurrent(token)) return@post
-            events.onEvent(
-                mapOf(
-                    "event" to "camera",
-                    "textureId" to id,
-                    "previewWidth" to pw,
-                    "previewHeight" to ph,
-                    // Rotation is handled in GL, so the texture is already upright.
-                    "sensorOrientation" to 0,
-                    "facingFront" to facingFront,
-                    "evMin" to evMin,
-                    "evMax" to evMax,
-                    "evStep" to aeCompStep,
-                    "focusSupported" to focusSupported,
-                ),
-            )
+            cameraCallbacks.emitReady(token) {
+                events.onEvent(
+                    mapOf(
+                        "event" to "camera",
+                        "textureId" to id,
+                        "previewWidth" to pw,
+                        "previewHeight" to ph,
+                        // Rotation is handled in GL, so the texture is already upright.
+                        "sensorOrientation" to 0,
+                        "facingFront" to facingFront,
+                        "evMin" to evMin,
+                        "evMax" to evMax,
+                        "evStep" to aeCompStep,
+                        "focusSupported" to focusSupported,
+                    ),
+                )
+            }
         }
     }
 
@@ -1575,8 +1579,9 @@ class CameraEncoder(
         token: CameraSessionGeneration.Token,
     ) {
         mainHandler.post {
-            if (!cameraSessionGeneration.isCurrent(token)) return@post
-            events.onEvent(mapOf("event" to "error", "message" to message))
+            cameraCallbacks.emitError(token) {
+                events.onEvent(mapOf("event" to "error", "message" to message))
+            }
         }
     }
 

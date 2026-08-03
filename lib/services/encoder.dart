@@ -466,7 +466,10 @@ class EncoderService {
     _eventSub = null;
     _listenerGeneration++;
     try {
-      await subscription?.cancel();
+      await subscription?.cancel().timeout(
+            _eventCancellationTimeout,
+            onTimeout: () {},
+          );
     } catch (_) {
       // Native close still has to run when event-stream cancellation fails.
     }

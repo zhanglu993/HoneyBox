@@ -218,6 +218,63 @@ void main() {
     expect(closes, 1);
     expect(streams.listenCount, 2);
   });
+
+  test('dispose cancel timeout still closes the native camera', () async {
+    const method = MethodChannel('test/dispose-cancel-timeout');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final cancelGate = Completer<void>();
+    final streams = _EventStreamHarness(onCancel: (_) => cancelGate.future);
+    var closes = 0;
+    messenger.setMockMethodCallHandler(method, (call) async {
+      if (call.method == 'closeCamera') closes++;
+    });
+    addTearDown(() async {
+      if (!cancelGate.isCompleted) cancelGate.complete();
+      messenger.setMockMethodCallHandler(method, null);
+      await streams.close();
+    });
+    final service = EncoderService(
+      method: method,
+      eventStreamFactory: streams.create,
+      eventCancellationTimeout: Duration.zero,
+    );
+
+    service.listen();
+    await service.dispose().timeout(const Duration(milliseconds: 100));
+
+    expect(closes, 1);
+  });
+
+  test('dispose cancel timeout absorbs a native close failure', () async {
+    const method = MethodChannel('test/dispose-timeout-close-error');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final cancelGate = Completer<void>();
+    final streams = _EventStreamHarness(onCancel: (_) => cancelGate.future);
+    var closes = 0;
+    messenger.setMockMethodCallHandler(method, (call) async {
+      if (call.method == 'closeCamera') {
+        closes++;
+        throw PlatformException(code: 'close_failed');
+      }
+    });
+    addTearDown(() async {
+      if (!cancelGate.isCompleted) cancelGate.complete();
+      messenger.setMockMethodCallHandler(method, null);
+      await streams.close();
+    });
+    final service = EncoderService(
+      method: method,
+      eventStreamFactory: streams.create,
+      eventCancellationTimeout: Duration.zero,
+    );
+
+    service.listen();
+    await service.dispose().timeout(const Duration(milliseconds: 100));
+
+    expect(closes, 1);
+  });
 }
 
 class _EventStreamHarness {
