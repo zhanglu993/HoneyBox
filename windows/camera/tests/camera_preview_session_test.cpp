@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -92,6 +93,72 @@ class BlockingSource final : public hcw::CameraFrameSource {
   std::shared_ptr<BlockingSourceState> state_;
 };
 
+class AffinitySourceState final {
+ public:
+  hmw::Result<hcw::CameraFrame> ReadNext() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    worker_thread_ = std::this_thread::get_id();
+    read_started_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this] { return stop_requested_; });
+    return {std::nullopt,
+            hmw::Error{hmw::Status::kCancelled, "source stopped"}};
+  }
+
+  void RequestStop() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stop_requested_ = true;
+    condition_.notify_all();
+  }
+
+  void RecordDestruction() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    destruction_thread_ = std::this_thread::get_id();
+    condition_.notify_all();
+  }
+
+  bool WaitForRead() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 2s, [this] { return read_started_; });
+  }
+
+  bool WaitForDestruction() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(
+        lock, 2s, [this] { return destruction_thread_.has_value(); });
+  }
+
+  bool WasDestroyedOnWorkerThread() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return worker_thread_.has_value() && destruction_thread_.has_value() &&
+           *worker_thread_ == *destruction_thread_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::optional<std::thread::id> worker_thread_;
+  std::optional<std::thread::id> destruction_thread_;
+  bool read_started_ = false;
+  bool stop_requested_ = false;
+};
+
+class AffinitySource final : public hcw::CameraFrameSource {
+ public:
+  explicit AffinitySource(std::shared_ptr<AffinitySourceState> state)
+      : state_(std::move(state)) {}
+  ~AffinitySource() override { state_->RecordDestruction(); }
+
+  hmw::Result<hcw::CameraFrame> ReadNext() override {
+    return state_->ReadNext();
+  }
+
+  void RequestStop() noexcept override { state_->RequestStop(); }
+
+ private:
+  std::shared_ptr<AffinitySourceState> state_;
+};
+
 }  // namespace
 
 HMW_TEST(camera_preview_active_generation_publishes_frames) {
@@ -143,6 +210,22 @@ HMW_TEST(camera_preview_close_is_idempotent_and_joins_worker) {
   HMW_EXPECT(state->stop_requests() == 1);
   HMW_EXPECT(session.Close().ok());
   HMW_EXPECT(state->stop_requests() == 1);
+}
+
+HMW_TEST(camera_preview_source_is_destroyed_on_capture_worker) {
+  const auto state = std::make_shared<AffinitySourceState>();
+  hcw::CameraPreviewSession session(
+      [state](const hcw::CameraPreviewConfig&) {
+        return hmw::Result<std::unique_ptr<hcw::CameraFrameSource>>{
+            std::make_unique<AffinitySource>(state), std::nullopt};
+      },
+      {});
+
+  HMW_EXPECT(session.Open({2, 1, 15}).ok());
+  HMW_EXPECT(state->WaitForRead());
+  HMW_EXPECT(session.Close().ok());
+  HMW_EXPECT(state->WaitForDestruction());
+  HMW_EXPECT(state->WasDestroyedOnWorkerThread());
 }
 
 HMW_TEST(camera_preview_new_open_suppresses_old_generation) {

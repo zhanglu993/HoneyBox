@@ -6,7 +6,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace hcw::internal {
@@ -19,15 +22,29 @@ struct CaptureMode {
   uint32_t native_type_index;
 };
 
+struct BgraBufferView {
+  const uint8_t* buffer_start;
+  size_t buffer_length;
+  const uint8_t* scanline_zero;
+  ptrdiff_t pitch;
+};
+
 std::optional<CaptureMode> SelectCaptureMode(
     const std::vector<CaptureMode>& candidates,
     const CameraPreviewConfig& requested);
 
+using CaptureModeNegotiator = std::function<bool(const CaptureMode&)>;
+std::optional<CaptureMode> SelectNegotiatedCaptureMode(
+    const std::vector<CaptureMode>& candidates,
+    const CameraPreviewConfig& requested,
+    const CaptureModeNegotiator& negotiate);
+
+std::string FormatHresultDetail(std::string_view context, uint32_t result);
+
 // scanline_zero always addresses the logical top row. A negative stride means
 // subsequent logical rows live at lower addresses in the backing buffer.
 hmw::Result<std::vector<uint8_t>> CopyBgraRows(
-    const uint8_t* scanline_zero, size_t buffer_size, uint32_t width,
-    uint32_t height, ptrdiff_t stride);
+    const BgraBufferView& view, uint32_t width, uint32_t height);
 
 hmw::Result<hmw::RgbaFrame> BgraToRgba(
     uint32_t width, uint32_t height, int64_t pts_100ns,

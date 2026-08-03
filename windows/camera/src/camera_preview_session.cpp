@@ -163,6 +163,7 @@ hmw::Outcome CameraPreviewSession::CloseLocked() {
   callback_queue_->AdvanceGeneration(invalid_generation);
   if (source) {
     source->RequestStop();
+    source.reset();
   }
   if (worker.joinable()) {
     if (worker.get_id() == std::this_thread::get_id()) {

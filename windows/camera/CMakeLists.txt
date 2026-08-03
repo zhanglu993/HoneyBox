@@ -20,10 +20,6 @@ target_include_directories(honey_camera_windows_preview PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../media/include"
 )
 
-target_include_directories(honey_camera_windows_preview PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}/../media/src"
-)
-
 target_compile_features(honey_camera_windows_preview PUBLIC cxx_std_17)
 
 target_link_libraries(honey_camera_windows_preview PUBLIC
