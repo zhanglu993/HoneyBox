@@ -1,5 +1,7 @@
 #include "honey_media_windows/windows_media_plugin.h"
 
+#include "windows_media_plugin_internal.h"
+
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/standard_method_codec.h>
@@ -17,7 +19,8 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
       : registrar_(registrar),
         dispatcher_(registrar->GetView() == nullptr
                         ? nullptr
-                        : registrar->GetView()->GetNativeWindow()),
+                        : hmw::internal::ResolvePluginDispatchWindow(
+                              registrar->GetView()->GetNativeWindow())),
         controller_(dispatcher_),
         texture_registry_(
             hmw::CreateFlutterTextureRegistry(

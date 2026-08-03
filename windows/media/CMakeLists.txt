@@ -30,6 +30,7 @@ add_library(honey_media_windows_core
   src/rgba_transform.cpp
   src/video_texture_player.cpp
   src/wic_helpers.cpp
+  src/windows_media_plugin_internal.cpp
 )
 
 target_compile_features(honey_media_windows_core PUBLIC cxx_std_17)
@@ -90,6 +91,7 @@ if(BUILD_TESTING)
     tests/benchmark_support_test.cpp
     tests/conversion_controller_test.cpp
     tests/media_converter_test.cpp
+    tests/windows_media_plugin_internal_test.cpp
   )
   target_link_libraries(honey_media_windows_tests PRIVATE honey_media_core advapi32 bcrypt)
   add_test(NAME media_converter_convert_mov
@@ -122,6 +124,8 @@ if(BUILD_TESTING)
     COMMAND honey_media_windows_tests dispatch_failure_)
   add_test(NAME conversion_controller_win32_dispatcher
     COMMAND honey_media_windows_tests win32_dispatcher_)
+  add_test(NAME windows_media_plugin_dispatch_window
+    COMMAND honey_media_windows_tests win32_dispatch_window_)
 
   set(HMW_FLUTTER_CPP_WRAPPER_DIR "" CACHE PATH
     "Flutter cpp_client_wrapper directory for channel adapter tests")
