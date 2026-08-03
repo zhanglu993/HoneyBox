@@ -1,6 +1,7 @@
 param(
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo', 'MinSizeRel')]
     [string[]]$Configuration,
+    [AllowEmptyString()]
     [string]$TestRegex
 )
 
