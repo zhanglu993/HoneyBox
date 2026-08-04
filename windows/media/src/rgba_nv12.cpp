@@ -41,12 +41,18 @@ uint8_t Luma(uint8_t red, uint8_t green, uint8_t blue) {
   return Clamp(((66 * red + 129 * green + 25 * blue + 128) >> 8) + 16);
 }
 
+int FloorDivideBy256(int value) {
+  const int quotient = value / 256;
+  const int remainder = value % 256;
+  return remainder < 0 ? quotient - 1 : quotient;
+}
+
 uint8_t ChromaU(uint8_t red, uint8_t green, uint8_t blue) {
-  return Clamp(((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128);
+  return Clamp(FloorDivideBy256(-38 * red - 74 * green + 112 * blue + 128) + 128);
 }
 
 uint8_t ChromaV(uint8_t red, uint8_t green, uint8_t blue) {
-  return Clamp(((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128);
+  return Clamp(FloorDivideBy256(112 * red - 94 * green - 18 * blue + 128) + 128);
 }
 
 }  // namespace

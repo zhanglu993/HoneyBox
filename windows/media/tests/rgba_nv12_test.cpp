@@ -69,3 +69,24 @@ HMW_TEST(rgba_nv12_rejects_size_multiplication_overflow) {
   HMW_EXPECT(nv12.error.has_value());
   HMW_EXPECT(nv12.error->status == hmw::Status::kInvalidArgument);
 }
+
+HMW_TEST(rgba_nv12_uses_floor_rounding_for_negative_chroma_terms) {
+  const std::array<uint8_t, 16> red = {
+      255, 0, 0, 0, 255, 0, 0, 0,
+      255, 0, 0, 0, 255, 0, 0, 0};
+  const std::array<uint8_t, 16> green = {
+      0, 255, 0, 0, 0, 255, 0, 0,
+      0, 255, 0, 0, 0, 255, 0, 0};
+
+  const auto red_nv12 =
+      hmw::internal::RgbaToNv12(2, 2, red.data(), red.size());
+  const auto green_nv12 =
+      hmw::internal::RgbaToNv12(2, 2, green.data(), green.size());
+
+  HMW_EXPECT(red_nv12.ok());
+  HMW_EXPECT(red_nv12.value->at(4) == 90U);
+  HMW_EXPECT(red_nv12.value->at(5) == 240U);
+  HMW_EXPECT(green_nv12.ok());
+  HMW_EXPECT(green_nv12.value->at(4) == 54U);
+  HMW_EXPECT(green_nv12.value->at(5) == 34U);
+}

@@ -25,12 +25,16 @@ bool Add(size_t left, size_t right, size_t* result) {
 }
 
 size_t StartCodeSizeAt(const std::vector<uint8_t>& bytes, size_t position) {
-  if (position + 4U <= bytes.size() && bytes[position] == 0U &&
+  if (position > bytes.size()) {
+    return 0U;
+  }
+  const size_t remaining = bytes.size() - position;
+  if (remaining >= 4U && bytes[position] == 0U &&
       bytes[position + 1U] == 0U && bytes[position + 2U] == 0U &&
       bytes[position + 3U] == 1U) {
     return 4U;
   }
-  if (position + 3U <= bytes.size() && bytes[position] == 0U &&
+  if (remaining >= 3U && bytes[position] == 0U &&
       bytes[position + 1U] == 0U && bytes[position + 2U] == 1U) {
     return 3U;
   }
@@ -94,7 +98,7 @@ bool ParseLengthPrefixed(const std::vector<uint8_t>& sample,
 
 bool ReadUint16(const std::vector<uint8_t>& bytes, size_t* position,
                 uint16_t* value) {
-  if (bytes.size() - *position < 2U) {
+  if (*position > bytes.size() || bytes.size() - *position < 2U) {
     return false;
   }
   *value = static_cast<uint16_t>((static_cast<uint16_t>(bytes[*position]) << 8U) |
@@ -112,7 +116,7 @@ bool ReadParameterSets(const std::vector<uint8_t>& header, size_t* position,
   for (size_t i = 0U; i < count; ++i) {
     uint16_t size = 0U;
     if (!ReadUint16(header, position, &size) || size == 0U ||
-        size > header.size() - *position) {
+        *position > header.size() || size > header.size() - *position) {
       return false;
     }
     const size_t end = *position + size;
@@ -160,7 +164,9 @@ void AppendNormalized(const std::vector<std::vector<uint8_t>>& nals,
 
 Outcome H264AnnexBNormalizer::SetSequenceHeader(
     const std::vector<uint8_t>& sequence_header) {
-  if (sequence_header.size() < 7U || sequence_header[0] != 1U) {
+  if (sequence_header.size() < 7U || sequence_header[0] != 1U ||
+      (sequence_header[4] & 0xfcU) != 0xfcU ||
+      (sequence_header[5] & 0xe0U) != 0xe0U) {
     return InvalidArgument("Invalid AVCC sequence header.");
   }
 
@@ -183,15 +189,18 @@ Outcome H264AnnexBNormalizer::SetSequenceHeader(
   nal_length_size_ = next_length_size;
   sps_ = std::move(next_sps);
   pps_ = std::move(next_pps);
+  avcc_configuration_set_ = true;
   return {};
 }
 
 Result<H264AnnexBAccessUnit> H264AnnexBNormalizer::Normalize(
     const std::vector<uint8_t>& sample, bool clean_point) const {
   std::vector<std::vector<uint8_t>> nals;
-  const bool parsed = StartCodeSizeAt(sample, 0U) != 0U
-                          ? ParseAnnexB(sample, &nals)
-                          : ParseLengthPrefixed(sample, nal_length_size_, &nals);
+  const bool parsed = avcc_configuration_set_
+                          ? ParseLengthPrefixed(sample, nal_length_size_, &nals)
+                          : StartCodeSizeAt(sample, 0U) != 0U
+                                ? ParseAnnexB(sample, &nals)
+                                : ParseLengthPrefixed(sample, nal_length_size_, &nals);
   if (!parsed) {
     return InvalidAccessUnit("Malformed H.264 access unit.");
   }

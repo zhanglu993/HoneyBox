@@ -21,6 +21,7 @@ class H264AnnexBNormalizer {
 
  private:
   size_t nal_length_size_ = 4U;
+  bool avcc_configuration_set_ = false;
   std::vector<std::vector<uint8_t>> sps_;
   std::vector<std::vector<uint8_t>> pps_;
 };
