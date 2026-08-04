@@ -264,14 +264,14 @@ HRESULT SetCodecBoolIfSupported(ICodecAPI* codec_api,
     return S_FALSE;
   }
   if (result != S_OK) {
-    return result;
+    return FAILED(result) ? result : E_FAIL;
   }
   result = codec_api->IsModifiable(&property);
   if (result == S_FALSE || result == E_NOTIMPL) {
     return S_FALSE;
   }
   if (result != S_OK) {
-    return result;
+    return FAILED(result) ? result : E_FAIL;
   }
   VARIANT setting;
   VariantInit(&setting);
@@ -285,10 +285,13 @@ HRESULT SetCodecBoolIfSupported(ICodecAPI* codec_api,
 class MediaFoundationH264Encoder final : public EncoderBackend {
  public:
   explicit MediaFoundationH264Encoder(
-      std::shared_ptr<H264TransformProvider> provider)
-      : provider_holder_(
-            std::make_unique<std::shared_ptr<H264TransformProvider>>(
-                std::move(provider))) {}
+      std::shared_ptr<H264TransformProvider> provider) {
+    if (provider != nullptr) {
+      provider_holder_ =
+          std::make_unique<std::shared_ptr<H264TransformProvider>>(
+              std::move(provider));
+    }
+  }
   ~MediaFoundationH264Encoder() override {
     if (started_ && !IsOwnerThread()) {
       AbandonWrongThreadResources();
@@ -393,8 +396,8 @@ HRESULT MediaFoundationH264Encoder::ConfigureCodec(
   if (SUCCEEDED(result)) {
     const HRESULT low_latency = SetCodecBoolIfSupported(
         candidate.Get(), CODECAPI_AVLowLatencyMode, true);
-    if (FAILED(low_latency)) {
-      result = low_latency;
+    if (low_latency != S_OK && low_latency != S_FALSE) {
+      result = FAILED(low_latency) ? low_latency : E_FAIL;
     }
   }
   if (SUCCEEDED(result)) {
@@ -556,68 +559,72 @@ Outcome MediaFoundationH264Encoder::Start(const EncodingConfig& config) {
       std::move(*runtime.value));
 
   if (provider_holder_ != nullptr && *provider_holder_ != nullptr) {
-    auto candidates =
-        (*provider_holder_)->EnumerateSynchronousLocal();
-    if (!candidates.ok()) {
-      const auto error = candidates.error.has_value()
-                             ? *candidates.error
-                             : Error{Status::kCodecUnavailable,
-                                     "H.264 transform provider failed."};
-      ResetResources();
-      return {error};
-    }
-    for (const auto& candidate : *candidates.value) {
-      if (candidate != nullptr &&
-          ConfigureCandidate(candidate.get(), config)) {
-        config_ = config;
-        started_ = true;
-        drained_ = false;
-        force_keyframe_ = false;
-        return {};
+    Error failure{Status::kCodecUnavailable,
+                  "No injected synchronous local H.264 transform "
+                  "could honor the required configuration."};
+    {
+      auto candidates =
+          (*provider_holder_)->EnumerateSynchronousLocal();
+      if (!candidates.ok()) {
+        failure = candidates.error.has_value()
+                      ? *candidates.error
+                      : Error{Status::kCodecUnavailable,
+                              "H.264 transform provider failed."};
+      } else {
+        for (const auto& candidate : *candidates.value) {
+          if (candidate != nullptr &&
+              ConfigureCandidate(candidate.get(), config)) {
+            config_ = config;
+            started_ = true;
+            drained_ = false;
+            force_keyframe_ = false;
+            return {};
+          }
+        }
       }
     }
     ResetResources();
-    return Failure(Status::kCodecUnavailable,
-                   "No injected synchronous local H.264 transform "
-                   "could honor the required configuration.");
+    return {failure};
   }
 
-  MFT_REGISTER_TYPE_INFO input_info{MFMediaType_Video, MFVideoFormat_NV12};
-  MFT_REGISTER_TYPE_INFO output_info{MFMediaType_Video, MFVideoFormat_H264};
-  ActivateArray activations;
-  result = MFTEnumEx(
-      MFT_CATEGORY_VIDEO_ENCODER,
-      MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT |
-          MFT_ENUM_FLAG_SORTANDFILTER,
-      &input_info, &output_info, activations.put(), activations.count_put());
-  if (FAILED(result)) {
-    ResetResources();
-    return {HresultError(Status::kCodecUnavailable,
-                         "Synchronous local H.264 encoder enumeration failed",
-                         result)};
-  }
-
-  for (UINT32 i = 0U; i < activations.count(); ++i) {
-    ComPtr<IMFTransform> candidate;
-    result = activations[i]->ActivateObject(
-        __uuidof(IMFTransform),
-        reinterpret_cast<void**>(candidate.ReleaseAndGetAddressOf()));
-    if (FAILED(result) || candidate == nullptr) {
-      continue;
+  Error failure{
+      Status::kCodecUnavailable,
+      "No synchronous local Media Foundation H.264 encoder "
+      "could honor the required Baseline CBR configuration."};
+  {
+    MFT_REGISTER_TYPE_INFO input_info{MFMediaType_Video, MFVideoFormat_NV12};
+    MFT_REGISTER_TYPE_INFO output_info{MFMediaType_Video, MFVideoFormat_H264};
+    ActivateArray activations;
+    result = MFTEnumEx(
+        MFT_CATEGORY_VIDEO_ENCODER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT |
+            MFT_ENUM_FLAG_SORTANDFILTER,
+        &input_info, &output_info, activations.put(), activations.count_put());
+    if (FAILED(result)) {
+      failure = HresultError(
+          Status::kCodecUnavailable,
+          "Synchronous local H.264 encoder enumeration failed", result);
+    } else {
+      for (UINT32 i = 0U; i < activations.count(); ++i) {
+        ComPtr<IMFTransform> candidate;
+        result = activations[i]->ActivateObject(
+            __uuidof(IMFTransform),
+            reinterpret_cast<void**>(candidate.ReleaseAndGetAddressOf()));
+        if (FAILED(result) || candidate == nullptr) {
+          continue;
+        }
+        if (ConfigureCandidate(candidate.Get(), config)) {
+          config_ = config;
+          started_ = true;
+          drained_ = false;
+          force_keyframe_ = false;
+          return {};
+        }
+      }
     }
-    if (ConfigureCandidate(candidate.Get(), config)) {
-      config_ = config;
-      started_ = true;
-      drained_ = false;
-      force_keyframe_ = false;
-      return {};
-    }
   }
-
   ResetResources();
-  return Failure(Status::kCodecUnavailable,
-                 "No synchronous local Media Foundation H.264 encoder "
-                 "could honor the required Baseline CBR configuration.");
+  return {failure};
 }
 
 HRESULT MediaFoundationH264Encoder::CreateInputSample(

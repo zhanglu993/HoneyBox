@@ -9,6 +9,7 @@
 #include <mfapi.h>
 #include <mferror.h>
 #include <mftransform.h>
+#include <objbase.h>
 #include <wrl/client.h>
 
 
@@ -159,9 +160,13 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
   ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
 
   ULONG STDMETHODCALLTYPE Release() override {
+    ULONG_PTR context_token = 0U;
+    const bool apartment_active =
+        CoGetContextToken(&context_token) == S_OK;
     {
       std::lock_guard<std::mutex> lock(release_mutex_);
       release_threads_.push_back(std::this_thread::get_id());
+      release_apartment_active_.push_back(apartment_active);
     }
     const ULONG references = --references_;
     if (references == 0U) {
@@ -526,6 +531,20 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
     return static_cast<size_t>(std::count(release_threads_.begin(),
                                          release_threads_.end(), thread));
   }
+  bool AllReleasesOnHadApartment(std::thread::id thread) {
+    std::lock_guard<std::mutex> lock(release_mutex_);
+    bool found = false;
+    for (size_t i = 0U; i < release_threads_.size(); ++i) {
+      if (release_threads_[i] != thread) {
+        continue;
+      }
+      found = true;
+      if (!release_apartment_active_[i]) {
+        return false;
+      }
+    }
+    return found;
+  }
 
  private:
   ~FakeH264Transform() = default;
@@ -540,6 +559,7 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
   ComPtr<IMFMediaType> output_type_;
   std::mutex release_mutex_;
   std::vector<std::thread::id> release_threads_;
+  std::vector<bool> release_apartment_active_;
 };
 
 class FakeH264Provider final
@@ -547,10 +567,14 @@ class FakeH264Provider final
  public:
   hmw::Result<std::vector<std::shared_ptr<IMFTransform>>>
   EnumerateSynchronousLocal() override {
+    if (move_on_enumerate) {
+      return {std::move(transforms), std::nullopt};
+    }
     return {transforms, std::nullopt};
   }
 
   std::vector<std::shared_ptr<IMFTransform>> transforms;
+  bool move_on_enumerate = false;
 };
 
 std::pair<std::shared_ptr<FakeH264Provider>, FakeH264Transform*>
@@ -573,6 +597,19 @@ size_t CallIndex(const std::vector<std::string>& calls,
              ? calls.size()
              : static_cast<size_t>(found - calls.begin());
 }
+
+struct ApartmentReleaseProbe {
+  void Record() {
+    ULONG_PTR context_token = 0U;
+    released = true;
+    apartment_active = CoGetContextToken(&context_token) == S_OK;
+    thread = std::this_thread::get_id();
+  }
+
+  bool released = false;
+  bool apartment_active = false;
+  std::thread::id thread{};
+};
 
 }  // namespace
 
@@ -895,4 +932,124 @@ HMW_TEST(media_foundation_h264_encoder_wrong_thread_destructor_does_not_release_
   backend.reset();
 
   HMW_EXPECT(transform->ReleasesOn(destroy_thread) == 0U);
+}
+
+HMW_TEST(media_foundation_h264_encoder_rejects_unexpected_positive_optional_hresult) {
+  constexpr HRESULT kUnexpectedSuccess = static_cast<HRESULT>(2L);
+  struct Case {
+    HRESULT support;
+    HRESULT modifiable;
+  };
+  const Case cases[] = {
+      {kUnexpectedSuccess, S_OK},
+      {S_OK, kUnexpectedSuccess},
+  };
+  for (const auto& scripted : cases) {
+    auto [provider, transform] = FakeBackend(false, false, false);
+    transform->low_latency_support = scripted.support;
+    transform->low_latency_modifiable = scripted.modifiable;
+    auto backend =
+        hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+    const auto started = backend->Start(H264Config());
+
+    HMW_EXPECT(!started.ok());
+    HMW_EXPECT(started.error.has_value());
+    if (started.error) {
+      HMW_EXPECT(started.error->status == hmw::Status::kCodecUnavailable);
+    }
+  }
+}
+
+HMW_TEST(media_foundation_h264_encoder_releases_rejected_candidate_before_apartment_shutdown) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  provider->move_on_enumerate = true;
+  transform->required_support = S_FALSE;
+  transform->AddRef();
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  hmw::Outcome started;
+  std::thread::id owner_thread;
+  std::thread owner([&] {
+    owner_thread = std::this_thread::get_id();
+    started = backend->Start(H264Config());
+  });
+  owner.join();
+
+  HMW_EXPECT(!started.ok());
+  HMW_EXPECT(transform->AllReleasesOnHadApartment(owner_thread));
+  backend.reset();
+  transform->Release();
+}
+
+HMW_TEST(media_foundation_h264_encoder_releases_unusable_candidate_before_apartment_shutdown) {
+  auto provider = std::make_shared<FakeH264Provider>();
+  provider->move_on_enumerate = true;
+  auto probe = std::make_shared<ApartmentReleaseProbe>();
+  provider->transforms.emplace_back(
+      static_cast<IMFTransform*>(nullptr),
+      [probe](IMFTransform*) { probe->Record(); });
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  hmw::Outcome started;
+  std::thread::id owner_thread;
+  std::thread owner([&] {
+    owner_thread = std::this_thread::get_id();
+    started = backend->Start(H264Config());
+  });
+  owner.join();
+
+  HMW_EXPECT(!started.ok());
+  HMW_EXPECT(probe->released);
+  HMW_EXPECT(probe->apartment_active);
+  HMW_EXPECT(probe->thread == owner_thread);
+}
+
+HMW_TEST(media_foundation_h264_encoder_can_start_again_after_stop) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  HMW_EXPECT(backend->Stop().ok());
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_accepts_true_double_stop) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  HMW_EXPECT(backend->Stop().ok());
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_owner_worker_stop_releases_normally) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  provider->move_on_enumerate = true;
+  transform->AddRef();
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  hmw::Outcome started;
+  hmw::Outcome stopped;
+  std::thread::id owner_thread;
+  std::thread owner([&] {
+    owner_thread = std::this_thread::get_id();
+    started = backend->Start(H264Config());
+    if (started.ok()) {
+      stopped = backend->Stop();
+    }
+  });
+  owner.join();
+
+  HMW_EXPECT(started.ok());
+  HMW_EXPECT(stopped.ok());
+  HMW_EXPECT(transform->ReleasesOn(owner_thread) >= 3U);
+  HMW_EXPECT(transform->AllReleasesOnHadApartment(owner_thread));
+  HMW_EXPECT(transform->ReleasesOn(std::this_thread::get_id()) == 0U);
+  backend.reset();
+  HMW_EXPECT(transform->ReleasesOn(std::this_thread::get_id()) == 0U);
+  transform->Release();
 }
