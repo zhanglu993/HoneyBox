@@ -108,7 +108,7 @@ class StreamSession {
     int retransmitFrameLimit = 3,
   })  : _openTimeout = openTimeout,
         _creditTimeout = creditTimeout,
-        _retxKeep = retransmitFrameLimit;
+        _retxKeep = retransmitFrameLimit < 0 ? 0 : retransmitFrameLimit;
 
   StreamState _state = StreamState.idle;
   int _sessionId = 0;
@@ -126,6 +126,7 @@ class StreamSession {
 
   Completer<bool>? _openCompleter;
   Timer? _openTimer;
+  Future<bool> _frameQueue = Future<bool>.value(true);
 
   /// Retransmit buffers: frame_seq → (byte_offset → chunk). Keeps the last
   /// [_retxKeep] frames so a device gap report that arrives after we've moved
@@ -145,7 +146,7 @@ class StreamSession {
 
   /// Open a stream session and await the device KS_ACK. Returns false on
   /// timeout / rejection.
-  Future<bool> open(int codec, int w, int h, int fps) async {
+  Future<bool> open(int codec, int w, int h, int fps) {
     final generation = ++_operationGeneration;
     _cancelPendingOpen();
     _sessionId = (_sessionId + 1) & 0xFF;
@@ -174,16 +175,12 @@ class StreamSession {
     });
 
     try {
-      await send(buildStreamOpen(_sessionId, codec, w, h, fps));
+      unawaited(
+          send(buildStreamOpen(_sessionId, codec, w, h, fps)).catchError((_) {
+        _failOpenTransport(generation, completer);
+      }));
     } catch (_) {
-      if (generation == _operationGeneration && _openCompleter == completer) {
-        _openTimer?.cancel();
-        _openTimer = null;
-        _state = StreamState.idle;
-        _openCompleter = null;
-        _lastOpenFailure = StreamOpenFailure.transport;
-        if (!completer.isCompleted) completer.complete(false);
-      }
+      _failOpenTransport(generation, completer);
     }
     return completer.future;
   }
@@ -191,9 +188,21 @@ class StreamSession {
   /// Split one frame into KS_FRAME chunks and send them, honouring credit flow
   /// control (sliding window). Returns false if the frame was dropped (credit
   /// timeout / session closed / write error).
-  Future<bool> sendFrame(Uint8List frameBytes) async {
-    if (_state != StreamState.open) return false;
+  Future<bool> sendFrame(Uint8List frameBytes) {
+    if (_state != StreamState.open) return Future<bool>.value(false);
     final generation = _operationGeneration;
+    final next = _frameQueue.then((_) => _sendFrame(frameBytes, generation));
+    _frameQueue = next.then<bool>(
+      (_) => true,
+      onError: (Object _, StackTrace __) => false,
+    );
+    return next;
+  }
+
+  Future<bool> _sendFrame(Uint8List frameBytes, int generation) async {
+    if (generation != _operationGeneration || _state != StreamState.open) {
+      return false;
+    }
     final cs = chunkSize();
     if (cs <= 0) return false;
     final seq = _frameSeq;
@@ -207,7 +216,6 @@ class StreamSession {
       _retxFrames.remove(_retxFrames.keys.first);
     }
 
-    final writes = <Future<void>>[];
     for (int off = 0; off < total; off += cs) {
       if (_flowOn) {
         while (_credits <= 0) {
@@ -228,17 +236,15 @@ class StreamSession {
       final chunk = Uint8List.sublistView(frameBytes, off, end);
       retxBuf[off] = _RetxEntry(chunk, total);
       try {
-        writes.add(send(buildStreamChunk(seq, off, total, chunk)));
+        await send(buildStreamChunk(seq, off, total, chunk));
       } catch (_) {
         return false;
       }
+      if (generation != _operationGeneration || _state != StreamState.open) {
+        return false;
+      }
     }
-    try {
-      await Future.wait(writes, eagerError: false);
-    } catch (_) {
-      return false;
-    }
-    return generation == _operationGeneration && _state == StreamState.open;
+    return true;
   }
 
   /// Close the session (sends KS_CLOSE).
@@ -283,6 +289,17 @@ class StreamSession {
     _openCompleter = null;
   }
 
+  void _failOpenTransport(int generation, Completer<bool> completer) {
+    if (generation != _operationGeneration || _openCompleter != completer) {
+      return;
+    }
+    _openTimer?.cancel();
+    _openTimer = null;
+    _state = StreamState.idle;
+    _openCompleter = null;
+    _lastOpenFailure = StreamOpenFailure.transport;
+    if (!completer.isCompleted) completer.complete(false);
+  }
   // ──────────────────────────────────────────────────────────────────────
   // Inbound (KS_ACK / KS_CREDIT / KS_REPORT)
   // ──────────────────────────────────────────────────────────────────────
@@ -307,7 +324,7 @@ class StreamSession {
   }
 
   void _onAck(Uint8List v) {
-    if (v.length < 2 || v[0] != _sessionId) return;
+    if ((v.length != 2 && v.length < 4) || v[0] != _sessionId) return;
     final c = _openCompleter;
     if (c == null) return;
     _openTimer?.cancel();

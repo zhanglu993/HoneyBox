@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -59,18 +60,21 @@ void main() {
       );
     });
 
-    test('matching ACK opens and mismatched or truncated ACK is ignored', () async {
+    test('matching ACK opens and mismatched or truncated ACK is ignored',
+        () async {
       final opening = session.open(StreamCodec.h264, 368, 368, 15);
       session.onNotify(
         Uint8List.fromList([BleCmd.stream, 0, BleCmdStreamKey.ack, 0, 1, 0xff]),
       );
       expect(session.state, StreamState.opening);
-      session.onNotify(_ack(sid: _sidFromOpen(sent.single), result: 0, credits: 2));
+      session.onNotify(
+          _ack(sid: _sidFromOpen(sent.single), result: 0, credits: 2));
       expect(await opening, isTrue);
       expect(session.credits, 2);
     });
 
-    test('close and disconnect complete pending waits and stale ACK cannot reopen',
+    test(
+        'close and disconnect complete pending waits and stale ACK cannot reopen',
         () async {
       final opening = session.open(StreamCodec.h264, 368, 368, 15);
       final sid = _sidFromOpen(sent.single);
@@ -82,7 +86,8 @@ void main() {
       final reopening = session.open(StreamCodec.h264, 368, 368, 15);
       session.onDisconnect();
       expect(await reopening, isFalse);
-      session.onNotify(_ack(sid: _sidFromOpen(sent.last), result: 0, credits: 2));
+      session
+          .onNotify(_ack(sid: _sidFromOpen(sent.last), result: 0, credits: 2));
       expect(session.state, StreamState.idle);
     });
 
@@ -92,7 +97,8 @@ void main() {
       expect(session.state, StreamState.idle);
     });
 
-    test('nonzero ACK result rejects the open and records the result', () async {
+    test('nonzero ACK result rejects the open and records the result',
+        () async {
       final opening = session.open(StreamCodec.h264, 368, 368, 15);
       session.onNotify(_ack(sid: _sidFromOpen(sent.single), result: 7));
       expect(await opening, isFalse);
@@ -111,14 +117,18 @@ void main() {
 
     test('credit timeout drops a frame when no credits arrive', () async {
       final opening = session.open(StreamCodec.h264, 368, 368, 15);
-      session.onNotify(_ack(sid: _sidFromOpen(sent.single), result: 0, credits: 0));
+      session.onNotify(
+          _ack(sid: _sidFromOpen(sent.single), result: 0, credits: 0));
       expect(await opening, isTrue);
       expect(await session.sendFrame(Uint8List(4)), isFalse);
     });
 
-    test('REPORT retransmits every buffered chunk intersecting a gap', () async {
+    test('REPORT retransmits every buffered chunk intersecting a gap',
+        () async {
       await _openUnlimited(session, sent);
-      expect(await session.sendFrame(Uint8List.fromList([0, 1, 2, 3, 4, 5, 6, 7])), isTrue);
+      expect(
+          await session.sendFrame(Uint8List.fromList([0, 1, 2, 3, 4, 5, 6, 7])),
+          isTrue);
       final countBeforeReport = sent.length;
       session.onNotify(_report(_sidFromOpen(sent.first), 0, [
         [3, 5],
@@ -144,7 +154,8 @@ void main() {
       expect(sent, hasLength(countBeforeReport));
     });
 
-    test('malformed declared lengths are ignored without state changes', () async {
+    test('malformed declared lengths are ignored without state changes',
+        () async {
       final opening = session.open(StreamCodec.h264, 368, 368, 15);
       final sid = _sidFromOpen(sent.single);
       session.onNotify(Uint8List.fromList([
@@ -171,6 +182,131 @@ void main() {
       expect(session.credits, 1);
     });
 
+    test('open timeout resolves while OPEN transport write is pending',
+        () async {
+      final pendingWrite = Completer<void>();
+      final blocked = StreamSession(
+        send: (_) => pendingWrite.future,
+        chunkSize: () => 4,
+        openTimeout: const Duration(milliseconds: 20),
+      );
+
+      final result = await blocked
+          .open(StreamCodec.h264, 368, 368, 15)
+          .timeout(const Duration(milliseconds: 80), onTimeout: () => true);
+
+      expect(result, isFalse);
+      expect(blocked.lastOpenFailure, StreamOpenFailure.timeout);
+    });
+
+    test('close and disconnect resolve OPEN waits while transport writes pend',
+        () async {
+      for (final abort in <void Function(StreamSession)>[
+        (value) => value.close(),
+        (value) => value.onDisconnect(),
+      ]) {
+        final pendingWrite = Completer<void>();
+        final blocked = StreamSession(
+          send: (_) => pendingWrite.future,
+          chunkSize: () => 4,
+        );
+
+        final opening = blocked.open(StreamCodec.h264, 368, 368, 15);
+        abort(blocked);
+        final result = await opening.timeout(
+          const Duration(milliseconds: 80),
+          onTimeout: () => true,
+        );
+
+        expect(result, isFalse);
+      }
+    });
+
+    test('concurrent frames share credits without leaving a waiter pending',
+        () async {
+      final opening = session.open(StreamCodec.h264, 368, 368, 15);
+      final sid = _sidFromOpen(sent.single);
+      session.onNotify(_ack(sid: sid, result: 0, credits: 0));
+      expect(await opening, isTrue);
+
+      final first = session.sendFrame(Uint8List.fromList([1]));
+      final second = session.sendFrame(Uint8List.fromList([2]));
+      session.onNotify(_credit(sid, 2));
+
+      expect(
+        await first.timeout(const Duration(milliseconds: 80),
+            onTimeout: () => false),
+        isTrue,
+      );
+      expect(await second, isTrue);
+    });
+
+    test('large frames observe writes serially instead of queuing every chunk',
+        () async {
+      final pendingWrites = <Completer<void>>[];
+      var holdFrameWrites = false;
+      final serial = StreamSession(
+        send: (_) {
+          if (!holdFrameWrites) return Future<void>.value();
+          final pending = Completer<void>();
+          pendingWrites.add(pending);
+          return pending.future;
+        },
+        chunkSize: () => 4,
+      );
+      final opening = serial.open(StreamCodec.h264, 368, 368, 15);
+      // OPEN uses the immediate branch; the test controls only frame writes.
+      serial.onNotify(_ack(sid: 1, result: 0));
+      expect(await opening, isTrue);
+      holdFrameWrites = true;
+
+      final sending = serial.sendFrame(Uint8List(12));
+      await Future<void>.delayed(Duration.zero);
+      expect(pendingWrites, hasLength(1));
+      pendingWrites[0].complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(pendingWrites, hasLength(2));
+      pendingWrites[1].complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(pendingWrites, hasLength(3));
+      pendingWrites[2].complete();
+      expect(await sending, isTrue);
+    });
+
+    test('three-byte ACK value is ignored until full credits arrive', () async {
+      final opening = session.open(StreamCodec.h264, 368, 368, 15);
+      final sid = _sidFromOpen(sent.single);
+      session.onNotify(Uint8List.fromList([
+        BleCmd.stream,
+        0,
+        BleCmdStreamKey.ack,
+        0,
+        3,
+        sid,
+        0,
+        0,
+      ]));
+      expect(session.state, StreamState.opening);
+      session.onNotify(_ack(sid: sid, result: 0, credits: 2));
+      expect(await opening, isTrue);
+      expect(session.credits, 2);
+    });
+
+    test('negative retransmit frame limit clamps to zero safely', () async {
+      final negative = StreamSession(
+        send: (l2) async => sent.add(Uint8List.fromList(l2)),
+        chunkSize: () => 4,
+        retransmitFrameLimit: -1,
+      );
+      await _openUnlimited(negative, sent);
+      expect(await negative.sendFrame(Uint8List.fromList([1])), isTrue);
+      final countBeforeReport = sent.length;
+      negative.onNotify(_report(_sidFromOpen(sent.first), 0, [
+        [0, 1],
+      ]));
+      await Future<void>.delayed(Duration.zero);
+      expect(sent, hasLength(countBeforeReport));
+    });
     test('sendFrame observes every queued write failure', () async {
       final sent = <Uint8List>[];
       var write = 0;
