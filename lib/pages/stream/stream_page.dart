@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -35,6 +34,7 @@ class StreamPage extends ConsumerStatefulWidget {
   final Future<PermissionStatus> Function()? requestCameraPermission;
   final Future<EncoderConfig> Function()? loadEncoderConfig;
   final Duration cameraReadyTimeout;
+  final StreamTransport Function(StreamTransportKind kind)? transportFactory;
 
   const StreamPage({
     super.key,
@@ -44,6 +44,7 @@ class StreamPage extends ConsumerStatefulWidget {
     this.requestCameraPermission,
     this.loadEncoderConfig,
     this.cameraReadyTimeout = const Duration(seconds: 10),
+    this.transportFactory,
   });
 
   @override
@@ -137,6 +138,11 @@ class _StreamPageState extends ConsumerState<StreamPage>
   /// natively are forwarded here in order via a small bounded queue.
   StreamSession? _session;
   StreamSubscription<Uint8List>? _notifySub;
+  StreamSubscription<bool>? _availabilitySub;
+  int _projectionGeneration = 0;
+  int? _encoderStartedGeneration;
+  int? _encoderStopRequestedGeneration;
+  int? _sendingGeneration;
 
   /// WiFi projection: encoded frames go straight to the TCP client (framed with
   /// the 6-byte WiFi header — no L2 / credits / handshake). The client itself is
@@ -145,7 +151,6 @@ class _StreamPageState extends ConsumerState<StreamPage>
   TcpVideoClient? _wifiClient;
 
   final List<(Uint8List, bool)> _sendQueue = []; // (frame, isKey)
-  bool _sending = false;
   bool _streaming = false; // this run projects (vs. record-only for H.264)
   int _chunkSize = 0; // transport per-KS_FRAME payload budget (for diagnostics)
   static const int _kMaxSendQueue = 6;
@@ -190,30 +195,6 @@ class _StreamPageState extends ConsumerState<StreamPage>
           if (!_streaming) _lastFrameBytes = stats.lastBytes;
         });
       }
-      ..onStarted = (path, w, h) {
-        if (!mounted) return;
-        setState(() {
-          _encoding = true;
-          _result = null;
-          _stats = const EncoderStats();
-          _lastFrameBytes = 0;
-          _frameSnaps.clear();
-          _actualW = w;
-          _actualH = h;
-        });
-        _startInfoTimer();
-      }
-      ..onStopped = (result) {
-        _teardownSession();
-        _stopInfoTimer();
-        if (!mounted) return;
-        setState(() {
-          _encoding = false;
-          _streaming = false;
-          _lastFrameBytes = 0;
-          _result = result;
-        });
-      }
       ..onInfo = (message) {
         if (!mounted || message.isEmpty) return;
         // Stash diagnostics silently; only rendered when the toggle is on.
@@ -227,8 +208,7 @@ class _StreamPageState extends ConsumerState<StreamPage>
           _decodedW = w;
           _decodedH = h;
         });
-      }
-      ..onFrame = _onEncodedFrame;
+      };
 
     _encoder.listen();
     _bootstrapCamera();
@@ -492,18 +472,24 @@ class _StreamPageState extends ConsumerState<StreamPage>
     return (w, h);
   }
 
-  StreamTransport _transportFor(StreamTransportKind kind) => switch (kind) {
+  StreamTransport _defaultTransportFor(StreamTransportKind kind) =>
+      switch (kind) {
         StreamTransportKind.ble =>
           BleStreamTransport(ref.read(bleManagerProvider)),
         StreamTransportKind.wifi => WifiStreamTransport(),
       };
 
+  StreamTransport _transportFor(StreamTransportKind kind) =>
+      widget.transportFactory?.call(kind) ?? _defaultTransportFor(kind);
+
   /// Shutter: start/stop projection. MSV1/JPEG stream over the transport (and
   /// optionally record); H.264 is a file-recording test only.
   Future<void> _toggleProjection() async {
-    if (_encoding) {
-      _encoder.stopEncoding(); // onStopped tears the session down
-      _session?.close();
+    if (_encoding ||
+        _session != null ||
+        _wifiMode ||
+        _encoderStartedGeneration != null) {
+      _stopProjection();
       return;
     }
     setState(() {
@@ -518,13 +504,15 @@ class _StreamPageState extends ConsumerState<StreamPage>
       return;
     }
 
+    _teardownSession();
+    final generation = ++_projectionGeneration;
     final codec = _streamCodec(_config.format);
     final transport = _transportFor(_config.transport);
     if (!transport.isAvailable) {
       if (_config.recordToFile) {
         _flash('未连接可投屏设备，仅本地录制');
         setState(() => _streaming = false);
-        _encoder.startEncoding(_config, stream: false);
+        _startNativeEncoding(generation, stream: false);
       } else {
         _flash(_config.transport == StreamTransportKind.wifi
             ? 'WiFi 投屏即将支持'
@@ -533,29 +521,56 @@ class _StreamPageState extends ConsumerState<StreamPage>
       return;
     }
 
-    // Open the session first so the initial key frame isn't dropped.
-    _teardownSession();
     final session = StreamSession(
       send: transport.send,
       chunkSize: () => transport.chunkSize,
     );
     _session = session;
     _chunkSize = transport.chunkSize;
+    _availabilitySub = transport.availabilityChanges.listen((available) {
+      if (!available) {
+        _handleTransportUnavailable(generation, session);
+      }
+    });
     _notifySub = transport.notifications.listen(session.onNotify);
 
     final (w, h) = _encDims(_config);
     final ok = await session.open(codec, w, h, _config.fps);
-    if (!mounted) return;
+    if (!_isProjectionCurrent(generation, session: session)) return;
     if (!ok) {
-      _teardownSession();
-      _flash('投屏握手失败或超时');
+      final message = _openFailureMessage(session);
+      _teardownSession(expectedSession: session);
+      _flash(message);
+      return;
+    }
+    if (!transport.isAvailable) {
+      _handleTransportUnavailable(generation, session);
       return;
     }
     debugPrint('流/会话已开 codec=0x${codec.toRadixString(16)} ${w}x$h '
         'flowOn=${session.flowOn} 初始信用=${session.credits} chunk=$_chunkSize');
 
     _sendQueue.clear();
-    _sending = false;
+    _resetSendStats();
+    setState(() => _streaming = true);
+    _startNativeEncoding(
+      generation,
+      session: session,
+      stream: true,
+    );
+  }
+
+  String _openFailureMessage(StreamSession session) {
+    return switch (session.lastOpenFailure) {
+      StreamOpenFailure.rejected =>
+        '投屏握手被拒绝（result=0x${(session.lastAckResult ?? 0).toRadixString(16).padLeft(2, '0').toUpperCase()}）',
+      StreamOpenFailure.transport => '投屏握手发送失败',
+      StreamOpenFailure.timeout => '投屏握手超时',
+      StreamOpenFailure.none => '投屏握手失败',
+    };
+  }
+
+  void _resetSendStats() {
     _sentFrames = 0;
     _sentKeys = 0;
     _sentBytes = 0;
@@ -567,68 +582,223 @@ class _StreamPageState extends ConsumerState<StreamPage>
     _sendClock
       ..reset()
       ..start();
-    setState(() => _streaming = true);
-    _encoder.startEncoding(_config, stream: true);
+  }
+
+  bool _isProjectionCurrent(
+    int generation, {
+    StreamSession? session,
+    bool wifi = false,
+    bool requireSink = true,
+  }) {
+    if (!mounted || generation != _projectionGeneration) return false;
+    if (!requireSink) return true;
+    if (wifi) return _wifiMode;
+    return session != null && identical(_session, session);
+  }
+
+  void _bindEncoderRun(
+    int generation, {
+    StreamSession? session,
+    required bool wifi,
+    required bool stream,
+  }) {
+    bool current() => _isProjectionCurrent(
+          generation,
+          session: session,
+          wifi: wifi,
+          requireSink: stream,
+        );
+
+    _encoder
+      ..onStarted = (path, w, h) {
+        if (!current()) return;
+        setState(() {
+          _encoding = true;
+          _result = null;
+          _stats = const EncoderStats();
+          _lastFrameBytes = 0;
+          _frameSnaps.clear();
+          _actualW = w;
+          _actualH = h;
+        });
+        _startInfoTimer();
+      }
+      ..onStopped = (result) {
+        if (!current()) return;
+        _teardownSession(expectedSession: session);
+        _stopInfoTimer();
+        if (!mounted) return;
+        setState(() {
+          _encoding = false;
+          _streaming = false;
+          _lastFrameBytes = 0;
+          _result = result;
+        });
+      }
+      ..onFrame = (data, key) {
+        if (!current()) return;
+        _onEncodedFrame(
+          data,
+          key,
+          generation,
+          session: session,
+          wifi: wifi,
+        );
+      };
+  }
+
+  void _startNativeEncoding(
+    int generation, {
+    StreamSession? session,
+    bool wifi = false,
+    required bool stream,
+  }) {
+    if (!_isProjectionCurrent(
+      generation,
+      session: session,
+      wifi: wifi,
+      requireSink: stream,
+    )) {
+      return;
+    }
+    _encoderStartedGeneration = generation;
+    _encoderStopRequestedGeneration = null;
+    _bindEncoderRun(
+      generation,
+      session: session,
+      wifi: wifi,
+      stream: stream,
+    );
+    unawaited(_encoder.startEncoding(_config, stream: stream).then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {
+        if (!_isProjectionCurrent(
+          generation,
+          session: session,
+          wifi: wifi,
+          requireSink: stream,
+        )) {
+          return;
+        }
+        _teardownSession(expectedSession: session);
+        _stopInfoTimer();
+        if (mounted) {
+          setState(() {
+            _encoding = false;
+            _streaming = false;
+            _error = '编码器启动失败';
+          });
+        }
+      },
+    ));
+  }
+
+  void _stopProjection() {
+    final generation = _projectionGeneration;
+    final stopNative = _encoderStartedGeneration == generation &&
+        _encoderStopRequestedGeneration != generation;
+    if (stopNative) _encoderStopRequestedGeneration = generation;
+    _teardownSession();
+    _stopInfoTimer();
+    if (stopNative) {
+      unawaited(_encoder.stopEncoding().catchError((Object _) {}));
+    }
+    if (mounted) {
+      setState(() {
+        _encoding = false;
+        _streaming = false;
+        _lastFrameBytes = 0;
+      });
+    }
+  }
+
+  void _handleTransportUnavailable(int generation, StreamSession session) {
+    if (!_isProjectionCurrent(generation, session: session)) return;
+    session.onDisconnect();
+    final stopNative = _encoderStartedGeneration == generation &&
+        _encoderStopRequestedGeneration != generation;
+    if (stopNative) _encoderStopRequestedGeneration = generation;
+    _teardownSession(expectedSession: session, closeSession: false);
+    _stopInfoTimer();
+    if (stopNative) {
+      unawaited(_encoder.stopEncoding().catchError((Object _) {}));
+    }
+    if (mounted) {
+      setState(() {
+        _encoding = false;
+        _streaming = false;
+        _lastFrameBytes = 0;
+        _error = '连接已断开';
+      });
+    }
   }
 
   /// Begin a WiFi projection over the TCP video link established by the WiFi
   /// setup page. Unlike BLE, there is no session handshake — frames are wrapped
   /// with the 6-byte WiFi header and written straight to the socket.
   Future<void> _startWifiProjection() async {
+    _teardownSession();
+    final generation = ++_projectionGeneration;
     final wifi = ref.read(wifiManagerProvider);
     if (!wifi.isConnected) {
       if (_config.recordToFile) {
         _flash('WiFi 未连接，仅本地录制');
         setState(() => _streaming = false);
-        _encoder.startEncoding(_config, stream: false);
+        _startNativeEncoding(generation, stream: false);
       } else {
         _flash('WiFi 未连接：请先在「WiFi 配网」页完成连接');
       }
       return;
     }
 
-    _teardownSession();
     _wifiMode = true;
     _wifiClient = wifi.client;
     _chunkSize = 0; // WiFi sends whole frames; no per-write chunk budget
 
     _sendQueue.clear();
-    _sending = false;
-    _sentFrames = 0;
-    _sentKeys = 0;
-    _sentBytes = 0;
-    _sentKeyBytes = 0;
-    _tickFrames = 0;
-    _tickMs = 0;
-    _lastKeyIndex = -1;
-    _lastKeyMs = 0;
-    _sendClock
-      ..reset()
-      ..start();
+    _resetSendStats();
     setState(() => _streaming = true);
     debugPrint('流/WiFi 投屏开始 ${_config.format.label} '
         '${_config.width}x${_config.height}@${_config.fps} → '
         '${_wifiClient?.host}:${_wifiClient?.port}');
-    _encoder.startEncoding(_config, stream: true);
+    _startNativeEncoding(generation, wifi: true, stream: true);
   }
 
   /// Whether the active transport sink can accept a frame right now.
-  bool get _sinkOpen => _wifiMode
-      ? (_wifiClient?.isConnected ?? false)
-      : (_session?.isOpen ?? false);
+  bool _sinkOpenFor(
+    int generation, {
+    StreamSession? session,
+    required bool wifi,
+  }) =>
+      _isProjectionCurrent(
+        generation,
+        session: session,
+        wifi: wifi,
+      ) &&
+      (wifi ? (_wifiClient?.isConnected ?? false) : (session?.isOpen ?? false));
 
   /// Send one frame over the active transport (BLE session or WiFi TCP client).
-  Future<bool> _sendOneFrame(Uint8List frame) {
-    if (_wifiMode) {
+  Future<bool> _sendOneFrame(
+    Uint8List frame, {
+    StreamSession? session,
+    required bool wifi,
+  }) {
+    if (wifi) {
       return _wifiClient?.sendFrame(frame) ?? Future<bool>.value(false);
     }
-    return _session?.sendFrame(frame) ?? Future<bool>.value(false);
+    return session?.sendFrame(frame) ?? Future<bool>.value(false);
   }
 
   /// Forward one encoded frame in order, dropping the backlog and re-syncing
   /// with a fresh key frame when the transport can't keep up.
-  void _onEncodedFrame(Uint8List data, bool key) {
-    if (!_sinkOpen) return;
+  void _onEncodedFrame(
+    Uint8List data,
+    bool key,
+    int generation, {
+    StreamSession? session,
+    required bool wifi,
+  }) {
+    if (!_sinkOpenFor(generation, session: session, wifi: wifi)) return;
     final chunks = _chunkSize > 0 ? (data.length / _chunkSize).ceil() : -1;
     debugPrint('流/编码帧 ${key ? "I" : "P"} ${data.length}B · $chunks片 '
         '· 队列=${_sendQueue.length} 信用=${_session?.credits}');
@@ -639,10 +809,10 @@ class _StreamPageState extends ConsumerState<StreamPage>
     if (_config.format != EncoderFormat.h264 &&
         _sendQueue.length >= _kMaxSendQueue) {
       _sendQueue.clear();
-      _encoder.requestKeyframe();
+      unawaited(_encoder.requestKeyframe().catchError((Object _) {}));
     }
     _sendQueue.add((data, key));
-    _pumpSend();
+    unawaited(_pumpSend(generation, session: session, wifi: wifi));
   }
 
   /// Refresh the info chip on a fixed cadence so the current frame size updates
@@ -671,16 +841,28 @@ class _StreamPageState extends ConsumerState<StreamPage>
     _infoTimer = null;
   }
 
-  Future<void> _pumpSend() async {
-    if (_sending) return;
-    _sending = true;
+  Future<void> _pumpSend(
+    int generation, {
+    StreamSession? session,
+    required bool wifi,
+  }) async {
+    if (_sendingGeneration == generation) return;
+    _sendingGeneration = generation;
     try {
-      while (_sendQueue.isNotEmpty && _sinkOpen) {
+      while (_sendQueue.isNotEmpty &&
+          _sinkOpenFor(generation, session: session, wifi: wifi)) {
         final (frame, isKey) = _sendQueue.removeAt(0);
         bool ok = false;
         try {
-          ok = await _sendOneFrame(frame);
+          ok = await _sendOneFrame(frame, session: session, wifi: wifi);
         } catch (_) {}
+        if (!_isProjectionCurrent(
+          generation,
+          session: session,
+          wifi: wifi,
+        )) {
+          return;
+        }
         if (ok) {
           _sentFrames++;
           _sentBytes += frame.length;
@@ -709,26 +891,46 @@ class _StreamPageState extends ConsumerState<StreamPage>
         // timeout or write hiccup can't permanently starve the encoder feed.
         // The periodic IDR re-syncs the device after any gap.
         if (_config.format == EncoderFormat.h264) {
-          _encoder.requestEncoderFrame();
+          unawaited(_encoder.requestEncoderFrame().catchError((Object _) {}));
         }
       }
     } finally {
-      _sending = false;
+      if (_sendingGeneration == generation) {
+        _sendingGeneration = null;
+      }
     }
   }
 
-  void _teardownSession() {
-    _notifySub?.cancel();
-    _notifySub = null;
-    _sendQueue.clear();
-    _sending = false;
-    _sendClock.stop();
-    _session?.close();
+  void _teardownSession({
+    StreamSession? expectedSession,
+    bool closeSession = true,
+  }) {
+    if (expectedSession != null && !identical(_session, expectedSession)) {
+      return;
+    }
+    ++_projectionGeneration;
+    final session = _session;
     _session = null;
+    final availabilitySub = _availabilitySub;
+    _availabilitySub = null;
+    final notifySub = _notifySub;
+    _notifySub = null;
+    unawaited(_cancelQuietly(availabilitySub));
+    unawaited(_cancelQuietly(notifySub));
+    _sendQueue.clear();
+    _sendClock.stop();
+    _encoderStartedGeneration = null;
+    if (closeSession) session?.close();
     // WiFi: the TCP client is owned by WifiManager and reused across runs — just
     // detach here (don't close the socket, so the next projection reuses it).
     _wifiMode = false;
     _wifiClient = null;
+  }
+
+  Future<void> _cancelQuietly(StreamSubscription<dynamic>? subscription) async {
+    try {
+      await subscription?.cancel();
+    } catch (_) {}
   }
 
   void _flash(String message) {
@@ -1425,6 +1627,7 @@ class _StreamPageState extends ConsumerState<StreamPage>
     final ready = _camera != null;
     final ring = ready ? Colors.white : Colors.white38;
     return GestureDetector(
+      key: const Key('stream-shutter'),
       onTap: ready ? _toggleProjection : null,
       onLongPress: ready ? _takePicture : null,
       child: Container(

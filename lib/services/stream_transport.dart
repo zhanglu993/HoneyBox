@@ -23,6 +23,9 @@ abstract class StreamTransport {
   /// Whether this transport is ready to carry a stream right now.
   bool get isAvailable;
 
+  /// Emits readiness transitions for this transport only.
+  Stream<bool> get availabilityChanges;
+
   /// Bytes of frame data carried per KS_FRAME write.
   int get chunkSize;
 
@@ -46,6 +49,9 @@ class BleStreamTransport implements StreamTransport {
   bool get isAvailable => manager.streamAvailable;
 
   @override
+  Stream<bool> get availabilityChanges => manager.onStreamAvailabilityChanged;
+
+  @override
   int get chunkSize => manager.streamChunkSize;
 
   @override
@@ -64,6 +70,9 @@ class WifiStreamTransport implements StreamTransport {
 
   @override
   bool get isAvailable => false;
+
+  @override
+  Stream<bool> get availabilityChanges => const Stream<bool>.empty();
 
   @override
   int get chunkSize => 1400; // typical UDP/MTU payload; placeholder
