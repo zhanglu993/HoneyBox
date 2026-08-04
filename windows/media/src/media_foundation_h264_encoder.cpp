@@ -25,6 +25,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -63,16 +64,30 @@ class ComApartment final {
       owns_initialization_ = true;
     }
     active_ = SUCCEEDED(result_);
+    if (active_) {
+      owner_thread_ = std::this_thread::get_id();
+    }
     return result_;
   }
 
   void Reset() {
+    if (active_ && owner_thread_ != std::this_thread::get_id()) {
+      return;
+    }
     if (owns_initialization_) {
       CoUninitialize();
     }
     active_ = false;
     owns_initialization_ = false;
     result_ = E_FAIL;
+    owner_thread_ = {};
+  }
+
+  void Abandon() {
+    active_ = false;
+    owns_initialization_ = false;
+    result_ = E_FAIL;
+    owner_thread_ = {};
   }
 
   ~ComApartment() { Reset(); }
@@ -81,6 +96,7 @@ class ComApartment final {
   HRESULT result_ = E_FAIL;
   bool active_ = false;
   bool owns_initialization_ = false;
+  std::thread::id owner_thread_{};
 };
 
 class ActivateArray final {
@@ -224,34 +240,62 @@ void PrependParameterSets(const std::vector<std::vector<uint8_t>>& sets,
 
 HRESULT SetCodecU32(ICodecAPI* codec_api, const GUID& property,
                     uint32_t value) {
-  if (FAILED(codec_api->IsSupported(&property))) {
-    return E_NOINTERFACE;
+  HRESULT result = codec_api->IsSupported(&property);
+  if (result != S_OK) {
+    return FAILED(result) ? result : E_NOINTERFACE;
+  }
+  result = codec_api->IsModifiable(&property);
+  if (result != S_OK) {
+    return FAILED(result) ? result : E_ACCESSDENIED;
   }
   VARIANT setting;
   VariantInit(&setting);
   setting.vt = VT_UI4;
   setting.ulVal = value;
-  return codec_api->SetValue(&property, &setting);
+  result = codec_api->SetValue(&property, &setting);
+  return result == S_OK ? S_OK
+                        : (FAILED(result) ? result : E_FAIL);
 }
 
 HRESULT SetCodecBoolIfSupported(ICodecAPI* codec_api,
                                 const GUID& property, bool value) {
-  if (FAILED(codec_api->IsSupported(&property))) {
+  HRESULT result = codec_api->IsSupported(&property);
+  if (result == S_FALSE || result == E_NOTIMPL) {
     return S_FALSE;
+  }
+  if (result != S_OK) {
+    return result;
+  }
+  result = codec_api->IsModifiable(&property);
+  if (result == S_FALSE || result == E_NOTIMPL) {
+    return S_FALSE;
+  }
+  if (result != S_OK) {
+    return result;
   }
   VARIANT setting;
   VariantInit(&setting);
   setting.vt = VT_BOOL;
   setting.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
-  return codec_api->SetValue(&property, &setting);
+  result = codec_api->SetValue(&property, &setting);
+  return result == S_OK ? S_OK
+                        : (FAILED(result) ? result : E_FAIL);
 }
 
 class MediaFoundationH264Encoder final : public EncoderBackend {
  public:
   explicit MediaFoundationH264Encoder(
       std::shared_ptr<H264TransformProvider> provider)
-      : provider_(std::move(provider)) {}
-  ~MediaFoundationH264Encoder() override { (void)Stop(); }
+      : provider_holder_(
+            std::make_unique<std::shared_ptr<H264TransformProvider>>(
+                std::move(provider))) {}
+  ~MediaFoundationH264Encoder() override {
+    if (started_ && !IsOwnerThread()) {
+      AbandonWrongThreadResources();
+    } else {
+      (void)Stop();
+    }
+  }
 
   Outcome Start(const EncodingConfig& config) override;
   Result<std::vector<EncodedFrame>> Encode(
@@ -277,10 +321,14 @@ class MediaFoundationH264Encoder final : public EncoderBackend {
                             IMFSample** sample);
   HRESULT ApplyPendingKeyframe();
   void ResetResources();
+  bool IsOwnerThread() const;
+  void AbandonWrongThreadResources();
 
-  std::shared_ptr<H264TransformProvider> provider_;
+  std::unique_ptr<std::shared_ptr<H264TransformProvider>>
+      provider_holder_;
   ComApartment apartment_;
-  std::shared_ptr<MediaFoundationRuntime> runtime_;
+  std::unique_ptr<std::shared_ptr<MediaFoundationRuntime>>
+      runtime_holder_;
   ComPtr<IMFTransform> transform_;
   ComPtr<ICodecAPI> codec_api_;
   H264AnnexBNormalizer normalizer_;
@@ -293,6 +341,8 @@ class MediaFoundationH264Encoder final : public EncoderBackend {
   bool drained_ = false;
   bool force_keyframe_ = false;
   bool sequence_header_cached_ = false;
+  std::thread::id owner_thread_{};
+  bool owner_thread_set_ = false;
 };
 
 }  // namespace
@@ -493,6 +543,8 @@ Outcome MediaFoundationH264Encoder::Start(const EncodingConfig& config) {
                          "COM initialization for H.264 encoding failed",
                          result)};
   }
+  owner_thread_ = std::this_thread::get_id();
+  owner_thread_set_ = true;
   auto runtime = AcquireMediaFoundationRuntime();
   if (!runtime.ok()) {
     ResetResources();
@@ -500,10 +552,12 @@ Outcome MediaFoundationH264Encoder::Start(const EncodingConfig& config) {
                    "Media Foundation runtime is unavailable for H.264 "
                    "encoding.");
   }
-  runtime_ = std::move(*runtime.value);
+  runtime_holder_ = std::make_unique<std::shared_ptr<MediaFoundationRuntime>>(
+      std::move(*runtime.value));
 
-  if (provider_ != nullptr) {
-    auto candidates = provider_->EnumerateSynchronousLocal();
+  if (provider_holder_ != nullptr && *provider_holder_ != nullptr) {
+    auto candidates =
+        (*provider_holder_)->EnumerateSynchronousLocal();
     if (!candidates.ok()) {
       const auto error = candidates.error.has_value()
                              ? *candidates.error
@@ -612,6 +666,11 @@ HRESULT MediaFoundationH264Encoder::ApplyPendingKeyframe() {
 
 Result<std::vector<EncodedFrame>> MediaFoundationH264Encoder::Encode(
     const EncoderInputFrame& frame) {
+  if (started_ && !IsOwnerThread()) {
+    return Failure<std::vector<EncodedFrame>>(
+        Status::kInvalidState,
+        "H.264 encoder calls must stay on the Start thread.");
+  }
   if (!started_ || transform_ == nullptr || drained_) {
     return Failure<std::vector<EncodedFrame>>(
         Status::kInvalidState, "H.264 encoder is not accepting input.");
@@ -671,6 +730,10 @@ Result<std::vector<EncodedFrame>> MediaFoundationH264Encoder::Encode(
 }
 
 Outcome MediaFoundationH264Encoder::RequestKeyframe() {
+  if (started_ && !IsOwnerThread()) {
+    return Failure(Status::kInvalidState,
+                   "H.264 encoder calls must stay on the Start thread.");
+  }
   if (!started_ || drained_) {
     return Failure(Status::kInvalidState,
                    "H.264 encoder is not accepting key-frame requests.");
@@ -788,6 +851,12 @@ Result<EncodedFrame> MediaFoundationH264Encoder::ConvertOutputSample(
     if (!missing.empty()) {
       PrependParameterSets(missing, &normalized.value->bytes);
     }
+    if (!ContainsNalType(normalized.value->bytes, 7U) ||
+        !ContainsNalType(normalized.value->bytes, 8U)) {
+      return Failure<EncodedFrame>(
+          Status::kEncodeFailed,
+          "H.264 key frame is missing SPS or PPS parameter sets.");
+    }
   }
   try {
     std::shared_ptr<const std::vector<uint8_t>> bytes =
@@ -884,6 +953,11 @@ MediaFoundationH264Encoder::ProcessOutputs() {
 }
 
 Result<std::vector<EncodedFrame>> MediaFoundationH264Encoder::Drain() {
+  if (started_ && !IsOwnerThread()) {
+    return Failure<std::vector<EncodedFrame>>(
+        Status::kInvalidState,
+        "H.264 encoder calls must stay on the Start thread.");
+  }
   if (!started_ || transform_ == nullptr) {
     return Failure<std::vector<EncodedFrame>>(
         Status::kInvalidState, "H.264 encoder is not started.");
@@ -905,10 +979,36 @@ Result<std::vector<EncodedFrame>> MediaFoundationH264Encoder::Drain() {
   return ProcessOutputs();
 }
 
+bool MediaFoundationH264Encoder::IsOwnerThread() const {
+  return owner_thread_set_ && owner_thread_ == std::this_thread::get_id();
+}
+
+void MediaFoundationH264Encoder::AbandonWrongThreadResources() {
+  // Contract-violation fallback: quarantine COM/MF-owning references instead
+  // of releasing them or uninitializing their apartment on the wrong thread.
+  codec_api_.Detach();
+  transform_.Detach();
+  (void)runtime_holder_.release();
+  (void)provider_holder_.release();
+  normalizer_ = H264AnnexBNormalizer{};
+  annex_b_sps_.clear();
+  annex_b_pps_.clear();
+  config_ = EncodingConfig{};
+  input_stream_id_ = 0U;
+  output_stream_id_ = 0U;
+  started_ = false;
+  drained_ = false;
+  force_keyframe_ = false;
+  sequence_header_cached_ = false;
+  owner_thread_ = {};
+  owner_thread_set_ = false;
+  apartment_.Abandon();
+}
+
 void MediaFoundationH264Encoder::ResetResources() {
   codec_api_.Reset();
   transform_.Reset();
-  runtime_.reset();
+  runtime_holder_.reset();
   normalizer_ = H264AnnexBNormalizer{};
   annex_b_sps_.clear();
   annex_b_pps_.clear();
@@ -920,9 +1020,15 @@ void MediaFoundationH264Encoder::ResetResources() {
   force_keyframe_ = false;
   sequence_header_cached_ = false;
   apartment_.Reset();
+  owner_thread_ = {};
+  owner_thread_set_ = false;
 }
 
 Outcome MediaFoundationH264Encoder::Stop() {
+  if (started_ && !IsOwnerThread()) {
+    return Failure(Status::kInvalidState,
+                   "H.264 encoder calls must stay on the Start thread.");
+  }
   if (!started_) {
     ResetResources();
     return {};

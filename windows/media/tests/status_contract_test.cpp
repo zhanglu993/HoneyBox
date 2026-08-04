@@ -12,6 +12,16 @@ HMW_TEST(status_contract_exposes_streaming_failures) {
              "unsupported_feature");
 }
 
+HMW_TEST(encoder_backend_factory_creates_h264_backend) {
+  const auto result = hmw::CreateDefaultEncoderBackendFactory()(
+      hmw::EncoderFormat::kH264);
+  HMW_EXPECT(result.ok());
+  HMW_EXPECT(result.value.has_value());
+  if (result.value) {
+    HMW_EXPECT(*result.value != nullptr);
+  }
+}
+
 HMW_TEST(status_contract_exposes_ok) {
   HMW_EXPECT(hmw::StatusCode(hmw::Status::kOk) == "ok");
 }

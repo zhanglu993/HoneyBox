@@ -18,7 +18,9 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -126,11 +128,12 @@ struct FakeOutput {
 class FakeH264Transform final : public IMFTransform, public ICodecAPI {
  public:
   FakeH264Transform(bool provides_samples, bool annex_b_header,
-                    bool not_accept_once)
+                    bool not_accept_once, bool omit_sequence_header = false)
       : provides_samples_(provides_samples),
         sequence_header_(annex_b_header ? kFakeAnnexBHeader
                                        : kFakeAvccHeader),
-        not_accept_once_(not_accept_once) {}
+        not_accept_once_(not_accept_once),
+        omit_sequence_header_(omit_sequence_header) {}
 
   void PushOutput(FakeOutput output) {
     outputs_.push_back(std::move(output));
@@ -156,6 +159,10 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
   ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
 
   ULONG STDMETHODCALLTYPE Release() override {
+    {
+      std::lock_guard<std::mutex> lock(release_mutex_);
+      release_threads_.push_back(std::this_thread::get_id());
+    }
     const ULONG references = --references_;
     if (references == 0U) {
       delete this;
@@ -248,11 +255,13 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
   HRESULT STDMETHODCALLTYPE SetOutputType(
       DWORD, IMFMediaType* type, DWORD) override {
     calls.push_back("output_type");
-    const HRESULT result = type->SetBlob(
-        MF_MT_MPEG_SEQUENCE_HEADER, sequence_header_.data(),
-        static_cast<UINT32>(sequence_header_.size()));
-    if (FAILED(result)) {
-      return result;
+    if (!omit_sequence_header_) {
+      const HRESULT result = type->SetBlob(
+          MF_MT_MPEG_SEQUENCE_HEADER, sequence_header_.data(),
+          static_cast<UINT32>(sequence_header_.size()));
+      if (FAILED(result)) {
+        return result;
+      }
     }
     output_type_ = type;
     return S_OK;
@@ -411,11 +420,15 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
     return S_OK;
   }
 
-  HRESULT STDMETHODCALLTYPE IsSupported(const GUID*) override {
-    return S_OK;
+  HRESULT STDMETHODCALLTYPE IsSupported(const GUID* property) override {
+    return property != nullptr && *property == CODECAPI_AVLowLatencyMode
+               ? low_latency_support
+               : required_support;
   }
-  HRESULT STDMETHODCALLTYPE IsModifiable(const GUID*) override {
-    return S_OK;
+  HRESULT STDMETHODCALLTYPE IsModifiable(const GUID* property) override {
+    return property != nullptr && *property == CODECAPI_AVLowLatencyMode
+               ? low_latency_modifiable
+               : required_modifiable;
   }
   HRESULT STDMETHODCALLTYPE GetParameterRange(
       const GUID*, VARIANT*, VARIANT*, VARIANT*) override {
@@ -437,6 +450,13 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
       const GUID* property, VARIANT* value) override {
     if (property == nullptr || value == nullptr) {
       return E_POINTER;
+    }
+    if (*property == CODECAPI_AVLowLatencyMode) {
+      ++low_latency_set_calls;
+      return low_latency_set_result;
+    }
+    if (required_set_result != S_OK) {
+      return required_set_result;
     }
     if (*property == CODECAPI_AVEncCommonRateControlMode) {
       rate_control = value->ulVal;
@@ -493,6 +513,19 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
   uint32_t mean_bitrate = 0U;
   uint32_t b_picture_count = 99U;
   uint32_t gop_size = 0U;
+  HRESULT required_support = S_OK;
+  HRESULT required_modifiable = S_OK;
+  HRESULT required_set_result = S_OK;
+  HRESULT low_latency_support = S_OK;
+  HRESULT low_latency_modifiable = S_OK;
+  HRESULT low_latency_set_result = S_OK;
+  uint32_t low_latency_set_calls = 0U;
+
+  size_t ReleasesOn(std::thread::id thread) {
+    std::lock_guard<std::mutex> lock(release_mutex_);
+    return static_cast<size_t>(std::count(release_threads_.begin(),
+                                         release_threads_.end(), thread));
+  }
 
  private:
   ~FakeH264Transform() = default;
@@ -501,9 +534,12 @@ class FakeH264Transform final : public IMFTransform, public ICodecAPI {
   bool provides_samples_;
   std::vector<uint8_t> sequence_header_;
   bool not_accept_once_;
+  bool omit_sequence_header_;
   std::deque<FakeOutput> outputs_;
   ComPtr<IMFMediaType> input_type_;
   ComPtr<IMFMediaType> output_type_;
+  std::mutex release_mutex_;
+  std::vector<std::thread::id> release_threads_;
 };
 
 class FakeH264Provider final
@@ -519,11 +555,11 @@ class FakeH264Provider final
 
 std::pair<std::shared_ptr<FakeH264Provider>, FakeH264Transform*>
 FakeBackend(bool provides_samples, bool annex_b_header,
-            bool not_accept_once) {
+            bool not_accept_once, bool omit_sequence_header = false) {
   auto provider = std::make_shared<FakeH264Provider>();
   auto* transform =
       new FakeH264Transform(provides_samples, annex_b_header,
-                            not_accept_once);
+                            not_accept_once, omit_sequence_header);
   provider->transforms.emplace_back(
       static_cast<IMFTransform*>(transform),
       [](IMFTransform* value) { value->Release(); });
@@ -659,4 +695,204 @@ HMW_TEST(media_foundation_h264_encoder_rejects_repeated_start_deterministically)
     HMW_EXPECT(repeated.error->status == hmw::Status::kInvalidState);
   }
   HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_requires_exact_success_for_required_properties) {
+  struct Case {
+    HRESULT support;
+    HRESULT modifiable;
+    HRESULT set;
+  };
+  const Case cases[] = {
+      {S_FALSE, S_OK, S_OK},
+      {E_NOTIMPL, S_OK, S_OK},
+      {S_OK, S_FALSE, S_OK},
+      {S_OK, S_OK, S_FALSE},
+      {S_OK, S_OK, E_ACCESSDENIED},
+  };
+  for (const auto& scripted : cases) {
+    auto [provider, transform] = FakeBackend(false, false, false);
+    transform->required_support = scripted.support;
+    transform->required_modifiable = scripted.modifiable;
+    transform->required_set_result = scripted.set;
+    auto backend =
+        hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+    const auto started = backend->Start(H264Config());
+
+    HMW_EXPECT(!started.ok());
+    HMW_EXPECT(started.error.has_value());
+    if (started.error) {
+      HMW_EXPECT(started.error->status == hmw::Status::kCodecUnavailable);
+    }
+  }
+}
+
+HMW_TEST(media_foundation_h264_encoder_skips_unsupported_optional_low_latency) {
+  struct Case {
+    HRESULT support;
+    HRESULT modifiable;
+  };
+  const Case unsupported[] = {
+      {S_FALSE, S_OK}, {E_NOTIMPL, S_OK},
+      {S_OK, S_FALSE}, {S_OK, E_NOTIMPL}};
+  for (const auto& scripted : unsupported) {
+    auto [provider, transform] = FakeBackend(false, false, false);
+    transform->low_latency_support = scripted.support;
+    transform->low_latency_modifiable = scripted.modifiable;
+    auto backend =
+        hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+    HMW_EXPECT(backend->Start(H264Config()).ok());
+    HMW_EXPECT(transform->low_latency_set_calls == 0U);
+    HMW_EXPECT(backend->Stop().ok());
+  }
+}
+
+HMW_TEST(media_foundation_h264_encoder_rejects_failed_optional_low_latency_set) {
+  const HRESULT failed[] = {S_FALSE, E_NOTIMPL, E_ACCESSDENIED};
+  for (const HRESULT scripted : failed) {
+    auto [provider, transform] = FakeBackend(false, false, false);
+    transform->low_latency_set_result = scripted;
+    auto backend =
+        hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+    const auto started = backend->Start(H264Config());
+
+    HMW_EXPECT(!started.ok());
+    HMW_EXPECT(started.error.has_value());
+    if (started.error) {
+      HMW_EXPECT(started.error->status == hmw::Status::kCodecUnavailable);
+    }
+  }
+}
+
+HMW_TEST(media_foundation_h264_encoder_rejects_bare_idr_without_parameter_sets) {
+  auto [provider, transform] = FakeBackend(false, false, false, true);
+  transform->PushOutput(
+      {{0U, 0U, 0U, 1U, 0x65U, 0x88U, 0x84U}, 1'000'000, true});
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  SolidInput input;
+
+  const auto encoded = backend->Encode(input.frame);
+
+  HMW_EXPECT(!encoded.ok());
+  HMW_EXPECT(encoded.error.has_value());
+  if (encoded.error) {
+    HMW_EXPECT(encoded.error->status == hmw::Status::kEncodeFailed);
+  }
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_accepts_self_contained_idr_without_header) {
+  auto [provider, transform] = FakeBackend(false, false, false, true);
+  transform->PushOutput(
+      {{0U, 0U, 0U, 1U, 0x67U, 0x42U, 0U, 30U,
+        0U, 0U, 0U, 1U, 0x68U, 0xceU, 6U, 0xe2U,
+        0U, 0U, 0U, 1U, 0x65U, 0x88U, 0x84U},
+       1'000'000, true});
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  SolidInput input;
+
+  const auto encoded = backend->Encode(input.frame);
+
+  HMW_EXPECT(encoded.ok());
+  if (encoded.ok()) {
+    HMW_EXPECT(encoded.value->size() == 1U);
+    if (encoded.value->size() == 1U) {
+      HMW_EXPECT(HasNal(*(*encoded.value)[0].bytes, 7U));
+      HMW_EXPECT(HasNal(*(*encoded.value)[0].bytes, 8U));
+      HMW_EXPECT(HasNal(*(*encoded.value)[0].bytes, 5U));
+    }
+  }
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_allows_zero_outputs_for_one_input) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  SolidInput input;
+
+  const auto encoded = backend->Encode(input.frame);
+
+  HMW_EXPECT(encoded.ok());
+  if (encoded.ok()) {
+    HMW_EXPECT(encoded.value->empty());
+  }
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_rejects_cross_thread_calls) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  SolidInput input;
+  hmw::Outcome requested;
+  hmw::Result<std::vector<hmw::EncodedFrame>> encoded;
+  hmw::Result<std::vector<hmw::EncodedFrame>> drained;
+  std::thread caller([&] {
+    requested = backend->RequestKeyframe();
+    encoded = backend->Encode(input.frame);
+    drained = backend->Drain();
+  });
+  caller.join();
+
+  HMW_EXPECT(!requested.ok());
+  HMW_EXPECT(requested.error.has_value());
+  HMW_EXPECT(!encoded.ok());
+  HMW_EXPECT(encoded.error.has_value());
+  HMW_EXPECT(!drained.ok());
+  HMW_EXPECT(drained.error.has_value());
+  if (requested.error) {
+    HMW_EXPECT(requested.error->status == hmw::Status::kInvalidState);
+  }
+  if (encoded.error) {
+    HMW_EXPECT(encoded.error->status == hmw::Status::kInvalidState);
+  }
+  if (drained.error) {
+    HMW_EXPECT(drained.error->status == hmw::Status::kInvalidState);
+  }
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_rejects_cross_thread_stop) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+  HMW_EXPECT(backend->Start(H264Config()).ok());
+  hmw::Outcome stopped;
+  std::thread caller([&] { stopped = backend->Stop(); });
+  caller.join();
+
+  HMW_EXPECT(!stopped.ok());
+  HMW_EXPECT(stopped.error.has_value());
+  if (stopped.error) {
+    HMW_EXPECT(stopped.error->status == hmw::Status::kInvalidState);
+  }
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_wrong_thread_destructor_does_not_release_com) {
+  auto [provider, transform] = FakeBackend(false, false, false);
+  std::unique_ptr<hmw::EncoderBackend> backend;
+  hmw::Outcome started;
+  std::thread owner([&] {
+    backend =
+        hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+    started = backend->Start(H264Config());
+  });
+  owner.join();
+  HMW_EXPECT(started.ok());
+
+  const std::thread::id destroy_thread = std::this_thread::get_id();
+  backend.reset();
+
+  HMW_EXPECT(transform->ReleasesOn(destroy_thread) == 0U);
 }
