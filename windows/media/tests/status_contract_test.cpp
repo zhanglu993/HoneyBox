@@ -1,3 +1,4 @@
+#include "honey_media_windows/encoder_backend.h"
 #include "honey_media_windows/status.h"
 
 #include "test_support.h"
@@ -9,6 +10,40 @@ HMW_TEST(status_contract_exposes_streaming_failures) {
              "codec_unavailable");
   HMW_EXPECT(hmw::StatusCode(hmw::Status::kUnsupportedFeature) ==
              "unsupported_feature");
+}
+
+HMW_TEST(status_contract_exposes_ok) {
+  HMW_EXPECT(hmw::StatusCode(hmw::Status::kOk) == "ok");
+}
+
+HMW_TEST(encoder_backend_factory_reports_h264_unavailable) {
+  const auto result = hmw::CreateDefaultEncoderBackendFactory()(
+      hmw::EncoderFormat::kH264);
+  HMW_EXPECT(!result.ok());
+  HMW_EXPECT(!result.value.has_value());
+  HMW_EXPECT(result.error.has_value());
+  HMW_EXPECT(result.error->status == hmw::Status::kCodecUnavailable);
+  HMW_EXPECT(hmw::StatusCode(result.error->status) == "codec_unavailable");
+}
+
+HMW_TEST(encoder_backend_factory_reports_jpeg_unavailable) {
+  const auto result = hmw::CreateDefaultEncoderBackendFactory()(
+      hmw::EncoderFormat::kJpeg);
+  HMW_EXPECT(!result.ok());
+  HMW_EXPECT(!result.value.has_value());
+  HMW_EXPECT(result.error.has_value());
+  HMW_EXPECT(result.error->status == hmw::Status::kCodecUnavailable);
+  HMW_EXPECT(hmw::StatusCode(result.error->status) == "codec_unavailable");
+}
+
+HMW_TEST(encoder_backend_factory_reports_msv1_unavailable) {
+  const auto result = hmw::CreateDefaultEncoderBackendFactory()(
+      hmw::EncoderFormat::kMsv1);
+  HMW_EXPECT(!result.ok());
+  HMW_EXPECT(!result.value.has_value());
+  HMW_EXPECT(result.error.has_value());
+  HMW_EXPECT(result.error->status == hmw::Status::kCodecUnavailable);
+  HMW_EXPECT(hmw::StatusCode(result.error->status) == "codec_unavailable");
 }
 
 HMW_TEST(result_ok_tracks_value_presence_for_every_value_error_combination) {

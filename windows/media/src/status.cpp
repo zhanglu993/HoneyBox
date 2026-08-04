@@ -4,7 +4,7 @@ namespace hmw {
 
 std::string_view StatusCode(Status status) {
   switch (status) {
-    case Status::kOk: return "invalid_state";
+    case Status::kOk: return "ok";
     case Status::kInvalidArgument: return "invalid_argument";
     case Status::kNotFound: return "not_found";
     case Status::kUnsupportedMedia: return "unsupported_media";
