@@ -10,6 +10,8 @@ std::string_view StatusCode(Status status) {
     case Status::kUnsupportedMedia: return "unsupported_media";
     case Status::kDecodeFailed: return "decode_failed";
     case Status::kEncodeFailed: return "encode_failed";
+    case Status::kCodecUnavailable: return "codec_unavailable";
+    case Status::kUnsupportedFeature: return "unsupported_feature";
     case Status::kPermissionDenied: return "permission_denied";
     case Status::kDeviceUnavailable: return "device_unavailable";
     case Status::kDeviceLost: return "device_lost";

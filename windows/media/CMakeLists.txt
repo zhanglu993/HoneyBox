@@ -18,6 +18,7 @@ add_library(honey_media_windows_core
   src/channel_contract.cpp
   src/cinepak_pipeline.cpp
   src/conversion_controller.cpp
+  src/encoder_backend_factory.cpp
   src/gif_source.cpp
   src/media_foundation_runtime.cpp
   src/media_foundation_source.cpp

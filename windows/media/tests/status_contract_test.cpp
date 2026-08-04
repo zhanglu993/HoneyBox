@@ -4,6 +4,13 @@
 
 #include <optional>
 
+HMW_TEST(status_contract_exposes_streaming_failures) {
+  HMW_EXPECT(hmw::StatusCode(hmw::Status::kCodecUnavailable) ==
+             "codec_unavailable");
+  HMW_EXPECT(hmw::StatusCode(hmw::Status::kUnsupportedFeature) ==
+             "unsupported_feature");
+}
+
 HMW_TEST(result_ok_tracks_value_presence_for_every_value_error_combination) {
   hmw::Result<int> successful{42, std::nullopt};
   HMW_EXPECT(successful.ok());

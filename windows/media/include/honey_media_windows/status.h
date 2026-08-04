@@ -13,6 +13,8 @@ enum class Status {
   kUnsupportedMedia,
   kDecodeFailed,
   kEncodeFailed,
+  kCodecUnavailable,
+  kUnsupportedFeature,
   kPermissionDenied,
   kDeviceUnavailable,
   kDeviceLost,
