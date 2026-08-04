@@ -19,6 +19,7 @@ add_library(honey_media_windows_core
   src/cinepak_pipeline.cpp
   src/conversion_controller.cpp
   src/encoder_backend_factory.cpp
+  src/h264_annex_b.cpp
   src/gif_source.cpp
   src/media_foundation_runtime.cpp
   src/media_foundation_source.cpp
@@ -29,6 +30,7 @@ add_library(honey_media_windows_core
   src/platform_dispatcher.cpp
   src/png_codec.cpp
   src/rgba_transform.cpp
+  src/rgba_nv12.cpp
   src/status.cpp
   src/video_texture_player.cpp
   src/wic_helpers.cpp
