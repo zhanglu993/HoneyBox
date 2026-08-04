@@ -18,7 +18,7 @@
 namespace hmw {
 
 struct VideoPlayerDependencies {
-  std::function<std::vector<uint8_t>(size_t)> allocate_bgra;
+  std::function<std::vector<uint8_t>(size_t)> allocate_rgba;
   std::function<std::thread(std::function<void()>)> start_worker;
 };
 

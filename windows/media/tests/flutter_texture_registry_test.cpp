@@ -112,7 +112,7 @@ class FakeFlutterTextureRegistrar final : public flutter::TextureRegistrar {
 
 }  // namespace
 
-HMW_TEST(flutter_texture_registry_keeps_stable_bgra_storage) {
+HMW_TEST(flutter_texture_registry_keeps_stable_rgba_storage) {
   FakeFlutterTextureRegistrar flutter_registrar;
   std::unique_ptr<hmw::TextureRegistry> registry =
       hmw::CreateFlutterTextureRegistry(&flutter_registrar);
@@ -122,7 +122,7 @@ HMW_TEST(flutter_texture_registry_keeps_stable_bgra_storage) {
   }
 
   auto source = std::make_shared<std::vector<uint8_t>>(
-      std::initializer_list<uint8_t>{1, 2, 3, 255, 4, 5, 6, 255});
+      std::initializer_list<uint8_t>{255, 0, 0, 17, 0, 0, 255, 23});
   const int64_t texture_id = registry->RegisterPixelBufferTexture(
       [&source] {
         return hmw::PixelBufferView{
@@ -138,7 +138,7 @@ HMW_TEST(flutter_texture_registry_keeps_stable_bgra_storage) {
   HMW_EXPECT(flutter_registrar.last_height == 1);
   HMW_EXPECT(flutter_registrar.last_bytes == *source);
 
-  *source = {9, 8, 7, 255, 6, 5, 4, 255};
+  *source = {0, 0, 255, 31, 255, 0, 0, 37};
   HMW_EXPECT(registry->MarkFrameAvailable(texture_id));
   HMW_EXPECT(flutter_registrar.last_buffer == first_buffer);
   HMW_EXPECT(flutter_registrar.last_bytes == *source);
@@ -147,7 +147,7 @@ HMW_TEST(flutter_texture_registry_keeps_stable_bgra_storage) {
   HMW_EXPECT(flutter_registrar.unregister_count == 1);
 }
 
-HMW_TEST(flutter_texture_registry_owns_snapshot_during_concurrent_copy) {
+HMW_TEST(flutter_texture_registry_owns_rgba_snapshot_during_concurrent_copy) {
   FakeFlutterTextureRegistrar flutter_registrar;
   std::unique_ptr<hmw::TextureRegistry> registry =
       hmw::CreateFlutterTextureRegistry(&flutter_registrar);
@@ -159,7 +159,7 @@ HMW_TEST(flutter_texture_registry_owns_snapshot_during_concurrent_copy) {
   std::mutex mutex;
   std::condition_variable condition;
   auto initial = std::make_shared<const std::vector<uint8_t>>(
-      std::initializer_list<uint8_t>{1, 2, 3, 255, 4, 5, 6, 255});
+      std::initializer_list<uint8_t>{255, 0, 0, 17, 0, 0, 255, 23});
   std::weak_ptr<const std::vector<uint8_t>> old_snapshot = initial;
   std::shared_ptr<const std::vector<uint8_t>> current = initial;
   bool second_snapshot_captured = false;
@@ -190,7 +190,7 @@ HMW_TEST(flutter_texture_registry_owns_snapshot_during_concurrent_copy) {
         lock, std::chrono::seconds(2),
         [&] { return second_snapshot_captured; }));
     current = std::make_shared<const std::vector<uint8_t>>(
-        std::initializer_list<uint8_t>{9, 8, 7, 255, 6, 5, 4, 255});
+        std::initializer_list<uint8_t>{0, 0, 255, 31, 255, 0, 0, 37});
     initial.reset();
     HMW_EXPECT(!old_snapshot.expired());
     publisher_replaced_snapshot = true;
@@ -200,7 +200,7 @@ HMW_TEST(flutter_texture_registry_owns_snapshot_during_concurrent_copy) {
 
   HMW_EXPECT(marked);
   HMW_EXPECT(flutter_registrar.last_bytes ==
-             std::vector<uint8_t>({1, 2, 3, 255, 4, 5, 6, 255}));
+             std::vector<uint8_t>({255, 0, 0, 17, 0, 0, 255, 23}));
   HMW_EXPECT(old_snapshot.expired());
 }
 

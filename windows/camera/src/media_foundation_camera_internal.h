@@ -70,7 +70,9 @@ hmw::Result<hmw::RgbaFrame> BgraToRgba(
     uint32_t width, uint32_t height, int64_t pts_100ns,
     const std::vector<uint8_t>& bgra);
 
-hmw::Result<std::vector<uint8_t>> RgbaToBgra(
-    const hmw::RgbaFrame& rgba);
+hmw::Result<CameraFrame> PrepareCameraTextureFrame(
+    uint32_t source_width, uint32_t source_height, int64_t pts_100ns,
+    const std::vector<uint8_t>& bgra,
+    const CameraPreviewConfig& requested);
 
 }  // namespace hcw::internal

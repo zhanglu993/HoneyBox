@@ -222,7 +222,7 @@ HMW_TEST(camera_preview_active_generation_publishes_frames) {
   HMW_EXPECT(frames.size() == 1);
   if (!frames.empty()) {
     HMW_EXPECT(frames.front().first == generation);
-    HMW_EXPECT(frames.front().second.bgra->at(0) == 23);
+    HMW_EXPECT(frames.front().second.rgba->at(0) == 23);
   }
   HMW_EXPECT(session.Close().ok());
 }
@@ -298,7 +298,7 @@ HMW_TEST(camera_preview_new_open_suppresses_old_generation) {
   HMW_EXPECT(frames.size() == 1);
   if (!frames.empty()) {
     HMW_EXPECT(frames.front().first == generation);
-    HMW_EXPECT(frames.front().second.bgra->at(0) == 29);
+    HMW_EXPECT(frames.front().second.rgba->at(0) == 29);
   }
   HMW_EXPECT(session.Close().ok());
 }

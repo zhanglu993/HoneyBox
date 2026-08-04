@@ -196,10 +196,10 @@ HMW_TEST(camera_bgra_rejects_negative_stride_before_buffer_start) {
   HMW_EXPECT(copied.error->status == hmw::Status::kIoError);
 }
 
-HMW_TEST(camera_rgba_swaps_red_and_blue_when_decoding_bgra) {
+HMW_TEST(camera_rgba_decodes_mf_bgra_and_preserves_alpha) {
   const std::vector<uint8_t> bgra{
-      1, 2, 3, 4,
-      5, 6, 7, 8,
+      0, 0, 255, 17,
+      255, 0, 0, 23,
   };
   const auto rgba = hcw::internal::BgraToRgba(2, 1, 123, bgra);
   HMW_EXPECT(rgba.ok());
@@ -207,22 +207,40 @@ HMW_TEST(camera_rgba_swaps_red_and_blue_when_decoding_bgra) {
   HMW_EXPECT(rgba.value->height == 1);
   HMW_EXPECT(rgba.value->pts_100ns == 123);
   HMW_EXPECT(rgba.value->pixels == std::vector<uint8_t>({
-      3, 2, 1, 255,
-      7, 6, 5, 255,
+      255, 0, 0, 17,
+      0, 0, 255, 23,
   }));
 }
 
-HMW_TEST(camera_rgba_swaps_red_and_blue_when_encoding_bgra) {
-  const hmw::RgbaFrame rgba{
-      2, 1, 456, 0,
-      {3, 2, 1, 4, 7, 6, 5, 8},
-  };
-  const auto bgra = hcw::internal::RgbaToBgra(rgba);
-  HMW_EXPECT(bgra.ok());
-  HMW_EXPECT(*bgra.value == std::vector<uint8_t>({
-      1, 2, 3, 255,
-      5, 6, 7, 255,
-  }));
+HMW_TEST(camera_texture_frame_publishes_mf_red_and_blue_as_rgba) {
+  std::vector<uint8_t> red_bgra(4U * 4U * 4U, 0);
+  std::vector<uint8_t> blue_bgra(4U * 4U * 4U, 0);
+  for (size_t offset = 0; offset < red_bgra.size(); offset += 4U) {
+    red_bgra[offset + 2U] = 255;
+    red_bgra[offset + 3U] = 17;
+    blue_bgra[offset] = 255;
+    blue_bgra[offset + 3U] = 23;
+  }
+
+  const auto red = hcw::internal::PrepareCameraTextureFrame(
+      4, 4, 456, red_bgra, hcw::CameraPreviewConfig{4, 4, 15});
+  const auto blue = hcw::internal::PrepareCameraTextureFrame(
+      4, 4, 789, blue_bgra, hcw::CameraPreviewConfig{4, 4, 15});
+  HMW_EXPECT(red.ok());
+  HMW_EXPECT(blue.ok());
+  if (!red.ok() || !blue.ok()) {
+    return;
+  }
+  for (size_t offset = 0; offset < red.value->rgba->size(); offset += 4U) {
+    HMW_EXPECT(red.value->rgba->at(offset) == 255);
+    HMW_EXPECT(red.value->rgba->at(offset + 1U) == 0);
+    HMW_EXPECT(red.value->rgba->at(offset + 2U) == 0);
+    HMW_EXPECT(red.value->rgba->at(offset + 3U) == 17);
+    HMW_EXPECT(blue.value->rgba->at(offset) == 0);
+    HMW_EXPECT(blue.value->rgba->at(offset + 1U) == 0);
+    HMW_EXPECT(blue.value->rgba->at(offset + 2U) == 255);
+    HMW_EXPECT(blue.value->rgba->at(offset + 3U) == 23);
+  }
 }
 
 }  // namespace

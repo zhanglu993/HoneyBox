@@ -170,13 +170,13 @@ class FakeTextureRegistry final : public hmw::TextureRegistry {
       return false;
     }
     const hmw::PixelBufferView view = provider_();
-    if (view.bgra == nullptr || view.byte_count == 0) {
+    if (view.rgba == nullptr || view.byte_count == 0) {
       return false;
     }
     last_width = view.width;
     last_height = view.height;
-    last_bytes.assign(view.bgra, view.bgra + view.byte_count);
-    marked_reds.push_back(last_bytes.at(2));
+    last_bytes.assign(view.rgba, view.rgba + view.byte_count);
+    marked_reds.push_back(last_bytes.at(0));
     ++mark_count;
     return true;
   }
@@ -335,7 +335,7 @@ class QueueDispatcher final : public hmw::PlatformDispatcher {
 
 }  // namespace
 
-HMW_TEST(player_create_publishes_first_frame_before_success) {
+HMW_TEST(player_create_publishes_first_rgba_frame_before_success) {
   FakeTextureRegistry registry;
   QueueDispatcher dispatcher;
   auto source = std::make_unique<FakeFrameSource>(
@@ -350,7 +350,7 @@ HMW_TEST(player_create_publishes_first_frame_before_success) {
   HMW_EXPECT(registry.last_width == 2);
   HMW_EXPECT(registry.last_height == 1);
   HMW_EXPECT(registry.last_bytes ==
-             std::vector<uint8_t>({30, 20, 10, 255, 60, 50, 40, 255}));
+             std::vector<uint8_t>({10, 20, 30, 255, 40, 50, 60, 255}));
 }
 
 HMW_TEST(player_provider_returns_owned_immutable_snapshot) {
@@ -369,11 +369,11 @@ HMW_TEST(player_provider_returns_owned_immutable_snapshot) {
 
   const hmw::PixelBufferView snapshot = registry.provider_();
   HMW_EXPECT(snapshot.owner != nullptr);
-  HMW_EXPECT(snapshot.bgra == snapshot.owner->data());
+  HMW_EXPECT(snapshot.rgba == snapshot.owner->data());
   HMW_EXPECT(player->Dispose().ok());
   HMW_EXPECT(*snapshot.owner ==
-             std::vector<uint8_t>({30, 20, 10, 255,
-                                   60, 50, 40, 255}));
+             std::vector<uint8_t>({10, 20, 30, 255,
+                                   40, 50, 60, 255}));
 }
 
 HMW_TEST(player_duration_rounds_positive_100ns_up_to_milliseconds) {
@@ -452,11 +452,11 @@ HMW_TEST(player_create_translates_source_exceptions_to_io_error) {
   }
 }
 
-HMW_TEST(player_create_translates_bgra_allocation_failure_to_io_error) {
+HMW_TEST(player_create_translates_rgba_allocation_failure_to_io_error) {
   FakeTextureRegistry registry;
   QueueDispatcher dispatcher;
   hmw::VideoPlayerDependencies dependencies;
-  dependencies.allocate_bgra =
+  dependencies.allocate_rgba =
       [](size_t) -> std::vector<uint8_t> {
     throw std::bad_alloc();
   };
@@ -560,7 +560,7 @@ HMW_TEST(player_worker_translates_allocation_failure_and_remains_disposable) {
   QueueDispatcher dispatcher;
   auto allocation_gate = std::make_shared<AllocationFailureGate>();
   hmw::VideoPlayerDependencies dependencies;
-  dependencies.allocate_bgra =
+  dependencies.allocate_rgba =
       [allocation_gate](size_t byte_count) {
     return allocation_gate->Allocate(byte_count);
   };
@@ -636,7 +636,7 @@ HMW_TEST(player_dispose_unregisters_texture_and_drops_callbacks) {
   HMW_EXPECT(registry.unregister_count == 1);
 
   const hmw::PixelBufferView disposed_view = registry.provider_();
-  HMW_EXPECT(disposed_view.bgra == nullptr);
+  HMW_EXPECT(disposed_view.rgba == nullptr);
   HMW_EXPECT(disposed_view.byte_count == 0);
 
   dispatcher.RunAll();

@@ -10,7 +10,7 @@ namespace hmw {
 
 struct PixelBufferView {
   std::shared_ptr<const std::vector<uint8_t>> owner;
-  const uint8_t* bgra;
+  const uint8_t* rgba;
   size_t byte_count;
   uint32_t width;
   uint32_t height;

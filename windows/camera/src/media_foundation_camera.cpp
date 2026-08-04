@@ -294,7 +294,7 @@ hmw::Result<hmw::RgbaFrame> BgraToRgba(uint32_t width, uint32_t height,
       rgba[offset] = bgra[offset + 2];
       rgba[offset + 1] = bgra[offset + 1];
       rgba[offset + 2] = bgra[offset];
-      rgba[offset + 3] = 255;
+      rgba[offset + 3] = bgra[offset + 3];
     }
     return hmw::Result<hmw::RgbaFrame>{
         hmw::RgbaFrame{width, height, pts_100ns, 0, std::move(rgba)},
@@ -305,25 +305,34 @@ hmw::Result<hmw::RgbaFrame> BgraToRgba(uint32_t width, uint32_t height,
   }
 }
 
-hmw::Result<std::vector<uint8_t>> RgbaToBgra(const hmw::RgbaFrame& rgba) {
-  size_t byte_count = 0;
-  if (!PixelByteCount(rgba.width, rgba.height, &byte_count) ||
-      rgba.pixels.size() != byte_count) {
-    return Failure<std::vector<uint8_t>>(
-        hmw::Status::kIoError, "camera RGBA pixels are not tightly packed");
+hmw::Result<CameraFrame> PrepareCameraTextureFrame(
+    uint32_t source_width, uint32_t source_height, int64_t pts_100ns,
+    const std::vector<uint8_t>& bgra,
+    const CameraPreviewConfig& requested) {
+  hmw::Result<hmw::RgbaFrame> rgba =
+      BgraToRgba(source_width, source_height, pts_100ns, bgra);
+  if (!rgba.ok()) {
+    return hmw::Result<CameraFrame>{std::nullopt, std::move(rgba.error)};
+  }
+  hmw::Result<hmw::RgbaFrame> transformed = hmw::TransformRgba(
+      *rgba.value, hmw::TransformRequest{
+                       requested.width, requested.height,
+                       hmw::FitMode::kCover, std::nullopt, 0xff000000U, 0});
+  if (!transformed.ok()) {
+    return hmw::Result<CameraFrame>{std::nullopt,
+                                    std::move(transformed.error)};
   }
   try {
-    std::vector<uint8_t> bgra(byte_count);
-    for (size_t offset = 0; offset < byte_count; offset += 4) {
-      bgra[offset] = rgba.pixels[offset + 2];
-      bgra[offset + 1] = rgba.pixels[offset + 1];
-      bgra[offset + 2] = rgba.pixels[offset];
-      bgra[offset + 3] = 255;
-    }
-    return hmw::Result<std::vector<uint8_t>>{std::move(bgra), std::nullopt};
+    std::shared_ptr<const std::vector<uint8_t>> snapshot =
+        std::make_shared<const std::vector<uint8_t>>(
+            std::move(transformed.value->pixels));
+    return hmw::Result<CameraFrame>{
+        CameraFrame{requested.width, requested.height, pts_100ns,
+                    std::move(snapshot)},
+        std::nullopt};
   } catch (const std::bad_alloc&) {
-    return Failure<std::vector<uint8_t>>(
-        hmw::Status::kIoError, "camera BGRA snapshot allocation failed");
+    return Failure<CameraFrame>(hmw::Status::kIoError,
+                                "camera RGBA snapshot allocation failed");
   }
 }
 
@@ -842,36 +851,9 @@ class MediaFoundationCameraSource final : public CameraFrameSource {
       if (!copied.ok()) {
         return hmw::Result<CameraFrame>{std::nullopt, std::move(copied.error)};
       }
-      hmw::Result<hmw::RgbaFrame> rgba = internal::BgraToRgba(
-          source_width_, source_height_, timestamp, *copied.value);
-      if (!rgba.ok()) {
-        return hmw::Result<CameraFrame>{std::nullopt, std::move(rgba.error)};
-      }
-      hmw::Result<hmw::RgbaFrame> transformed = hmw::TransformRgba(
-          *rgba.value, hmw::TransformRequest{
-                           requested_.width, requested_.height,
-                           hmw::FitMode::kCover, std::nullopt, 0xff000000U, 0});
-      if (!transformed.ok()) {
-        return hmw::Result<CameraFrame>{std::nullopt,
-                                        std::move(transformed.error)};
-      }
-      hmw::Result<std::vector<uint8_t>> bgra =
-          internal::RgbaToBgra(*transformed.value);
-      if (!bgra.ok()) {
-        return hmw::Result<CameraFrame>{std::nullopt, std::move(bgra.error)};
-      }
-      try {
-        std::shared_ptr<const std::vector<uint8_t>> snapshot =
-            std::make_shared<const std::vector<uint8_t>>(
-                std::move(*bgra.value));
-        return hmw::Result<CameraFrame>{
-            CameraFrame{requested_.width, requested_.height, timestamp,
-                        std::move(snapshot)},
-            std::nullopt};
-      } catch (const std::bad_alloc&) {
-        return Failure<CameraFrame>(hmw::Status::kIoError,
-                                    "camera snapshot allocation failed");
-      }
+      return internal::PrepareCameraTextureFrame(
+          source_width_, source_height_, timestamp, *copied.value,
+          requested_);
     }
   }
 

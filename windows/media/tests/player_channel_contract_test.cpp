@@ -66,7 +66,7 @@ class ChannelTextureRegistry final : public hmw::TextureRegistry {
     for (auto& entry : providers_) {
       if (entry.first == id) {
         const hmw::PixelBufferView view = entry.second();
-        return view.bgra != nullptr && view.byte_count == 8 &&
+        return view.rgba != nullptr && view.byte_count == 8 &&
                view.width == 2 && view.height == 1;
       }
     }

@@ -341,7 +341,7 @@ HMW_TEST(encoder_channel_emits_one_android_error_map_and_honors_cancelled_sink) 
   HMW_EXPECT(Invoke(channel, "openCamera", &arguments)->successes == 1);
   HMW_EXPECT(source->WaitForRead());
   hcw::CameraFrame invalid = Frame(4);
-  invalid.bgra =
+  invalid.rgba =
       std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{4});
   source->Push(invalid);
   HMW_EXPECT(dispatcher.WaitForPending());

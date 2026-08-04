@@ -21,7 +21,7 @@ struct CameraFrame {
   uint32_t width;
   uint32_t height;
   int64_t pts_100ns;
-  std::shared_ptr<const std::vector<uint8_t>> bgra;
+  std::shared_ptr<const std::vector<uint8_t>> rgba;
 };
 
 class CameraFrameSource {

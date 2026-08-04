@@ -139,8 +139,8 @@ class FlutterTextureRegistry final : public TextureRegistry {
     bool Refresh() {
       std::lock_guard<std::mutex> lock(mutex);
       const PixelBufferView view = provider();
-      if (!view.owner || view.bgra == nullptr ||
-          view.bgra != view.owner->data() ||
+      if (!view.owner || view.rgba == nullptr ||
+          view.rgba != view.owner->data() ||
           view.width == 0 || view.height == 0 ||
           view.width >
               (std::numeric_limits<size_t>::max)() / 4U /
@@ -152,16 +152,16 @@ class FlutterTextureRegistry final : public TextureRegistry {
       if (view.byte_count != required) {
         return false;
       }
-      if (stable_bgra.empty()) {
-        stable_bgra.assign(view.bgra, view.bgra + view.byte_count);
+      if (stable_rgba.empty()) {
+        stable_rgba.assign(view.rgba, view.rgba + view.byte_count);
       } else {
-        if (stable_bgra.size() != view.byte_count) {
+        if (stable_rgba.size() != view.byte_count) {
           return false;
         }
-        std::copy(view.bgra, view.bgra + view.byte_count,
-                  stable_bgra.begin());
+        std::copy(view.rgba, view.rgba + view.byte_count,
+                  stable_rgba.begin());
       }
-      pixel_buffer.buffer = stable_bgra.data();
+      pixel_buffer.buffer = stable_rgba.data();
       pixel_buffer.width = view.width;
       pixel_buffer.height = view.height;
       pixel_buffer.release_callback = nullptr;
@@ -171,7 +171,7 @@ class FlutterTextureRegistry final : public TextureRegistry {
 
     std::mutex mutex;
     PixelBufferProvider provider;
-    std::vector<uint8_t> stable_bgra;
+    std::vector<uint8_t> stable_rgba;
     FlutterDesktopPixelBuffer pixel_buffer{};
     flutter::PixelBufferTexture pixel_texture;
     flutter::TextureVariant texture;

@@ -1,5 +1,6 @@
 #include "video_texture_player.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <limits>
@@ -23,7 +24,7 @@ Result<T> Failure(Status status, const char* message) {
   return Result<T>{std::nullopt, Error{status, message}};
 }
 
-Result<std::vector<uint8_t>> ConvertToBgra(
+Result<std::vector<uint8_t>> CopyRgba(
     const RgbaFrame& frame, const VideoPlayerDependencies& dependencies) {
   if (frame.width == 0 || frame.height == 0 ||
       frame.width > (std::numeric_limits<size_t>::max)() / 4U /
@@ -39,24 +40,19 @@ Result<std::vector<uint8_t>> ConvertToBgra(
   }
 
   try {
-    std::vector<uint8_t> bgra =
-        dependencies.allocate_bgra
-            ? dependencies.allocate_bgra(byte_count)
+    std::vector<uint8_t> rgba =
+        dependencies.allocate_rgba
+            ? dependencies.allocate_rgba(byte_count)
             : std::vector<uint8_t>(byte_count);
-    if (bgra.size() != byte_count) {
+    if (rgba.size() != byte_count) {
       return Failure<std::vector<uint8_t>>(
-          Status::kIoError, "video BGRA allocation size is invalid");
+          Status::kIoError, "video RGBA allocation size is invalid");
     }
-    for (size_t offset = 0; offset < byte_count; offset += 4U) {
-      bgra[offset] = frame.pixels[offset + 2U];
-      bgra[offset + 1U] = frame.pixels[offset + 1U];
-      bgra[offset + 2U] = frame.pixels[offset];
-      bgra[offset + 3U] = frame.pixels[offset + 3U];
-    }
-    return Result<std::vector<uint8_t>>{std::move(bgra), std::nullopt};
+    std::copy(frame.pixels.begin(), frame.pixels.end(), rgba.begin());
+    return Result<std::vector<uint8_t>>{std::move(rgba), std::nullopt};
   } catch (...) {
     return Failure<std::vector<uint8_t>>(
-        Status::kIoError, "video BGRA allocation failed");
+        Status::kIoError, "video RGBA allocation failed");
   }
 }
 
@@ -64,7 +60,7 @@ Result<std::vector<uint8_t>> ConvertToBgra(
 
 struct VideoTexturePlayer::FrameState {
   std::mutex frame_mutex;
-  std::shared_ptr<const std::vector<uint8_t>> bgra;
+  std::shared_ptr<const std::vector<uint8_t>> rgba;
   uint32_t width = 0;
   uint32_t height = 0;
   std::mutex lifecycle_mutex;
@@ -114,7 +110,7 @@ Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
         Status::kDecodeFailed, "video source has no frames");
   }
   Result<std::vector<uint8_t>> converted =
-      ConvertToBgra(first_frame, dependencies);
+      CopyRgba(first_frame, dependencies);
   if (!converted.ok()) {
     return Result<std::unique_ptr<VideoTexturePlayer>>{
         std::nullopt, std::move(converted.error)};
@@ -126,7 +122,7 @@ Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
   }
 
     auto frame_state = std::make_shared<FrameState>();
-    frame_state->bgra =
+    frame_state->rgba =
         std::make_shared<const std::vector<uint8_t>>(std::move(*converted.value));
     frame_state->width = first_frame.width;
     frame_state->height = first_frame.height;
@@ -144,7 +140,7 @@ Result<std::unique_ptr<VideoTexturePlayer>> VideoTexturePlayer::Create(
           }
           std::lock_guard<std::mutex> lock(state->frame_mutex);
           std::shared_ptr<const std::vector<uint8_t>> snapshot =
-              state->bgra;
+              state->rgba;
           if (!snapshot) {
             return PixelBufferView{nullptr, nullptr, 0, 0, 0};
           }
@@ -299,7 +295,7 @@ Outcome VideoTexturePlayer::Dispose() {
   source_.reset();
   {
     std::lock_guard<std::mutex> lock(frame_state_->frame_mutex);
-    frame_state_->bgra.reset();
+    frame_state_->rgba.reset();
     frame_state_->width = 0;
     frame_state_->height = 0;
   }
@@ -457,7 +453,7 @@ bool VideoTexturePlayer::WaitUntilFrameTime(int64_t pts_ms,
 
 bool VideoTexturePlayer::PublishFrame(RgbaFrame frame,
                                       uint64_t generation) {
-  Result<std::vector<uint8_t>> converted = ConvertToBgra(frame, dependencies_);
+  Result<std::vector<uint8_t>> converted = CopyRgba(frame, dependencies_);
   if (!converted.ok()) {
     return false;
   }
@@ -470,7 +466,7 @@ bool VideoTexturePlayer::PublishFrame(RgbaFrame frame,
       return true;
     }
     std::lock_guard<std::mutex> frame_lock(frame_state_->frame_mutex);
-    frame_state_->bgra = std::move(snapshot);
+    frame_state_->rgba = std::move(snapshot);
     frame_state_->width = frame.width;
     frame_state_->height = frame.height;
   }

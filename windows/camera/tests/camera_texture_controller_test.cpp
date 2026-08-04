@@ -189,7 +189,7 @@ class RecordingRegistry final : public hmw::TextureRegistry {
   }
 
   static bool Valid(const hmw::PixelBufferView& view) {
-    return view.owner && view.bgra == view.owner->data() && view.width == 2 &&
+    return view.owner && view.rgba == view.owner->data() && view.width == 2 &&
            view.height == 1 && view.byte_count == 8;
   }
 
@@ -276,6 +276,31 @@ HMW_TEST(camera_texture_registers_once_marks_frames_and_readies_once) {
   dispatcher.Drain();
 }
 
+HMW_TEST(camera_texture_pixel_buffer_keeps_rgba_red_and_blue_channels) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  hcw::CameraTextureController controller(Cleanup(registry, dispatcher),
+                                          Factory(source));
+  HMW_EXPECT(controller.Open({2, 1, 15}, {}).ok());
+  HMW_EXPECT(source->WaitForRead());
+
+  const auto rgba = std::make_shared<const std::vector<uint8_t>>(
+      std::vector<uint8_t>{255, 0, 0, 17, 0, 0, 255, 23});
+  source->Push(hcw::CameraFrame{2, 1, 10'000, rgba});
+  HMW_EXPECT(dispatcher.WaitForPending());
+  dispatcher.Drain();
+
+  const hmw::PixelBufferView view = registry.Snapshot(41);
+  HMW_EXPECT(RecordingRegistry::Valid(view));
+  HMW_EXPECT(view.rgba == view.owner->data());
+  HMW_EXPECT(*view.owner ==
+             std::vector<uint8_t>({255, 0, 0, 17,
+                                   0, 0, 255, 23}));
+
+  HMW_EXPECT(controller.Close().ok());
+  dispatcher.Drain();
+}
 HMW_TEST(camera_texture_snapshot_owner_survives_later_flutter_reads) {
   auto source = std::make_shared<SourceState>();
   RecordingRegistry registry;
@@ -690,7 +715,7 @@ HMW_TEST(camera_texture_cleanup_reentrant_shutdown_retries_after_operation) {
   HMW_EXPECT(completion_calls == 1);
 }
 
-HMW_TEST(camera_texture_invalid_bgra_emits_one_platform_thread_error) {
+HMW_TEST(camera_texture_invalid_rgba_emits_one_platform_thread_error) {
   auto source = std::make_shared<SourceState>();
   RecordingRegistry registry;
   QueueDispatcher dispatcher;
@@ -708,7 +733,7 @@ HMW_TEST(camera_texture_invalid_bgra_emits_one_platform_thread_error) {
                  .ok());
   HMW_EXPECT(source->WaitForRead());
   hcw::CameraFrame short_frame = TextureFrame(7);
-  short_frame.bgra =
+  short_frame.rgba =
       std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{7});
   source->Push(short_frame);
   source->Push(short_frame);

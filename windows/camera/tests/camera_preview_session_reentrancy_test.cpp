@@ -299,7 +299,7 @@ HMW_TEST(camera_preview_late_old_frame_is_suppressed_after_reopen) {
   HMW_EXPECT(WaitFor(condition, mutex, [&] { return frames.size() == 1; }));
   HMW_EXPECT(frames.size() == 1);
   if (!frames.empty()) {
-    HMW_EXPECT(frames.front().bgra->at(0) == 29);
+    HMW_EXPECT(frames.front().rgba->at(0) == 29);
   }
   HMW_EXPECT(session.Close().ok());
 }

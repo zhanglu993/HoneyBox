@@ -30,7 +30,7 @@ struct CameraTextureController::State {
   int64_t texture_id = -1;
   uint32_t width = 0;
   uint32_t height = 0;
-  std::shared_ptr<const std::vector<uint8_t>> latest_bgra;
+  std::shared_ptr<const std::vector<uint8_t>> latest_rgba;
   CameraControllerCallbacks callbacks;
 };
 
@@ -41,12 +41,12 @@ hmw::Outcome DispatchFailure(const char* message) {
 }
 
 bool ValidFrame(const CameraFrame& frame) {
-  if (frame.width == 0 || frame.height == 0 || !frame.bgra ||
+  if (frame.width == 0 || frame.height == 0 || !frame.rgba ||
       frame.width > (std::numeric_limits<size_t>::max)() / 4U / frame.height) {
     return false;
   }
   const size_t expected = static_cast<size_t>(frame.width) * frame.height * 4U;
-  return frame.bgra->size() == expected;
+  return frame.rgba->size() == expected;
 }
 
 }  // namespace
@@ -79,7 +79,7 @@ CameraTextureController::~CameraTextureController() {
   state_->open = false;
   ++state_->generation;
   state_->callbacks = {};
-  state_->latest_bgra.reset();
+  state_->latest_rgba.reset();
 }
 
 hmw::Outcome CameraTextureController::Open(
@@ -123,7 +123,7 @@ hmw::Outcome CameraTextureController::Close() {
     state_->terminal = false;
     state_->registration_pending = false;
     state_->callbacks = {};
-    state_->latest_bgra.reset();
+    state_->latest_rgba.reset();
     state_->width = 0;
     state_->height = 0;
     if (state_->texture_id >= 0) {
@@ -148,7 +148,7 @@ void CameraTextureController::PublishFrame(
   }
   if (!ValidFrame(frame)) {
     PublishError(weak_state, hmw::Error{hmw::Status::kIoError,
-                                        "camera BGRA frame size is invalid"});
+                                        "camera RGBA frame size is invalid"});
     return;
   }
 
@@ -160,7 +160,7 @@ void CameraTextureController::PublishFrame(
     if (!state->alive || !state->open || state->terminal) {
       return;
     }
-    state->latest_bgra = std::move(frame.bgra);
+    state->latest_rgba = std::move(frame.rgba);
     state->width = frame.width;
     state->height = frame.height;
     generation = state->generation;
@@ -199,7 +199,7 @@ void CameraTextureController::PublishFrame(
                       return hmw::PixelBufferView{};
                     }
                     std::lock_guard<std::mutex> lock(provider_state->mutex);
-                    const auto snapshot = provider_state->latest_bgra;
+                    const auto snapshot = provider_state->latest_rgba;
                     if (!snapshot) {
                       return hmw::PixelBufferView{};
                     }

@@ -170,12 +170,12 @@ HMW_TEST(camera_preview_reopen_discards_old_frame_backlog_before_new_frame) {
             std::make_unique<BurstSource>(state), std::nullopt};
       },
       {[&](uint64_t, hcw::CameraFrame frame) {
-         if (frame.bgra->at(0) == 1) {
+         if (frame.rgba->at(0) == 1) {
            gate.Block();
            return;
          }
          std::lock_guard<std::mutex> lock(mutex);
-         delivered_markers.push_back(frame.bgra->at(0));
+         delivered_markers.push_back(frame.rgba->at(0));
          condition.notify_all();
        }, {}});
 
