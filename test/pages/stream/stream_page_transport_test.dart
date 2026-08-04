@@ -41,6 +41,7 @@ void main() {
   Future<void> mountReadyPage(
     WidgetTester tester, {
     required List<_FakeStreamTransport> withTransports,
+    Duration stopTimeout = const Duration(seconds: 5),
   }) async {
     transports.addAll(withTransports);
     final queue = Queue<_FakeStreamTransport>.of(withTransports);
@@ -53,6 +54,7 @@ void main() {
             deviceId: 'test',
             encoder: encoder,
             transportFactory: (_) => queue.removeFirst(),
+            encoderStopTimeout: stopTimeout,
             requestCameraPermission: () async => PermissionStatus.granted,
             loadEncoderConfig: () async => const EncoderConfig(),
           ),
@@ -144,35 +146,82 @@ void main() {
     expect(transport.availabilityCancels, 1);
   });
 
-  testWidgets(
-      'late old transport and encoder callbacks cannot stop replacement',
+  testWidgets('rapid restart waits for terminal stopped with mutable callbacks',
       (tester) async {
     final first = _FakeStreamTransport();
     final second = _FakeStreamTransport();
+    encoder.autoStopEvent = false;
     await mountReadyPage(tester, withTransports: [first, second]);
     await tapShutter(tester);
-    final oldRun = encoder.runs.single;
+    final startedCallback = encoder.onStarted;
+    final stoppedCallback = encoder.onStopped;
+    final frameCallback = encoder.onFrame;
+    final errorCallback = encoder.onError;
+    final statsCallback = encoder.onStats;
 
     await tapShutter(tester);
-    await tapShutter(tester);
-    expect(encoder.runs, hasLength(2));
-    expect(find.text('投屏中'), findsOneWidget);
-
-    first.emitAvailability(false);
-    oldRun.onStarted?.call('old', 1, 1);
-    oldRun.onFrame?.call(Uint8List.fromList([9]), true);
-    oldRun.onStopped?.call(const EncoderResult());
+    await tester.tap(find.byKey(const Key('stream-shutter')));
     await tester.pump();
     await tester.pump();
 
     expect(encoder.stopCount, 1);
-    expect(second.frameSendCount, 0);
+    expect(encoder.startCalls, hasLength(1));
+    expect(second.messages, isEmpty);
+    expect(identical(encoder.onStarted, startedCallback), isTrue);
+    expect(identical(encoder.onStopped, stoppedCallback), isTrue);
+    expect(identical(encoder.onFrame, frameCallback), isTrue);
+    expect(identical(encoder.onError, errorCallback), isTrue);
+    expect(identical(encoder.onStats, statsCallback), isTrue);
+
+    encoder.emitFrame(Uint8List.fromList([9]), true);
+    encoder.emitError('旧编码错误');
+    encoder.emitStats(const EncoderStats(fps: 99, frames: 99));
+    encoder.emitInfo('旧编码信息');
+    encoder.emitPreview(true, 99, 1, 1);
+    await tester.pump();
+
+    first.emitAvailability(false);
+    expect(first.frameSendCount, 0);
+    expect(find.textContaining('旧编码错误'), findsNothing);
+    expect(find.textContaining('99.0 fps'), findsNothing);
+
+    encoder.emitStopped();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(encoder.stopCount, 1);
+    expect(encoder.startCalls, hasLength(2));
+    expect(second.keys.first, BleCmdStreamKey.open);
     expect(find.text('投屏中'), findsOneWidget);
 
-    encoder.runs.last.onFrame?.call(Uint8List.fromList([1, 2, 3]), true);
+    encoder.emitFrame(Uint8List.fromList([1, 2, 3]), true);
     await tester.pump();
     await tester.pump();
     expect(second.frameSendCount, 1);
+  });
+
+  testWidgets('stop timeout rejects restart without retiring the old run',
+      (tester) async {
+    final first = _FakeStreamTransport();
+    final second = _FakeStreamTransport();
+    encoder.autoStopEvent = false;
+    await mountReadyPage(
+      tester,
+      withTransports: [first, second],
+      stopTimeout: const Duration(milliseconds: 10),
+    );
+    await tapShutter(tester);
+
+    await tapShutter(tester);
+    await tester.tap(find.byKey(const Key('stream-shutter')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 20));
+    await tester.pump();
+
+    expect(encoder.startCalls, hasLength(1));
+    expect(second.messages, isEmpty);
+    expect(find.text('编码器尚未停止，无法重新投屏'), findsOneWidget);
   });
 
   testWidgets('rejected ACK includes the raw result', (tester) async {
@@ -215,15 +264,15 @@ void main() {
     await tapShutter(tester);
 
     transport.failNextFrame = true;
-    encoder.runs.last.onFrame?.call(Uint8List.fromList([1]), true);
+    encoder.emitFrame(Uint8List.fromList([1]), true);
     await tester.pump();
     await tester.pump();
     expect(encoder.permitCount, 1);
 
     final blocker = Completer<void>();
     transport.blockNextFrame = blocker;
-    encoder.runs.last.onFrame?.call(Uint8List.fromList([2]), false);
-    encoder.runs.last.onFrame?.call(Uint8List.fromList([3]), false);
+    encoder.emitFrame(Uint8List.fromList([2]), false);
+    encoder.emitFrame(Uint8List.fromList([3]), false);
     await tester.pump();
     expect(transport.frameSendCount, 2);
     blocker.complete();
@@ -349,18 +398,10 @@ class _FakeStreamTransport implements StreamTransport {
   }
 }
 
-class _EncoderRun {
-  const _EncoderRun(this.onStarted, this.onStopped, this.onFrame);
-
-  final void Function(String path, int width, int height)? onStarted;
-  final void Function(EncoderResult result)? onStopped;
-  final void Function(Uint8List data, bool key)? onFrame;
-}
-
 class _FakeEncoder extends EncoderService {
   List<String>? order;
   final List<EncoderConfig> startCalls = [];
-  final List<_EncoderRun> runs = [];
+  bool autoStopEvent = true;
   int stopCount = 0;
   int permitCount = 0;
 
@@ -388,16 +429,27 @@ class _FakeEncoder extends EncoderService {
   }) async {
     order?.add('encoder-start');
     startCalls.add(config);
-    final run = _EncoderRun(onStarted, onStopped, onFrame);
-    runs.add(run);
-    run.onStarted?.call('', config.width, config.height);
+    onStarted?.call('', config.width, config.height);
   }
 
   @override
   Future<void> stopEncoding() async {
     stopCount++;
-    runs.lastOrNull?.onStopped?.call(const EncoderResult());
+    if (autoStopEvent) emitStopped();
   }
+
+  void emitStopped() => onStopped?.call(const EncoderResult());
+
+  void emitFrame(Uint8List data, bool key) => onFrame?.call(data, key);
+
+  void emitError(String message) => onError?.call(message);
+
+  void emitStats(EncoderStats stats) => onStats?.call(stats);
+
+  void emitInfo(String message) => onInfo?.call(message);
+
+  void emitPreview(bool encoded, int textureId, int width, int height) =>
+      onPreview?.call(encoded, textureId, width, height);
 
   @override
   Future<void> requestEncoderFrame() async {
