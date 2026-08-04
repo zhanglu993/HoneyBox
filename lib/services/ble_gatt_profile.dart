@@ -23,6 +23,60 @@ class BleGattEndpoint<T> {
   final bool withoutResponse;
 }
 
+/// Owns one atomically published connection value across replacements.
+class BleConnectionOwner<T> {
+  int _generation = 0;
+  T? _value;
+
+  int get generation => _generation;
+  T? get value => _value;
+
+  /// Starts a replacement generation and retires the previously published
+  /// value synchronously before the replacement can publish anything.
+  int replace([void Function(T? value)? onRetire]) {
+    final retired = _value;
+    _generation++;
+    try {
+      onRetire?.call(retired);
+    } finally {
+      _value = null;
+    }
+    return _generation;
+  }
+
+  bool isCurrent(int generation) => generation == _generation;
+
+  /// Publishes only if setup still belongs to the current generation.
+  bool publish(int generation, T value) {
+    if (!isCurrent(generation)) return false;
+    _value = value;
+    return true;
+  }
+
+  /// Runs a connection-owned side effect only for the current generation.
+  bool runIfCurrent(int generation, void Function() action) {
+    if (!isCurrent(generation)) return false;
+    action();
+    return true;
+  }
+
+  /// Invalidates and retires the current generation, ignoring stale callers.
+  bool clearIfCurrent(
+    int generation,
+    void Function(T? value) onRetire,
+  ) {
+    if (!isCurrent(generation)) return false;
+    final retired = _value;
+    _generation++;
+    try {
+      onRetire(retired);
+    } finally {
+      _value = null;
+    }
+    return true;
+  }
+}
+
 class BleGattProfile<T> {
   const BleGattProfile({
     this.commandTx,

@@ -135,4 +135,62 @@ void main() {
       expect(profile.commandRx, isNull);
     });
   });
+
+  group('BleConnectionOwner', () {
+    test('replacement retires a previous session before publishing a new one',
+        () {
+      final owner = BleConnectionOwner<String>();
+      final firstGeneration = owner.replace();
+      expect(owner.publish(firstGeneration, 'session-a'), isTrue);
+      final retired = <String?>[];
+
+      final secondGeneration = owner.replace((value) {
+        expect(owner.value, 'session-a');
+        retired.add(value);
+      });
+
+      expect(secondGeneration, isNot(firstGeneration));
+      expect(retired, <String?>['session-a']);
+      expect(owner.value, isNull);
+    });
+
+    test('stale subscription failure cannot run cleanup for the replacement',
+        () {
+      final owner = BleConnectionOwner<String>();
+      final firstGeneration = owner.replace();
+      expect(owner.publish(firstGeneration, 'stream-a'), isTrue);
+      final secondGeneration = owner.replace();
+      expect(owner.publish(secondGeneration, 'stream-b'), isTrue);
+      var staleCleanupRan = false;
+
+      final accepted = owner.runIfCurrent(firstGeneration, () {
+        staleCleanupRan = true;
+      });
+
+      expect(accepted, isFalse);
+      expect(staleCleanupRan, isFalse);
+      expect(owner.value, 'stream-b');
+    });
+
+    test('stale fatal error cannot retire the current transport', () {
+      final owner = BleConnectionOwner<String>();
+      final firstGeneration = owner.replace();
+      expect(owner.publish(firstGeneration, 'transport-a'), isTrue);
+      final secondGeneration = owner.replace();
+      expect(owner.publish(secondGeneration, 'transport-b'), isTrue);
+      final retired = <String?>[];
+
+      final staleAccepted = owner.clearIfCurrent(
+        firstGeneration,
+        retired.add,
+      );
+
+      expect(staleAccepted, isFalse);
+      expect(retired, isEmpty);
+      expect(owner.value, 'transport-b');
+      expect(owner.clearIfCurrent(secondGeneration, retired.add), isTrue);
+      expect(retired, <String?>['transport-b']);
+      expect(owner.value, isNull);
+    });
+  });
 }
