@@ -335,11 +335,13 @@ class QueueDispatcher final : public hmw::PlatformDispatcher {
 
 }  // namespace
 
-HMW_TEST(player_create_publishes_first_rgba_frame_before_success) {
+HMW_TEST(player_create_publishes_first_rgba_frame_and_alpha_before_success) {
   FakeTextureRegistry registry;
   QueueDispatcher dispatcher;
   auto source = std::make_unique<FakeFrameSource>(
-      std::vector<hmw::RgbaFrame>{TestFrame(0, 10)});
+      std::vector<hmw::RgbaFrame>{hmw::RgbaFrame{
+          2, 1, 0, 1'000'000,
+          {10, 20, 30, 40, 50, 60, 70, 80}}});
 
   auto created =
       hmw::VideoTexturePlayer::Create(std::move(source), registry, dispatcher);
@@ -350,7 +352,7 @@ HMW_TEST(player_create_publishes_first_rgba_frame_before_success) {
   HMW_EXPECT(registry.last_width == 2);
   HMW_EXPECT(registry.last_height == 1);
   HMW_EXPECT(registry.last_bytes ==
-             std::vector<uint8_t>({10, 20, 30, 255, 40, 50, 60, 255}));
+             std::vector<uint8_t>({10, 20, 30, 40, 50, 60, 70, 80}));
 }
 
 HMW_TEST(player_provider_returns_owned_immutable_snapshot) {

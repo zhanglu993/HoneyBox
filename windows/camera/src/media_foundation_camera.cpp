@@ -294,7 +294,7 @@ hmw::Result<hmw::RgbaFrame> BgraToRgba(uint32_t width, uint32_t height,
       rgba[offset] = bgra[offset + 2];
       rgba[offset + 1] = bgra[offset + 1];
       rgba[offset + 2] = bgra[offset];
-      rgba[offset + 3] = bgra[offset + 3];
+      rgba[offset + 3] = 255;
     }
     return hmw::Result<hmw::RgbaFrame>{
         hmw::RgbaFrame{width, height, pts_100ns, 0, std::move(rgba)},
