@@ -86,6 +86,8 @@ class _RetxEntry {
 
 enum StreamState { idle, opening, open }
 
+enum StreamOpenFailure { none, timeout, rejected, transport }
+
 /// Client-side state machine for the L2 video-stream protocol with credit flow
 /// control and gap retransmission.
 class StreamSession {
@@ -94,16 +96,26 @@ class StreamSession {
 
   /// Bytes of frame data carried per KS_FRAME = `fragSize - 13` (no L1).
   final int Function() chunkSize;
+  final Duration _openTimeout;
+  final Duration _creditTimeout;
+  final int _retxKeep;
 
-  StreamSession({required this.send, required this.chunkSize});
-
-  static const Duration _openTimeout = Duration(seconds: 5);
-  static const Duration _creditTimeout = Duration(seconds: 5);
-  static const int _retxKeep = 3;
+  StreamSession({
+    required this.send,
+    required this.chunkSize,
+    Duration openTimeout = const Duration(seconds: 5),
+    Duration creditTimeout = const Duration(seconds: 5),
+    int retransmitFrameLimit = 3,
+  })  : _openTimeout = openTimeout,
+        _creditTimeout = creditTimeout,
+        _retxKeep = retransmitFrameLimit;
 
   StreamState _state = StreamState.idle;
   int _sessionId = 0;
   int _frameSeq = 0;
+  int _operationGeneration = 0;
+  StreamOpenFailure _lastOpenFailure = StreamOpenFailure.none;
+  int? _lastAckResult;
 
   // Credit flow control. _flowOn=false means the device disabled flow control
   // (init_credits=0xFFFF) → fire-and-forget.
@@ -124,6 +136,8 @@ class StreamSession {
   bool get isOpen => _state == StreamState.open;
   bool get flowOn => _flowOn;
   int get credits => _credits;
+  StreamOpenFailure get lastOpenFailure => _lastOpenFailure;
+  int? get lastAckResult => _lastAckResult;
 
   // ──────────────────────────────────────────────────────────────────────
   // Session lifecycle
@@ -132,6 +146,8 @@ class StreamSession {
   /// Open a stream session and await the device KS_ACK. Returns false on
   /// timeout / rejection.
   Future<bool> open(int codec, int w, int h, int fps) async {
+    final generation = ++_operationGeneration;
+    _cancelPendingOpen();
     _sessionId = (_sessionId + 1) & 0xFF;
     _frameSeq = 0;
     _state = StreamState.opening;
@@ -139,25 +155,35 @@ class StreamSession {
     _flowOn = false;
     _wakeCredit(false);
     _retxFrames.clear();
+    _lastOpenFailure = StreamOpenFailure.none;
+    _lastAckResult = null;
 
     final completer = Completer<bool>();
     _openCompleter = completer;
-    _openTimer?.cancel();
     _openTimer = Timer(_openTimeout, () {
-      if (_state == StreamState.opening) {
-        _state = StreamState.idle;
-        _openCompleter = null;
-        if (!completer.isCompleted) completer.complete(false);
+      if (generation != _operationGeneration ||
+          _state != StreamState.opening ||
+          _openCompleter != completer) {
+        return;
       }
+      _state = StreamState.idle;
+      _openCompleter = null;
+      _openTimer = null;
+      _lastOpenFailure = StreamOpenFailure.timeout;
+      if (!completer.isCompleted) completer.complete(false);
     });
 
     try {
       await send(buildStreamOpen(_sessionId, codec, w, h, fps));
     } catch (_) {
-      _openTimer?.cancel();
-      _state = StreamState.idle;
-      _openCompleter = null;
-      if (!completer.isCompleted) completer.complete(false);
+      if (generation == _operationGeneration && _openCompleter == completer) {
+        _openTimer?.cancel();
+        _openTimer = null;
+        _state = StreamState.idle;
+        _openCompleter = null;
+        _lastOpenFailure = StreamOpenFailure.transport;
+        if (!completer.isCompleted) completer.complete(false);
+      }
     }
     return completer.future;
   }
@@ -167,7 +193,9 @@ class StreamSession {
   /// timeout / session closed / write error).
   Future<bool> sendFrame(Uint8List frameBytes) async {
     if (_state != StreamState.open) return false;
+    final generation = _operationGeneration;
     final cs = chunkSize();
+    if (cs <= 0) return false;
     final seq = _frameSeq;
     final total = frameBytes.length;
     _frameSeq = (_frameSeq + 1) & 0xFFFF;
@@ -179,47 +207,52 @@ class StreamSession {
       _retxFrames.remove(_retxFrames.keys.first);
     }
 
-    bool failed = false;
-    Future<void>? last;
+    final writes = <Future<void>>[];
     for (int off = 0; off < total; off += cs) {
       if (_flowOn) {
         while (_credits <= 0) {
           debugPrint('流/信用耗尽 seq=$seq off=$off/$total 等待补充...');
-          final got = await _waitCredit();
-          if (!got) {
+          final got = await _waitCredit(generation);
+          if (!got || generation != _operationGeneration) {
             debugPrint('流/信用超时(5s未补) 丢帧 seq=$seq @off=$off/$total');
             return false;
           }
           if (_state != StreamState.open) return false;
         }
-        if (_state != StreamState.open) return false;
+        if (generation != _operationGeneration || _state != StreamState.open) {
+          return false;
+        }
         _credits--;
       }
       final end = (off + cs < total) ? off + cs : total;
       final chunk = Uint8List.sublistView(frameBytes, off, end);
       retxBuf[off] = _RetxEntry(chunk, total);
-      final p = send(buildStreamChunk(seq, off, total, chunk));
-      p.catchError((_) {
-        failed = true;
-      });
-      last = p;
-    }
-    if (last != null) {
       try {
-        await last;
-      } catch (_) {}
+        writes.add(send(buildStreamChunk(seq, off, total, chunk)));
+      } catch (_) {
+        return false;
+      }
     }
-    return !failed && _state == StreamState.open;
+    try {
+      await Future.wait(writes, eagerError: false);
+    } catch (_) {
+      return false;
+    }
+    return generation == _operationGeneration && _state == StreamState.open;
   }
 
   /// Close the session (sends KS_CLOSE).
   void close() {
-    if (_state == StreamState.idle) return;
-    _openTimer?.cancel();
+    ++_operationGeneration;
     final prev = _state;
-    _state = StreamState.idle;
+    _openTimer?.cancel();
+    _openTimer = null;
+    final c = _openCompleter;
+    if (c != null && !c.isCompleted) c.complete(false);
     _openCompleter = null;
+    _state = StreamState.idle;
     _credits = 0;
+    _flowOn = false;
     _wakeCredit(false);
     _retxFrames.clear();
     if (prev != StreamState.idle) {
@@ -229,14 +262,25 @@ class StreamSession {
 
   /// Reset on transport disconnect (no KS_CLOSE — peer is gone).
   void onDisconnect() {
+    ++_operationGeneration;
     _openTimer?.cancel();
+    _openTimer = null;
+    final c = _openCompleter;
+    if (c != null && !c.isCompleted) c.complete(false);
+    _openCompleter = null;
     _state = StreamState.idle;
     _credits = 0;
+    _flowOn = false;
     _wakeCredit(false);
     _retxFrames.clear();
+  }
+
+  void _cancelPendingOpen() {
+    _openTimer?.cancel();
+    _openTimer = null;
     final c = _openCompleter;
-    _openCompleter = null;
     if (c != null && !c.isCompleted) c.complete(false);
+    _openCompleter = null;
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -248,10 +292,11 @@ class StreamSession {
     if (l2.length < 5 || l2[0] != BleCmd.stream) return;
     final key = l2[2];
     final vlen = _u16be(l2[3], l2[4]);
-    final v = Uint8List.sublistView(l2, 5, (5 + vlen).clamp(5, l2.length));
+    if (vlen > l2.length - 5) return;
+    final v = Uint8List.sublistView(l2, 5, 5 + vlen);
 
     if (key == BleCmdStreamKey.ack && _state == StreamState.opening) {
-      _onAck(v, vlen);
+      _onAck(v);
     } else if (key == BleCmdStreamKey.credit) {
       _onCredit(v);
     } else if (key == BleCmdStreamKey.report) {
@@ -261,17 +306,17 @@ class StreamSession {
     }
   }
 
-  void _onAck(Uint8List v, int vlen) {
+  void _onAck(Uint8List v) {
+    if (v.length < 2 || v[0] != _sessionId) return;
+    final c = _openCompleter;
+    if (c == null) return;
     _openTimer?.cancel();
-    final ackSid = v.isNotEmpty ? v[0] : -1;
-    if (ackSid != _sessionId) {
-      debugPrint('流/ACK sid 差异! 设备回 sid=$ackSid 我们发 sid=$_sessionId '
-          '(后续 CREDIT 若用设备 sid 将被丢弃)');
-    }
-    final ok = v.length >= 2 && v[1] == 0x00;
+    _openTimer = null;
+    _lastAckResult = v[1];
+    final ok = _lastAckResult == 0x00;
     // KS_ACK may carry init_credits(u16be) after result. 0xFFFF or missing =
     // unlimited (no flow control).
-    final ic = (vlen >= 4) ? _u16be(v[2], v[3]) : 0xFFFF;
+    final ic = v.length >= 4 ? _u16be(v[2], v[3]) : 0xFFFF;
     _state = ok ? StreamState.open : StreamState.idle;
     if (ok) {
       if (ic == 0xFFFF) {
@@ -281,23 +326,23 @@ class StreamSession {
         _flowOn = true;
         _credits = ic;
       }
+    } else {
+      _lastOpenFailure = StreamOpenFailure.rejected;
     }
-    final c = _openCompleter;
     _openCompleter = null;
-    if (c != null && !c.isCompleted) c.complete(ok);
+    if (!c.isCompleted) c.complete(ok);
   }
 
   void _onCredit(Uint8List v) {
     if (v.length < 3) return;
     final sid = v[0];
     final n = _u16be(v[1], v[2]);
-    if (!_flowOn) {
-      debugPrint('流/CREDIT 被忽略(无限信用模式) sid=$sid +$n');
+    if (sid != _sessionId) {
+      debugPrint('流/CREDIT sid 不匹配! 收到 sid=$sid 期望=$_sessionId +$n');
       return;
     }
-    if (sid != _sessionId) {
-      debugPrint('流/CREDIT sid 不匹配! 收到 sid=$sid 期望=$_sessionId +$n '
-          '(信用不会补充 → 会卡住)');
+    if (!_flowOn) {
+      debugPrint('流/CREDIT 被忽略(无限信用模式) sid=$sid +$n');
       return;
     }
     _grantCredits(n);
@@ -306,9 +351,15 @@ class StreamSession {
 
   Future<void> _onReport(Uint8List v) async {
     // session_id(u8) frame_seq(u16be) gap_count(u8) [gap_start(u24be) gap_end(u24be)]*
-    if (v.length < 4 || v[0] != _sessionId) return;
-    final repSeq = _u16be(v[1], v[2]);
+    if (v.length < 4 || v[0] != _sessionId || _state != StreamState.open) {
+      return;
+    }
+    const baseLen = 4;
+    const gapBytes = 6;
     final gc = v[3];
+    if (gc > (v.length - baseLen) ~/ gapBytes) return;
+    final generation = _operationGeneration;
+    final repSeq = _u16be(v[1], v[2]);
     if (gc == 0) {
       _retxFrames.remove(repSeq); // frame complete → drop its retx buffer
       return;
@@ -316,8 +367,6 @@ class StreamSession {
     debugPrint('流/REPORT seq=$repSeq 缺口×$gc → 重传');
     final buf = _retxFrames[repSeq];
     if (buf == null) return;
-    const baseLen = 4, gapBytes = 6;
-    if (v.length < baseLen + gc * gapBytes) return;
 
     // Match each gap [gs,ge) against buffered chunk ranges [boff, boff+len).
     final retxOffs = <int>{};
@@ -331,7 +380,9 @@ class StreamSession {
     }
     final sorted = retxOffs.toList()..sort();
     for (final boff in sorted) {
-      if (_state != StreamState.open) break;
+      if (generation != _operationGeneration || _state != StreamState.open) {
+        break;
+      }
       final entry = buf[boff];
       if (entry == null) continue;
       // Retransmits don't consume credit and are sent one at a time (no burst).
@@ -348,13 +399,15 @@ class StreamSession {
     _wakeCredit(true);
   }
 
-  Future<bool> _waitCredit() {
+  Future<bool> _waitCredit(int generation) {
     if (_credits > 0) return Future.value(true);
     final c = Completer<bool>();
     _creditWake = c;
     _creditTimer?.cancel();
     _creditTimer = Timer(_creditTimeout, () {
-      if (_creditWake == c) _creditWake = null;
+      if (generation != _operationGeneration || _creditWake != c) return;
+      _creditWake = null;
+      _creditTimer = null;
       if (!c.isCompleted) c.complete(false);
     });
     return c.future;
@@ -362,6 +415,7 @@ class StreamSession {
 
   void _wakeCredit(bool ok) {
     _creditTimer?.cancel();
+    _creditTimer = null;
     final w = _creditWake;
     _creditWake = null;
     if (w != null && !w.isCompleted) w.complete(ok);
