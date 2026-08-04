@@ -201,6 +201,38 @@ void main() {
     expect(second.frameSendCount, 1);
   });
 
+  testWidgets(
+      'stopping run error cannot be rerouted into replacement camera attempt',
+      (tester) async {
+    final transport = _FakeStreamTransport();
+    encoder.autoStopEvent = false;
+    await mountReadyPage(tester, withTransports: [transport]);
+    await tapShutter(tester);
+    final permanentErrorDispatcher = encoder.onError;
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+
+    expect(encoder.stopCount, 1);
+    expect(identical(encoder.onError, permanentErrorDispatcher), isTrue);
+
+    encoder.emitError('旧编码错误误投摄像头');
+    await tester.pump();
+
+    expect(find.textContaining('旧编码错误误投摄像头'), findsNothing);
+
+    encoder.emitStopped();
+    await tester.pump();
+    encoder.emitError('当前摄像头错误');
+    await tester.pump();
+
+    expect(find.textContaining('当前摄像头错误'), findsWidgets);
+  });
+
   testWidgets('stop timeout rejects restart without retiring the old run',
       (tester) async {
     final first = _FakeStreamTransport();
@@ -222,6 +254,34 @@ void main() {
     expect(encoder.startCalls, hasLength(1));
     expect(second.messages, isEmpty);
     expect(find.text('编码器尚未停止，无法重新投屏'), findsOneWidget);
+  });
+
+  testWidgets(
+      'stop method failure keeps restart blocked until terminal stopped',
+      (tester) async {
+    final first = _FakeStreamTransport();
+    final second = _FakeStreamTransport();
+    encoder
+      ..autoStopEvent = false
+      ..stopError = StateError('stop method failed');
+    await mountReadyPage(tester, withTransports: [first, second]);
+    await tapShutter(tester);
+
+    await tapShutter(tester);
+    await tester.tap(find.byKey(const Key('stream-shutter')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(encoder.startCalls, hasLength(1));
+    expect(second.messages, isEmpty);
+    expect(find.text('编码器尚未停止，无法重新投屏'), findsOneWidget);
+
+    encoder.emitStopped();
+    await tester.pump();
+    await tapShutter(tester);
+
+    expect(encoder.startCalls, hasLength(2));
+    expect(second.keys.first, BleCmdStreamKey.open);
   });
 
   testWidgets('rejected ACK includes the raw result', (tester) async {
@@ -402,6 +462,7 @@ class _FakeEncoder extends EncoderService {
   List<String>? order;
   final List<EncoderConfig> startCalls = [];
   bool autoStopEvent = true;
+  Object? stopError;
   int stopCount = 0;
   int permitCount = 0;
 
@@ -423,6 +484,9 @@ class _FakeEncoder extends EncoderService {
   }
 
   @override
+  Future<void> restartCameraSession() async {}
+
+  @override
   Future<void> startEncoding(
     EncoderConfig config, {
     bool stream = false,
@@ -435,6 +499,7 @@ class _FakeEncoder extends EncoderService {
   @override
   Future<void> stopEncoding() async {
     stopCount++;
+    if (stopError != null) throw stopError!;
     if (autoStopEvent) emitStopped();
   }
 

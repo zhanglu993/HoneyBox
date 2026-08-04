@@ -262,7 +262,8 @@ void main() {
     expect(find.byType(Texture), findsNothing);
   });
 
-  testWidgets('retry rejects ready and error callbacks from the old attempt',
+  testWidgets(
+      'retry rejects stale ready and keeps the permanent error dispatcher',
       (tester) async {
     final fake = _AttemptEncoderService();
     encoder = fake;
@@ -278,12 +279,19 @@ void main() {
     fake.cameraCallbacks[1]?.call(_cameraInfo(42));
     await tester.pump();
     fake.cameraCallbacks.first?.call(_cameraInfo(41));
-    fake.errorCallbacks.first?.call('旧错误');
     await tester.pump();
 
     final texture = tester.widget<Texture>(find.byType(Texture));
     expect(texture.textureId, 42);
-    expect(find.textContaining('旧错误'), findsNothing);
+    expect(fake.errorCallbacks, hasLength(2));
+    expect(
+      identical(fake.errorCallbacks.first, fake.errorCallbacks.last),
+      isTrue,
+    );
+
+    fake.errorCallbacks.first?.call('当前摄像头错误');
+    await tester.pump();
+    expect(find.textContaining('当前摄像头错误'), findsWidgets);
   });
 }
 

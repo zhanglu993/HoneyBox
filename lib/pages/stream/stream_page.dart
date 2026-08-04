@@ -217,13 +217,9 @@ class _StreamPageState extends ConsumerState<StreamPage>
   _CameraAttempt _beginCameraAttempt() {
     final attempt = _CameraAttempt(++_nextCameraAttemptId);
     _cameraAttempt = attempt;
-    _encoder
-      ..onCamera = (info) {
-        _handleCameraReady(attempt, info);
-      }
-      ..onError = (message) {
-        _handleCameraError(attempt, message);
-      };
+    _encoder.onCamera = (info) {
+      _handleCameraReady(attempt, info);
+    };
     return attempt;
   }
 
@@ -609,7 +605,8 @@ class _StreamPageState extends ConsumerState<StreamPage>
       }
       ..onStats = _handleEncoderStats
       ..onInfo = _handleEncoderInfo
-      ..onPreview = _handleEncoderPreview;
+      ..onPreview = _handleEncoderPreview
+      ..onError = _encoderRunErrorDispatcher;
   }
 
   bool get _encoderStopping {
@@ -766,7 +763,6 @@ class _StreamPageState extends ConsumerState<StreamPage>
     _encoderRunSession = session;
     _encoderRunWifi = wifi;
     _encoderRunStreams = stream;
-    _encoder.onError = _encoderRunErrorDispatcher;
     unawaited(_encoder.startEncoding(_config, stream: stream).then<void>(
       (_) {},
       onError: (Object _, StackTrace __) {
