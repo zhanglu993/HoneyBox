@@ -4,6 +4,7 @@ add_executable(honey_camera_windows_tests
   camera_preview_session_test.cpp
   camera_preview_session_reentrancy_test.cpp
   camera_preview_queue_test.cpp
+  camera_encoding_session_test.cpp
   media_foundation_camera_test.cpp
   camera_texture_controller_test.cpp
   encoder_channel_contract_test.cpp
@@ -51,6 +52,9 @@ add_test(NAME camera_status
 
 add_test(NAME camera_preview_session
   COMMAND honey_camera_windows_tests camera_preview_)
+
+add_test(NAME camera_encoding_session
+  COMMAND honey_camera_windows_tests camera_encoding_session)
 
 add_test(NAME camera_mode_helpers
   COMMAND honey_camera_windows_tests camera_mode_)

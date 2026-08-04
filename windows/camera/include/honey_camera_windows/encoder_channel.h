@@ -28,6 +28,7 @@ struct CameraReady {
 struct CameraControllerCallbacks {
   std::function<void(CameraReady)> on_ready;
   std::function<void(hmw::Error)> on_error;
+  std::function<void(uint64_t, CameraFrame)> on_frame;
 };
 
 class CameraTextureController final {

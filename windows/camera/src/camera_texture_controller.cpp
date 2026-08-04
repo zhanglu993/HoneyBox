@@ -153,8 +153,11 @@ void CameraTextureController::PublishFrame(
   }
 
   uint64_t generation = 0;
+  CameraFrame callback_frame{};
+  std::function<void(uint64_t, CameraFrame)> on_frame;
   int64_t texture_id = -1;
   bool register_texture = false;
+  bool registration_already_pending = false;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!state->alive || !state->open || state->terminal) {
@@ -164,14 +167,28 @@ void CameraTextureController::PublishFrame(
     state->width = frame.width;
     state->height = frame.height;
     generation = state->generation;
+    on_frame = state->callbacks.on_frame;
+    callback_frame = CameraFrame{frame.width, frame.height, frame.pts_100ns,
+                                 state->latest_rgba};
     texture_id = state->texture_id;
     if (texture_id < 0) {
       if (state->registration_pending) {
-        return;
+        registration_already_pending = true;
+      } else {
+        state->registration_pending = true;
+        register_texture = true;
       }
-      state->registration_pending = true;
-      register_texture = true;
     }
+  }
+
+  if (on_frame) {
+    try {
+      on_frame(generation, std::move(callback_frame));
+    } catch (...) {
+    }
+  }
+  if (registration_already_pending) {
+    return;
   }
 
   if (register_texture) {
