@@ -49,6 +49,7 @@ class CameraTextureController final {
   struct State;
 
   static void PublishFrame(const std::weak_ptr<State>& weak_state,
+                           uint64_t preview_generation,
                            CameraFrame frame) noexcept;
   static void PublishError(const std::weak_ptr<State>& weak_state,
                            hmw::Error error) noexcept;

@@ -747,3 +747,42 @@ HMW_TEST(camera_texture_invalid_rgba_emits_one_platform_thread_error) {
   HMW_EXPECT(controller.Close().ok());
   dispatcher.Drain();
 }
+
+HMW_TEST(camera_texture_frame_callback_uses_preview_generation_after_failed_opens) {
+  auto source = std::make_shared<SourceState>();
+  RecordingRegistry registry;
+  QueueDispatcher dispatcher;
+  hcw::CameraTextureController controller(Cleanup(registry, dispatcher),
+                                          Factory(source));
+
+  HMW_EXPECT(!controller.Open({0, 1, 15}, {}).ok());
+  HMW_EXPECT(!controller.Open({0, 1, 15}, {}).ok());
+
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::optional<uint64_t> callback_generation;
+  const hcw::CameraControllerCallbacks callbacks{
+      {},
+      {},
+      [&](uint64_t generation, hcw::CameraFrame frame) {
+        HMW_EXPECT(frame.rgba && frame.rgba->at(0) == 42U);
+        std::lock_guard<std::mutex> lock(mutex);
+        callback_generation = generation;
+        condition.notify_all();
+      }};
+  HMW_EXPECT(controller.Open({2, 1, 15}, callbacks).ok());
+  HMW_EXPECT(source->WaitForRead());
+  source->Push(TextureFrame(42U));
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    HMW_EXPECT(condition.wait_for(
+        lock, 2s, [&] { return callback_generation.has_value(); }));
+  }
+
+  HMW_EXPECT(callback_generation.has_value());
+  if (callback_generation) {
+    HMW_EXPECT(*callback_generation == 7U);
+  }
+  HMW_EXPECT(controller.Close().ok());
+  dispatcher.Drain();
+}

@@ -27,6 +27,7 @@ struct CameraTextureController::State {
   bool registration_pending = false;
   bool terminal = false;
   uint64_t generation = 0;
+  uint64_t preview_generation = 0;
   int64_t texture_id = -1;
   uint32_t width = 0;
   uint32_t height = 0;
@@ -64,8 +65,10 @@ CameraTextureController::CameraTextureController(
   const std::weak_ptr<State> weak_state = state_;
   session_ = std::make_unique<CameraPreviewSession>(
       std::move(source_factory),
-      CameraPreviewCallbacks{[weak_state](uint64_t, CameraFrame frame) {
-                               PublishFrame(weak_state, std::move(frame));
+      CameraPreviewCallbacks{[weak_state](uint64_t preview_generation,
+                                          CameraFrame frame) {
+                               PublishFrame(weak_state, preview_generation,
+                                            std::move(frame));
                              },
                              [weak_state](uint64_t, hmw::Error error) {
                                PublishError(weak_state, std::move(error));
@@ -98,16 +101,29 @@ hmw::Outcome CameraTextureController::Open(
     generation = ++state_->generation;
     state_->open = true;
     state_->terminal = false;
+    state_->preview_generation = 0;
     state_->registration_pending = false;
     state_->callbacks = std::move(callbacks);
   }
 
   hmw::Outcome opened = session_->Open(config);
+  if (opened.ok()) {
+    const uint64_t preview_generation = session_->generation();
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->generation == generation && state_->open) {
+      // Frames racing Open are dropped while the binding is zero. Once Open
+      // returns, only the exact CameraPreviewSession generation is accepted.
+      state_->preview_generation = preview_generation;
+    }
+    return opened;
+  }
+
   if (!opened.ok()) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (state_->generation == generation) {
       state_->open = false;
       state_->callbacks = {};
+      state_->preview_generation = 0;
       ++state_->generation;
     }
   }
@@ -122,6 +138,7 @@ hmw::Outcome CameraTextureController::Close() {
     state_->open = false;
     state_->terminal = false;
     state_->registration_pending = false;
+    state_->preview_generation = 0;
     state_->callbacks = {};
     state_->latest_rgba.reset();
     state_->width = 0;
@@ -141,12 +158,21 @@ hmw::Outcome CameraTextureController::Close() {
 }
 
 void CameraTextureController::PublishFrame(
-    const std::weak_ptr<State>& weak_state, CameraFrame frame) noexcept {
+    const std::weak_ptr<State>& weak_state, uint64_t preview_generation,
+    CameraFrame frame) noexcept {
   const std::shared_ptr<State> state = weak_state.lock();
   if (!state) {
     return;
   }
   if (!ValidFrame(frame)) {
+    {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->alive || !state->open || state->terminal ||
+        state->preview_generation != preview_generation) {
+      return;
+    }
+  }
+
     PublishError(weak_state, hmw::Error{hmw::Status::kIoError,
                                         "camera RGBA frame size is invalid"});
     return;
@@ -160,7 +186,8 @@ void CameraTextureController::PublishFrame(
   bool registration_already_pending = false;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
-    if (!state->alive || !state->open || state->terminal) {
+    if (!state->alive || !state->open || state->terminal ||
+        state->preview_generation != preview_generation) {
       return;
     }
     state->latest_rgba = std::move(frame.rgba);
@@ -183,7 +210,7 @@ void CameraTextureController::PublishFrame(
 
   if (on_frame) {
     try {
-      on_frame(generation, std::move(callback_frame));
+      on_frame(preview_generation, std::move(callback_frame));
     } catch (...) {
     }
   }
