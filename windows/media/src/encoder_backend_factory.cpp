@@ -1,5 +1,7 @@
 #include "honey_media_windows/encoder_backend.h"
 
+#include "media_foundation_h264_encoder.h"
+
 namespace hmw {
 namespace {
 
@@ -15,7 +17,8 @@ EncoderBackendFactory CreateDefaultEncoderBackendFactory() {
   return [](EncoderFormat format) -> Result<std::unique_ptr<EncoderBackend>> {
     switch (format) {
       case EncoderFormat::kH264:
-        return CodecUnavailable();
+        return {internal::CreateMediaFoundationH264Encoder(),
+                std::nullopt};
       case EncoderFormat::kJpeg:
         return CodecUnavailable();
       case EncoderFormat::kMsv1:

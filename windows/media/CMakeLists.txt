@@ -20,6 +20,7 @@ add_library(honey_media_windows_core
   src/conversion_controller.cpp
   src/encoder_backend_factory.cpp
   src/h264_annex_b.cpp
+  src/media_foundation_h264_encoder.cpp
   src/gif_source.cpp
   src/media_foundation_runtime.cpp
   src/media_foundation_source.cpp
