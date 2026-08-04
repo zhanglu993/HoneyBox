@@ -83,10 +83,11 @@ void main() {
     queue.abort(StateError('disconnect'));
     await expectLater(active, throwsStateError);
     await expectLater(pending, throwsStateError);
+    final current = queue.enqueue(() async => order.add(3));
+    expect(order, [1]);
 
     release.complete();
-    await Future<void>.delayed(Duration.zero);
-    await queue.enqueue(() async => order.add(3));
+    await current;
     expect(order, [1, 3]);
   });
 
@@ -94,6 +95,7 @@ void main() {
       () async {
     final release = Completer<void>();
     final fatal = <Object>[];
+    final order = <int>[];
     final queue = BleWriteQueue(onFatalError: (error, _) => fatal.add(error));
     addTearDown(queue.dispose);
 
@@ -101,13 +103,19 @@ void main() {
       await release.future;
       throw StateError('late failure');
     });
+    final pending = queue.enqueue(() async {});
     queue.abort(StateError('disconnect'));
     await expectLater(active, throwsStateError);
+    await expectLater(pending, throwsStateError);
+    final current = queue.enqueue(() async {
+      order.add(1);
+    });
+    expect(order, isEmpty);
 
     release.complete();
-    await Future<void>.delayed(Duration.zero);
+    await current;
     expect(fatal, isEmpty);
-    await queue.enqueue(() async {});
+    expect(order, [1]);
   });
 
   test('dispose completes outstanding writes and rejects new writes', () async {

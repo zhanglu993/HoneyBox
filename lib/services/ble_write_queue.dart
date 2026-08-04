@@ -40,7 +40,6 @@ class BleWriteQueue {
     _generation++;
     _active = null;
     _pending.clear();
-    _running = false;
     for (final entry in failed) {
       if (!entry.done.isCompleted) {
         entry.done.completeError(error, stackTrace);
@@ -67,14 +66,25 @@ class BleWriteQueue {
     try {
       await entry.operation();
     } catch (error, stackTrace) {
-      if (entry.generation != _generation) return;
+      if (entry.generation != _generation) {
+        _releasePhysicalGate();
+        return;
+      }
       _fail(entry, error, stackTrace);
       return;
     }
 
-    if (entry.generation != _generation) return;
+    if (entry.generation != _generation) {
+      _releasePhysicalGate();
+      return;
+    }
     if (!entry.done.isCompleted) entry.done.complete();
     _active = null;
+    _running = false;
+    _flush();
+  }
+
+  void _releasePhysicalGate() {
     _running = false;
     _flush();
   }
