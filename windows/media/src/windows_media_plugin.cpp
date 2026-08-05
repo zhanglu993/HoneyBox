@@ -1,5 +1,6 @@
 #include "honey_media_windows/windows_media_plugin.h"
 
+#include "bluetooth_link_channel.h"
 #include "honey_camera_windows/camera_plugin_teardown.h"
 #include "honey_camera_windows/encoder_channel.h"
 #include "honey_camera_windows/windows_encoder_registration.h"
@@ -35,6 +36,10 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
         player_method_channel_(
             registrar->messenger(), "ebadge/player",
             &flutter::StandardMethodCodec::GetInstance()),
+        bluetooth_link_method_channel_(
+            registrar->messenger(), "ebadge/ble_link",
+            &flutter::StandardMethodCodec::GetInstance()),
+        bluetooth_link_channel_(hmw::BluetoothLinkTuner::Create()),
         converter_channel_(
             controller_,
             [this](uint32_t done, uint32_t total) {
@@ -86,6 +91,12 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
           player_channel_.Handle(call.method_name(), call.arguments(),
                                  std::move(result));
         });
+    bluetooth_link_method_channel_.SetMethodCallHandler(
+        [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+               std::unique_ptr<hmw::FlutterResult> result) {
+          bluetooth_link_channel_.Handle(call.method_name(), call.arguments(),
+                                         std::move(result));
+        });
     camera_teardown_owner_ = hcw::CameraPluginTeardownOwner::Create(
         hcw::CreateCameraPluginCleanupGate(std::move(camera_cleanup_)),
         std::move(texture_registry_), std::move(dispatcher_));
@@ -95,6 +106,8 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
     if (encoder_registration_) {
       encoder_registration_->Shutdown();
     }
+    bluetooth_link_method_channel_.SetMethodCallHandler(nullptr);
+    bluetooth_link_channel_.Shutdown();
     player_method_channel_.SetMethodCallHandler(nullptr);
     converter_method_channel_.SetMethodCallHandler(nullptr);
 
@@ -162,6 +175,9 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
       converter_method_channel_;
   flutter::MethodChannel<flutter::EncodableValue>
       player_method_channel_;
+  flutter::MethodChannel<flutter::EncodableValue>
+      bluetooth_link_method_channel_;
+  hmw::BluetoothLinkChannel bluetooth_link_channel_;
   hmw::ConverterChannel converter_channel_;
   hmw::PlayerChannel player_channel_;
   int window_proc_delegate_id_ = 0;

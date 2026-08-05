@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'ble_chunk_calibrator.dart';
 import 'ble_gatt_profile.dart';
+import 'ble_link_tuning.dart';
 import 'ble_mtu.dart';
 import 'ble_write_queue.dart';
 import 'ble_write_stats.dart';
@@ -145,6 +146,10 @@ class BleManager {
 
   /// Latency/throughput sampling for FFC4 writes.
   final BleWriteStats _streamWriteStats = BleWriteStats();
+
+  /// Host-side connection-interval preference, where the platform offers one.
+  final BleLinkTuning _linkTuning = BleLinkTuning();
+  String? _tunedRemoteId;
 
   /// Broadcasts raw L2 messages received on the Stream Service (FFC5).
   final _streamNotifyController = StreamController<Uint8List>.broadcast();
@@ -430,6 +435,20 @@ class BleManager {
       );
       debugPrint('BleManager: mtu=$mtu streamChunk=$streamChunkSize'
           '${probing ? ' (probing; platform reported no MTU)' : ''}');
+
+      // Windows leaves the link on a 30-60ms interval by default, which caps
+      // projection well below the encoder's budget. Ask for the fast profile;
+      // a refusal only means the link stays at the system default.
+      if (_linkTuning.isSupported) {
+        final remoteId = device.remoteId.str;
+        if (await _linkTuning.requestThroughput(remoteId)) {
+          _tunedRemoteId = remoteId;
+          debugPrint('BleManager: requested throughput-optimized link');
+        }
+        if (!await keepCurrent()) {
+          return false;
+        }
+      }
       if (!await keepCurrent()) {
         return false;
       }
@@ -692,6 +711,11 @@ class BleManager {
     // The probed write budget and its sampling belong to the retired link.
     _chunkCalibrator = null;
     _streamWriteStats.reset();
+    final tuned = _tunedRemoteId;
+    if (tuned != null) {
+      _tunedRemoteId = null;
+      unawaited(_linkTuning.release(tuned));
+    }
     resources.session?.abort();
     resources.writeQueue.abort(StateError('BLE connection ended'));
     resources.writeQueue.dispose();

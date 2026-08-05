@@ -15,6 +15,7 @@ add_subdirectory(
   "${CMAKE_CURRENT_BINARY_DIR}/media_core")
 
 add_library(honey_media_windows_core
+  src/bluetooth_address.cpp
   src/channel_contract.cpp
   src/cinepak_pipeline.cpp
   src/conversion_controller.cpp
@@ -62,13 +63,20 @@ endif()
 
 if(TARGET flutter AND TARGET flutter_wrapper_plugin)
   add_library(honey_media_windows_plugin STATIC
+    src/bluetooth_link.cpp
+    src/bluetooth_link_channel.cpp
     src/converter_channel.cpp
     src/flutter_texture_registry.cpp
     src/flutter_value_reader.cpp
     src/player_channel.cpp
     src/windows_media_plugin.cpp
   )
+  # C++/WinRT needs coroutine support, which MSVC gates behind /await in C++17.
   target_compile_features(honey_media_windows_plugin PUBLIC cxx_std_17)
+  if(MSVC)
+    target_compile_options(honey_media_windows_plugin PRIVATE /await)
+  endif()
+  target_link_libraries(honey_media_windows_plugin PRIVATE windowsapp)
   target_include_directories(honey_media_windows_plugin
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
@@ -94,6 +102,7 @@ if(BUILD_TESTING)
   target_sources(honey_media_windows_tests PRIVATE
     tests/benchmark_support.cpp
     tests/benchmark_support_test.cpp
+    tests/bluetooth_address_test.cpp
     tests/conversion_controller_test.cpp
     tests/media_converter_test.cpp
     tests/windows_media_plugin_internal_test.cpp
@@ -123,6 +132,8 @@ if(BUILD_TESTING)
     COMMAND honey_media_windows_tests thumbnail_and_preview_obey_max_edge_and_count)
   add_test(NAME benchmark_support
     COMMAND honey_media_windows_tests benchmark_)
+  add_test(NAME bluetooth_address
+    COMMAND honey_media_windows_tests bluetooth_address_)
   add_test(NAME media_converter_identity
     COMMAND honey_media_windows_tests identity_conversion_frame_requires_exact_safe_context)
   add_test(NAME media_converter_dispatch
