@@ -904,6 +904,39 @@ HMW_TEST(camera_encoding_session_concurrent_starts_do_not_overwrite_worker) {
   HMW_EXPECT(backend->stop_count() == 2U);
 }
 
+HMW_TEST(camera_encoding_session_failed_run_does_not_block_the_next_start) {
+  const auto backend = std::make_shared<FakeBackendState>();
+  backend->FailEncode();
+  CallbackCapture callbacks;
+  hcw::CameraEncodingSession session(FakeFactory(backend));
+  HMW_EXPECT(session.Start(7U, H264Config(), callbacks.callbacks()).ok());
+  session.OfferFrame(7U, Frame(1U, 0));
+  HMW_EXPECT(callbacks.WaitForErrors(1U));
+
+  // The failed run already delivered its terminal error to its own callbacks.
+  // A retry, such as the projection page restarting after a codec fault, must
+  // open a fresh generation instead of replaying the retired run's outcome.
+  const hmw::Result<uint64_t> restarted =
+      session.Start(8U, H264Config(), {});
+  HMW_EXPECT(restarted.ok());
+  HMW_EXPECT(session.Stop().ok());
+}
+
+HMW_TEST(camera_encoding_session_retired_failure_does_not_block_a_later_start) {
+  const auto backend = std::make_shared<FakeBackendState>();
+  backend->FailEncode();
+  CallbackCapture callbacks;
+  hcw::CameraEncodingSession session(FakeFactory(backend));
+  HMW_EXPECT(session.Start(7U, H264Config(), callbacks.callbacks()).ok());
+  session.OfferFrame(7U, Frame(1U, 0));
+  HMW_EXPECT(callbacks.WaitForErrors(1U));
+  // An explicit stop retires the run and reports the failure exactly once.
+  HMW_EXPECT(!session.Stop().ok());
+
+  HMW_EXPECT(session.Start(8U, H264Config(), {}).ok());
+  HMW_EXPECT(session.Stop().ok());
+}
+
 HMW_TEST(camera_encoding_session_concurrent_stop_and_shutdown_complete_once) {
   const auto backend = std::make_shared<FakeBackendState>();
   backend->BlockEncode();

@@ -585,10 +585,10 @@ hmw::Result<uint64_t> CameraEncodingSession::Start(
   }
 
   std::unique_lock<std::mutex> operation_lock(impl_->operation_mutex);
-  const hmw::Outcome stopped = impl_->StopLocked();
-  if (!stopped.ok()) {
-    return {std::nullopt, stopped.error};
-  }
+  // Retiring the previous run reports that run's terminal outcome, which its
+  // own callbacks already delivered. A failed run must not block the next
+  // start; only shutdown and this start's own failures can.
+  (void)impl_->StopLocked();
 
   std::shared_ptr<EncodingRun> run;
   {
@@ -601,6 +601,7 @@ hmw::Result<uint64_t> CameraEncodingSession::Start(
                                         std::move(config),
                                         std::move(callbacks));
     impl_->current = run;
+    impl_->last_outcome = {};
   }
 
   auto handle = std::make_shared<JoinHandle>();
