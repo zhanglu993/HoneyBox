@@ -96,6 +96,14 @@ class StreamSession {
 
   /// Bytes of frame data carried per KS_FRAME = `fragSize - 13` (no L1).
   final int Function() chunkSize;
+
+  /// Invoked when a KS_FRAME write is rejected by the transport.
+  ///
+  /// Returning true means the transport reduced [chunkSize], so the same
+  /// offset is worth re-sending as a smaller slice; returning false fails the
+  /// frame. Used on platforms that cannot report the negotiated ATT MTU and
+  /// must discover the usable write size instead.
+  final bool Function()? onWriteRejected;
   final Duration _openTimeout;
   final Duration _creditTimeout;
   final int _retxKeep;
@@ -103,6 +111,7 @@ class StreamSession {
   StreamSession({
     required this.send,
     required this.chunkSize,
+    this.onWriteRejected,
     Duration openTimeout = const Duration(seconds: 5),
     Duration creditTimeout = const Duration(seconds: 5),
     int retransmitFrameLimit = 3,
@@ -203,8 +212,7 @@ class StreamSession {
     if (generation != _operationGeneration || _state != StreamState.open) {
       return false;
     }
-    final cs = chunkSize();
-    if (cs <= 0) return false;
+    if (chunkSize() <= 0) return false;
     final seq = _frameSeq;
     final total = frameBytes.length;
     _frameSeq = (_frameSeq + 1) & 0xFFFF;
@@ -216,7 +224,11 @@ class StreamSession {
       _retxFrames.remove(_retxFrames.keys.first);
     }
 
-    for (int off = 0; off < total; off += cs) {
+    // The chunk size is re-read per slice: a rejected write may shrink it, and
+    // KS_FRAME carries explicit byte offsets, so mixed slice sizes are legal.
+    for (int off = 0; off < total;) {
+      final cs = chunkSize();
+      if (cs <= 0) return false;
       if (_flowOn) {
         while (_credits <= 0) {
           debugPrint('流/信用耗尽 seq=$seq off=$off/$total 等待补充...');
@@ -238,11 +250,22 @@ class StreamSession {
       try {
         await send(buildStreamChunk(seq, off, total, chunk));
       } catch (_) {
+        retxBuf.remove(off);
+        // A transport that can shrink its write budget gets one retry of the
+        // same offset; the loop re-reads the reduced chunk size above.
+        if (onWriteRejected?.call() ?? false) {
+          if (generation != _operationGeneration ||
+              _state != StreamState.open) {
+            return false;
+          }
+          continue;
+        }
         return false;
       }
       if (generation != _operationGeneration || _state != StreamState.open) {
         return false;
       }
+      off = end;
     }
     return true;
   }

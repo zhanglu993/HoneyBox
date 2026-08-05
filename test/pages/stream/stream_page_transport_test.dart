@@ -384,6 +384,7 @@ class _FakeStreamTransport implements StreamTransport {
   int availabilityListens = 0;
   int availabilityCancels = 0;
   int frameSendCount = 0;
+  int shrinkRequests = 0;
   int _activeFrameSends = 0;
   int maxConcurrentFrameSends = 0;
   bool failNextFrame = false;
@@ -402,6 +403,12 @@ class _FakeStreamTransport implements StreamTransport {
 
   @override
   int get chunkSize => 64;
+
+  @override
+  bool shrinkChunkSize() {
+    shrinkRequests++;
+    return false;
+  }
 
   @override
   Stream<Uint8List> get notifications => _notifications.stream;

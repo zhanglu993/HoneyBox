@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'ble_chunk_calibrator.dart';
 import 'ble_gatt_profile.dart';
 import 'ble_mtu.dart';
 import 'ble_write_queue.dart';
@@ -113,9 +114,20 @@ class BleManager {
   /// The negotiated ATT MTU (defaults to 23 before connection).
   int get mtu => _connectionOwner.value?.mtu ?? kMinAttMtu;
 
-  /// Bytes of frame data per KS_FRAME write = `(MTU − 3) − 13` (L2 + KS header,
-  /// no L1). Floored at 1.
-  int get streamChunkSize => streamChunkSizeForMtu(mtu);
+  /// Bytes of frame data per KS_FRAME write. Derived from the negotiated ATT
+  /// MTU where the platform reports one, otherwise discovered by probing.
+  int get streamChunkSize =>
+      _chunkCalibrator?.chunkSize ?? streamChunkSizeForMtu(mtu);
+
+  /// Report that a stream write was rejected. Returns true when the write
+  /// budget was reduced, so the caller should retry the same payload smaller.
+  bool shrinkStreamChunk() {
+    final calibrator = _chunkCalibrator;
+    if (calibrator == null || !calibrator.recordRejection()) return false;
+    debugPrint('BleManager: stream write rejected, '
+        'chunk shrunk to ${calibrator.chunkSize}');
+    return true;
+  }
 
   // --------------------------------------------------------------------------
   // BLE objects
@@ -125,6 +137,10 @@ class BleManager {
   BluetoothDevice? _connectingDevice;
   int? _connectingGeneration;
   bool _streamAvailable = false;
+
+  /// Per-connection stream write budget. Non-null once a connection resolved
+  /// its MTU (or decided to probe for it); cleared when that connection ends.
+  BleChunkCalibrator? _chunkCalibrator;
 
   /// Broadcasts raw L2 messages received on the Stream Service (FFC5).
   final _streamNotifyController = StreamController<Uint8List>.broadcast();
@@ -393,14 +409,17 @@ class BleManager {
         // asking through it here would throw and pin the link at 23 bytes —
         // seven bytes of frame payload per write, which stalls projection.
         mtu = await negotiatePlatformMtu(device.remoteId);
-        if (mtu <= kMinAttMtu) {
-          debugPrint('BleManager: platform reported no negotiated MTU; '
-              'streaming stays at the ${streamChunkSizeForMtu(mtu)}-byte '
-              'default chunk');
-        }
       }
-      debugPrint('BleManager: mtu=$mtu '
-          'streamChunk=${streamChunkSizeForMtu(mtu)}');
+      // A platform that reports nothing usable leaves the MTU at the spec
+      // floor even though the link almost certainly negotiated more. Probe
+      // upward from an optimistic chunk and let rejected writes calibrate it.
+      final reportedChunk = streamChunkSizeForMtu(mtu);
+      final probing = mtu <= kMinAttMtu;
+      _chunkCalibrator = BleChunkCalibrator(
+        initial: probing ? kProbeStreamChunk : reportedChunk,
+      );
+      debugPrint('BleManager: mtu=$mtu streamChunk=$streamChunkSize'
+          '${probing ? ' (probing; platform reported no MTU)' : ''}');
       if (!await keepCurrent()) {
         return false;
       }
@@ -595,7 +614,10 @@ class BleManager {
     if (_disposed || connection == null || !connection.streamReady) {
       return Future.error(StateError('Stream Service 未就绪'));
     }
-    return _write(connection.writeQueue, endpoint!, l2);
+    return _write(connection.writeQueue, endpoint!, l2).then((_) {
+      // The first accepted write confirms the probed chunk size.
+      _chunkCalibrator?.recordSuccess();
+    });
   }
 
   /// Send one L2 command frame over the L1 command channel (FFC1). L1 handles
@@ -646,6 +668,8 @@ class BleManager {
     // The owner invokes retirement before clearing its active value, so stream
     // consumers observe false before the active pair disappears.
     if (resources.streamReady) _setStreamAvailable(false);
+    // The probed write budget belongs to the link that was just retired.
+    _chunkCalibrator = null;
     resources.session?.abort();
     resources.writeQueue.abort(StateError('BLE connection ended'));
     resources.writeQueue.dispose();

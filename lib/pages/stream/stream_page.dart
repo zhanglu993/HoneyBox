@@ -520,6 +520,7 @@ class _StreamPageState extends ConsumerState<StreamPage>
     final session = StreamSession(
       send: transport.send,
       chunkSize: () => transport.chunkSize,
+      onWriteRejected: transport.shrinkChunkSize,
     );
     _session = session;
     _chunkSize = transport.chunkSize;

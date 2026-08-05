@@ -327,5 +327,60 @@ void main() {
       failFrameWrites = true;
       expect(await failing.sendFrame(Uint8List(6)), isFalse);
     });
+
+    test('a rejected write retries the same offset with a smaller chunk',
+        () async {
+      // Windows cannot report the negotiated ATT MTU, so the usable write size
+      // is discovered: the first oversized KS_FRAME is rejected, the caller
+      // shrinks the chunk, and the same offset is re-sent smaller.
+      final sent = <Uint8List>[];
+      var chunk = 8;
+      var rejectLargeWrites = true;
+      final probing = StreamSession(
+        send: (l2) {
+          if (rejectLargeWrites && l2.length > 13 + 4) {
+            return Future<void>.error(StateError('write too large'));
+          }
+          sent.add(Uint8List.fromList(l2));
+          return Future<void>.value();
+        },
+        chunkSize: () => chunk,
+        onWriteRejected: () {
+          if (chunk <= 4) return false;
+          chunk = chunk ~/ 2;
+          return true;
+        },
+      );
+      final opening = probing.open(StreamCodec.h264, 368, 368, 15);
+      probing.onNotify(_ack(sid: _sidFromOpen(sent.single), result: 0));
+      expect(await opening, isTrue);
+      sent.clear();
+
+      expect(await probing.sendFrame(Uint8List(8)), isTrue);
+
+      expect(chunk, 4);
+      // 8 payload bytes delivered as two accepted 4-byte chunks.
+      expect(sent, hasLength(2));
+      expect(sent.every((l2) => l2.length <= 13 + 4), isTrue);
+      rejectLargeWrites = false;
+    });
+
+    test('a rejected write that cannot shrink still fails the frame', () async {
+      final sent = <Uint8List>[];
+      final stuck = StreamSession(
+        send: (l2) {
+          if (l2.length > 13) return Future<void>.error(StateError('nope'));
+          sent.add(Uint8List.fromList(l2));
+          return Future<void>.value();
+        },
+        chunkSize: () => 4,
+        onWriteRejected: () => false,
+      );
+      final opening = stuck.open(StreamCodec.h264, 368, 368, 15);
+      stuck.onNotify(_ack(sid: _sidFromOpen(sent.single), result: 0));
+      expect(await opening, isTrue);
+
+      expect(await stuck.sendFrame(Uint8List(8)), isFalse);
+    });
   });
 }
