@@ -10,6 +10,7 @@ import 'ble_chunk_calibrator.dart';
 import 'ble_gatt_profile.dart';
 import 'ble_mtu.dart';
 import 'ble_write_queue.dart';
+import 'ble_write_stats.dart';
 import 'l1_engine.dart';
 import 'l2_file_transfer.dart';
 
@@ -141,6 +142,9 @@ class BleManager {
   /// Per-connection stream write budget. Non-null once a connection resolved
   /// its MTU (or decided to probe for it); cleared when that connection ends.
   BleChunkCalibrator? _chunkCalibrator;
+
+  /// Latency/throughput sampling for FFC4 writes.
+  final BleWriteStats _streamWriteStats = BleWriteStats();
 
   /// Broadcasts raw L2 messages received on the Stream Service (FFC5).
   final _streamNotifyController = StreamController<Uint8List>.broadcast();
@@ -614,10 +618,20 @@ class BleManager {
     if (_disposed || connection == null || !connection.streamReady) {
       return Future.error(StateError('Stream Service 未就绪'));
     }
+    final started = Stopwatch()..start();
     return _write(connection.writeQueue, endpoint!, l2).then((_) {
+      started.stop();
       // Only a write that filled the probed chunk confirms it; KS_OPEN and
       // friends are far smaller and succeed on any link.
       _chunkCalibrator?.recordSuccess(l2.length);
+      // The queue is serial, so each write's wall time is the link's
+      // per-packet cost; the window report says whether the controller is
+      // pushing one packet per connection event or several.
+      final report = _streamWriteStats.record(
+        bytes: l2.length,
+        elapsed: started.elapsed,
+      );
+      if (report != null) debugPrint('BleManager: stream write $report');
     });
   }
 
@@ -669,8 +683,9 @@ class BleManager {
     // The owner invokes retirement before clearing its active value, so stream
     // consumers observe false before the active pair disappears.
     if (resources.streamReady) _setStreamAvailable(false);
-    // The probed write budget belongs to the link that was just retired.
+    // The probed write budget and its sampling belong to the retired link.
     _chunkCalibrator = null;
+    _streamWriteStats.reset();
     resources.session?.abort();
     resources.writeQueue.abort(StateError('BLE connection ended'));
     resources.writeQueue.dispose();
