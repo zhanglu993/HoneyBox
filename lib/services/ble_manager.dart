@@ -7,6 +7,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'ble_gatt_profile.dart';
+import 'ble_mtu.dart';
 import 'ble_write_queue.dart';
 import 'l1_engine.dart';
 import 'l2_file_transfer.dart';
@@ -110,14 +111,11 @@ class BleManager {
   bool get commandAvailable => _connectionOwner.value?.commandReady ?? false;
 
   /// The negotiated ATT MTU (defaults to 23 before connection).
-  int get mtu => _connectionOwner.value?.mtu ?? 23;
+  int get mtu => _connectionOwner.value?.mtu ?? kMinAttMtu;
 
   /// Bytes of frame data per KS_FRAME write = `(MTU − 3) − 13` (L2 + KS header,
   /// no L1). Floored at 1.
-  int get streamChunkSize {
-    final cs = (mtu - 3) - 13;
-    return cs < 1 ? 1 : cs;
-  }
+  int get streamChunkSize => streamChunkSizeForMtu(mtu);
 
   // --------------------------------------------------------------------------
   // BLE objects
@@ -381,14 +379,28 @@ class BleManager {
       var streamTx = profile.streamReady ? profile.streamTx : null;
       var streamRx = profile.streamReady ? profile.streamRx : null;
 
-      // Request MTU exactly once after discovery, regardless of which pair is
-      // available. Both protocols use the actual negotiated value.
-      var mtu = 23;
-      try {
-        mtu = await device.requestMtu(512);
-      } catch (e) {
-        debugPrint('BleManager: requestMtu failed, using default MTU: $e');
+      // Resolve the MTU exactly once after discovery, regardless of which pair
+      // is available. Both protocols use the actual negotiated value.
+      var mtu = kMinAttMtu;
+      if (Platform.isAndroid) {
+        try {
+          mtu = await device.requestMtu(512);
+        } catch (e) {
+          debugPrint('BleManager: requestMtu failed, using default MTU: $e');
+        }
+      } else {
+        // flutter_blue_plus gates BluetoothDevice.requestMtu to Android, so
+        // asking through it here would throw and pin the link at 23 bytes —
+        // seven bytes of frame payload per write, which stalls projection.
+        mtu = await negotiatePlatformMtu(device.remoteId);
+        if (mtu <= kMinAttMtu) {
+          debugPrint('BleManager: platform reported no negotiated MTU; '
+              'streaming stays at the ${streamChunkSizeForMtu(mtu)}-byte '
+              'default chunk');
+        }
       }
+      debugPrint('BleManager: mtu=$mtu '
+          'streamChunk=${streamChunkSizeForMtu(mtu)}');
       if (!await keepCurrent()) {
         return false;
       }

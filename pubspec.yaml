@@ -13,6 +13,9 @@ dependencies:
   flutter_riverpod: ^2.5.1
   riverpod_annotation: ^2.3.5
   flutter_blue_plus: ^2.3.10
+  # Direct dependency so the app can read the negotiated ATT MTU on platforms
+  # where BluetoothDevice.requestMtu is Android-only (see ble_mtu.dart).
+  flutter_blue_plus_platform_interface: ^9.0.3
   image_picker: ^1.1.2
   file_picker: ^8.1.3
   path_provider: ^2.1.4
