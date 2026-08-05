@@ -245,7 +245,11 @@ HRESULT SetCodecU32(ICodecAPI* codec_api, const GUID& property,
     return FAILED(result) ? result : E_NOINTERFACE;
   }
   result = codec_api->IsModifiable(&property);
-  if (result != S_OK) {
+  // The Microsoft software "H264 Encoder MFT" does not implement this query
+  // yet accepts every required SetValue. E_NOTIMPL means the codec declined to
+  // answer, so SetValue stays the authority; S_FALSE is an actual "not
+  // modifiable now" answer and still rejects the candidate.
+  if (result != S_OK && result != E_NOTIMPL) {
     return FAILED(result) ? result : E_ACCESSDENIED;
   }
   VARIANT setting;

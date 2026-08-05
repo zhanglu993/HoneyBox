@@ -57,6 +57,32 @@ bool HasNal(const std::vector<uint8_t>& bytes, uint8_t type) {
   return false;
 }
 
+// True when this machine actually exposes a synchronous local H.264 encoder.
+// Only a machine without one may skip the real-transform acceptance test; a
+// present-but-rejected encoder is a real failure, not an allowed skip.
+bool SystemHasSynchronousH264Encoder() {
+  if (FAILED(MFStartup(MF_VERSION))) {
+    return false;
+  }
+  MFT_REGISTER_TYPE_INFO input_info{MFMediaType_Video, MFVideoFormat_NV12};
+  MFT_REGISTER_TYPE_INFO output_info{MFMediaType_Video, MFVideoFormat_H264};
+  IMFActivate** activates = nullptr;
+  UINT32 count = 0U;
+  const HRESULT result = MFTEnumEx(
+      MFT_CATEGORY_VIDEO_ENCODER,
+      MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT |
+          MFT_ENUM_FLAG_SORTANDFILTER,
+      &input_info, &output_info, &activates, &count);
+  if (SUCCEEDED(result) && activates != nullptr) {
+    for (UINT32 i = 0U; i < count; ++i) {
+      activates[i]->Release();
+    }
+    CoTaskMemFree(activates);
+  }
+  MFShutdown();
+  return SUCCEEDED(result) && count != 0U;
+}
+
 }  // namespace
 
 HMW_TEST(media_foundation_h264_encoder_rejects_odd_dimensions) {
@@ -70,15 +96,21 @@ HMW_TEST(media_foundation_h264_encoder_rejects_odd_dimensions) {
 }
 
 HMW_TEST(media_foundation_h264_encoder_drains_annex_b_idr_before_stop) {
+  const bool encoder_present = SystemHasSynchronousH264Encoder();
   auto backend = hmw::internal::CreateMediaFoundationH264Encoder();
   const auto started = backend->Start(H264Config());
-  if (!started.ok() && started.error &&
+  if (!encoder_present && !started.ok() && started.error &&
       started.error->status == hmw::Status::kCodecUnavailable) {
+    // No synchronous local H.264 encoder exists on this machine at all.
     HMW_EXPECT(!started.error->message.empty());
     return;
   }
+  // An encoder is installed, so the production configuration must be accepted.
   HMW_EXPECT(started.ok());
   if (!started.ok()) {
+    if (started.error) {
+      HMW_EXPECT(started.error->message.empty());
+    }
     return;
   }
 
@@ -762,6 +794,45 @@ HMW_TEST(media_foundation_h264_encoder_requires_exact_success_for_required_prope
     if (started.error) {
       HMW_EXPECT(started.error->status == hmw::Status::kCodecUnavailable);
     }
+  }
+}
+
+HMW_TEST(media_foundation_h264_encoder_accepts_codec_without_is_modifiable) {
+  // The Microsoft software "H264 Encoder MFT" answers IsSupported with S_OK,
+  // does not implement IsModifiable, and still accepts every required
+  // SetValue. A codec that never implements the query must not be rejected;
+  // SetValue is the authority on whether the property was applied.
+  auto [provider, transform] = FakeBackend(false, false, false);
+  transform->required_support = S_OK;
+  transform->required_modifiable = E_NOTIMPL;
+  transform->required_set_result = S_OK;
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+  const auto started = backend->Start(H264Config());
+
+  HMW_EXPECT(started.ok());
+  if (!started.ok() && started.error) {
+    HMW_EXPECT(started.error->message.empty());
+  }
+  HMW_EXPECT(backend->Stop().ok());
+}
+
+HMW_TEST(media_foundation_h264_encoder_still_rejects_unmodifiable_property) {
+  // E_NOTIMPL means "the codec does not answer the question". S_FALSE means
+  // "the codec answered: not modifiable right now", which stays a rejection.
+  auto [provider, transform] = FakeBackend(false, false, false);
+  transform->required_support = S_OK;
+  transform->required_modifiable = S_FALSE;
+  transform->required_set_result = S_OK;
+  auto backend =
+      hmw::internal::CreateMediaFoundationH264EncoderForTesting(provider);
+
+  const auto started = backend->Start(H264Config());
+
+  HMW_EXPECT(!started.ok());
+  if (started.error) {
+    HMW_EXPECT(started.error->status == hmw::Status::kCodecUnavailable);
   }
 }
 
