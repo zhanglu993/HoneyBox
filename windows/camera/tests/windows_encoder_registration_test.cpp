@@ -300,6 +300,11 @@ HMW_TEST(
   HMW_EXPECT(source.find("CreateMediaFoundationCameraFactory") !=
              std::string::npos);
   HMW_EXPECT(source.find("WindowsEncoderRegistration") != std::string::npos);
+  // The backend factory and encoding session must exist before the channel
+  // that hands them Dart requests.
+  HMW_EXPECT(AppearsInOrder(source, {"encoding_session_ =",
+                                     "CreateDefaultEncoderBackendFactory",
+                                     "encoder_channel_ ="}));
   const std::string registrar =
       "HoneyMediaWindowsPluginRegisterWithRegistrar";
   const size_t first = source.find(registrar);
@@ -315,8 +320,10 @@ HMW_TEST(
   HMW_EXPECT(AppearsInOrder(
       source,
       {"encoder_registration_->Shutdown()",
+       "encoding_session_->Shutdown()",
        "encoder_channel_->Shutdown()",
        "encoder_channel_.reset()",
+       "encoding_session_.reset()",
        "camera_controller_.reset()",
        "player_channel_.Shutdown()",
        "converter_channel_.Shutdown()",

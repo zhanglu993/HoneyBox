@@ -8,6 +8,7 @@
 #include <memory>
 #include <string_view>
 
+#include "honey_camera_windows/camera_encoding_session.h"
 #include "honey_camera_windows/camera_preview.h"
 #include "honey_camera_windows/camera_texture_cleanup.h"
 #include "honey_media_windows/platform_dispatcher.h"
@@ -62,7 +63,7 @@ using EncoderEventSender = std::function<void(flutter::EncodableValue event)>;
 
 class EncoderChannel final {
  public:
-  EncoderChannel(CameraTextureController& controller,
+  EncoderChannel(CameraTextureController& controller, EncodingSession& session,
                  EncoderEventSender event_sender);
   ~EncoderChannel();
 
@@ -76,7 +77,28 @@ class EncoderChannel final {
  private:
   struct State;
 
+  void HandleOpenCamera(const flutter::EncodableValue* arguments,
+                        std::unique_ptr<hmw::FlutterResult> result);
+  void HandleCloseCamera(std::unique_ptr<hmw::FlutterResult> result);
+  void HandleStartEncoding(const flutter::EncodableValue* arguments,
+                           std::unique_ptr<hmw::FlutterResult> result);
+  void HandleStopEncoding(std::unique_ptr<hmw::FlutterResult> result);
+  void HandleEncoderRequest(std::string_view method,
+                            std::unique_ptr<hmw::FlutterResult> result);
+  hmw::EncoderCallbacks MakeEncoderCallbacks(uint64_t epoch);
+  void StopEncodingRun();
+
+  static void SendCameraEvent(const std::weak_ptr<State>& weak_state,
+                              uint64_t generation, bool terminal,
+                              flutter::EncodableValue event) noexcept;
+  static void SendEncoderEvent(const std::weak_ptr<State>& weak_state,
+                               uint64_t epoch,
+                               flutter::EncodableValue event) noexcept;
+  static void RetireEncodingRun(const std::weak_ptr<State>& weak_state,
+                                uint64_t epoch) noexcept;
+
   CameraTextureController& controller_;
+  EncodingSession& session_;
   std::shared_ptr<State> state_;
 };
 

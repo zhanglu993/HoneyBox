@@ -65,6 +65,197 @@ void main() {
     expect(info.previewHeight, 368);
   });
 
+  test('startEncoding sends the Android-compatible H264 stream configuration',
+      () async {
+    const method = MethodChannel('test/encoder-start');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(method, (call) async {
+      calls.add(call);
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(method, null));
+
+    final service = EncoderService(method: method);
+    await service.startEncoding(const EncoderConfig(), stream: true);
+
+    expect(calls, hasLength(1));
+    expect(calls.single.method, 'startEncoding');
+    final arguments = calls.single.arguments as Map;
+    expect(arguments, containsPair('format', 'h264'));
+    expect(arguments, containsPair('width', 368));
+    expect(arguments, containsPair('height', 368));
+    expect(arguments, containsPair('fps', 15));
+    expect(arguments, containsPair('bitrate', 150000));
+    expect(arguments, containsPair('iFrameIntervalSec', 6));
+    expect(arguments, containsPair('cropZoom', 1.0));
+    expect(arguments, containsPair('msv1Skip', true));
+    expect(arguments, containsPair('msv1SkipThr', 0));
+    expect(arguments, containsPair('jpegQuality', 80));
+    expect(arguments, containsPair('recordToFile', false));
+    expect(arguments, containsPair('stream', true));
+  });
+
+  test('stop, keyframe, and encoder-frame requests use bare method names',
+      () async {
+    const method = MethodChannel('test/encoder-requests');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(method, (call) async {
+      calls.add(call);
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(method, null));
+
+    final service = EncoderService(method: method);
+    await service.stopEncoding();
+    await service.requestKeyframe();
+    await service.requestEncoderFrame();
+
+    expect(calls.map((call) => call.method).toList(),
+        ['stopEncoding', 'requestKeyframe', 'requestEncoderFrame']);
+    expect(calls.every((call) => call.arguments == null), isTrue);
+  });
+
+  test('encoder events forward started, frame, stats, stopped, and info',
+      () async {
+    const method = MethodChannel('test/encoder-events');
+    const events = EventChannel('test/encoder-events/events');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final encoderEvents = StreamController<dynamic>.broadcast();
+    StreamSubscription<dynamic>? eventSubscription;
+
+    messenger.setMockMethodCallHandler(method, (call) async {});
+    messenger.setMockStreamHandler(
+      events,
+      MockStreamHandler.inline(
+        onListen: (arguments, sink) {
+          eventSubscription = encoderEvents.stream.listen(sink.success);
+        },
+        onCancel: (arguments) async {
+          await eventSubscription?.cancel();
+          eventSubscription = null;
+        },
+      ),
+    );
+    addTearDown(() async {
+      await encoderEvents.close();
+      messenger.setMockMethodCallHandler(method, null);
+      messenger.setMockStreamHandler(events, null);
+    });
+
+    final service = EncoderService(method: method, events: events);
+    addTearDown(service.dispose);
+
+    final started = Completer<(String, int, int)>();
+    final frame = Completer<(Uint8List, bool)>();
+    final stats = Completer<EncoderStats>();
+    final stopped = Completer<EncoderResult>();
+    final info = Completer<String>();
+    service.onStarted = (path, width, height) =>
+        started.complete((path, width, height));
+    service.onFrame = (data, key) => frame.complete((data, key));
+    service.onStats = stats.complete;
+    service.onStopped = stopped.complete;
+    service.onInfo = info.complete;
+
+    service.listen();
+    encoderEvents.add(<String, dynamic>{
+      'event': 'started',
+      'path': null,
+      'width': 368,
+      'height': 368,
+    });
+    encoderEvents.add(<String, dynamic>{
+      'event': 'frame',
+      'data': Uint8List.fromList([0, 0, 0, 1, 0x65]),
+      'key': true,
+    });
+    encoderEvents.add(<String, dynamic>{
+      'event': 'stats',
+      'frames': 12,
+      'keyframes': 3,
+      'bytes': 4096,
+      'keyBytes': 2048,
+      'fps': 14.5,
+      'lastBytes': 256,
+    });
+    encoderEvents.add(<String, dynamic>{
+      'event': 'info',
+      'message': 'encoder note',
+    });
+    encoderEvents.add(<String, dynamic>{
+      'event': 'stopped',
+      'path': null,
+      'frames': 12,
+      'keyframes': 3,
+      'bytes': 4096,
+    });
+
+    expect(await started.future, ('', 368, 368));
+    final (data, key) = await frame.future;
+    expect(data, [0, 0, 0, 1, 0x65]);
+    expect(key, isTrue);
+    final liveStats = await stats.future;
+    expect(liveStats.frames, 12);
+    expect(liveStats.keyframes, 3);
+    expect(liveStats.bytes, 4096);
+    expect(liveStats.keyBytes, 2048);
+    expect(liveStats.fps, 14.5);
+    expect(liveStats.lastBytes, 256);
+    expect(await info.future, 'encoder note');
+    final result = await stopped.future;
+    expect(result.path, isNull);
+    expect(result.frames, 12);
+    expect(result.keyframes, 3);
+    expect(result.bytes, 4096);
+  });
+
+  test('an error event carrying a Windows code still reports its message',
+      () async {
+    const method = MethodChannel('test/encoder-error');
+    const events = EventChannel('test/encoder-error/events');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final encoderEvents = StreamController<dynamic>.broadcast();
+    StreamSubscription<dynamic>? eventSubscription;
+
+    messenger.setMockMethodCallHandler(method, (call) async {});
+    messenger.setMockStreamHandler(
+      events,
+      MockStreamHandler.inline(
+        onListen: (arguments, sink) {
+          eventSubscription = encoderEvents.stream.listen(sink.success);
+        },
+        onCancel: (arguments) async {
+          await eventSubscription?.cancel();
+          eventSubscription = null;
+        },
+      ),
+    );
+    addTearDown(() async {
+      await encoderEvents.close();
+      messenger.setMockMethodCallHandler(method, null);
+      messenger.setMockStreamHandler(events, null);
+    });
+
+    final service = EncoderService(method: method, events: events);
+    addTearDown(service.dispose);
+    final error = Completer<String>();
+    service.onError = error.complete;
+
+    service.listen();
+    encoderEvents.add(<String, dynamic>{
+      'event': 'error',
+      'message': 'MFT rejected the input frame',
+      'code': 'encode_failed',
+      'details': 'encoder',
+    });
+
+    expect(await error.future, 'MFT rejected the input frame');
+  });
+
   test('dispose during restart cancellation cannot revive event listening',
       () async {
     const method = MethodChannel('test/restart-dispose-cancel');

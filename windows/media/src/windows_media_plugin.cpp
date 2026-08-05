@@ -45,8 +45,13 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
         *texture_registry_, *dispatcher_);
     camera_controller_ = std::make_unique<hcw::CameraTextureController>(
         camera_cleanup_, hcw::CreateMediaFoundationCameraFactory());
+    // The codec factory and encoding session must exist before the channel
+    // that routes Dart requests into them.
+    encoding_session_ = std::make_unique<hcw::CameraEncodingSession>(
+        hmw::CreateDefaultEncoderBackendFactory());
     encoder_channel_ = std::make_unique<hcw::EncoderChannel>(
-        *camera_controller_, [this](flutter::EncodableValue event) {
+        *camera_controller_, *encoding_session_,
+        [this](flutter::EncodableValue event) {
           if (encoder_registration_) {
             encoder_registration_->SendEvent(std::move(event));
           }
@@ -93,11 +98,17 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
     player_method_channel_.SetMethodCallHandler(nullptr);
     converter_method_channel_.SetMethodCallHandler(nullptr);
 
+    // Retire encoding before the channel that owns its callbacks, and both
+    // before the camera controller that feeds them.
+    if (encoding_session_) {
+      encoding_session_->Shutdown();
+    }
     if (encoder_channel_) {
       encoder_channel_->Shutdown();
     }
     encoder_registration_.reset();
     encoder_channel_.reset();
+    encoding_session_.reset();
     camera_controller_.reset();
 
     player_channel_.Shutdown();
@@ -144,6 +155,7 @@ class HoneyMediaWindowsPlugin final : public flutter::Plugin {
   std::unique_ptr<hmw::TextureRegistry> texture_registry_;
   std::shared_ptr<hcw::CameraTextureCleanupCoordinator> camera_cleanup_;
   std::unique_ptr<hcw::CameraTextureController> camera_controller_;
+  std::unique_ptr<hcw::CameraEncodingSession> encoding_session_;
   std::unique_ptr<hcw::EncoderChannel> encoder_channel_;
   std::unique_ptr<hcw::WindowsEncoderRegistration> encoder_registration_;
   flutter::MethodChannel<flutter::EncodableValue>
