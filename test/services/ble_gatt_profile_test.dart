@@ -124,6 +124,54 @@ void main() {
       expect(fallbackProfile.streamTx!.withoutResponse, isFalse);
     });
 
+    test('acknowledged stream writes are opt-in and leave the command pair '
+        'unresponsive', () {
+      // Unacknowledged writes give no backpressure on Windows: they land in
+      // the controller buffer and any excess is dropped silently, so the
+      // device never assembles a full frame. Acknowledged writes carry ATT
+      // flow control instead.
+      final profile = BleGattProfile.select(
+        <BleGattCharacteristic<String>>[
+          const BleGattCharacteristic(
+            'ctx',
+            'FFC1',
+            write: true,
+            writeWithoutResponse: true,
+          ),
+          const BleGattCharacteristic('crx', 'FFC2', notify: true),
+          const BleGattCharacteristic(
+            'stx',
+            'FFC4',
+            write: true,
+            writeWithoutResponse: true,
+          ),
+          const BleGattCharacteristic('srx', 'FFC5', notify: true),
+        ],
+        acknowledgedStreamWrites: true,
+      );
+
+      expect(profile.streamTx!.withoutResponse, isFalse);
+      // Only the stream pair changes; L1 command framing keeps its fast path.
+      expect(profile.commandTx!.withoutResponse, isTrue);
+    });
+
+    test('acknowledged stream writes still need the write property', () {
+      final profile = BleGattProfile.select(
+        <BleGattCharacteristic<String>>[
+          const BleGattCharacteristic(
+            'stx',
+            'FFC4',
+            writeWithoutResponse: true,
+          ),
+          const BleGattCharacteristic('srx', 'FFC5', notify: true),
+        ],
+        acknowledgedStreamWrites: true,
+      );
+
+      // The characteristic cannot acknowledge, so the only usable mode stays.
+      expect(profile.streamTx!.withoutResponse, isTrue);
+    });
+
     test('does not match UUIDs that merely contain a target UUID', () {
       final profile = BleGattProfile.select(<BleGattCharacteristic<String>>[
         const BleGattCharacteristic('tx', 'A-FFC1-B', write: true),

@@ -85,9 +85,18 @@ class BleGattProfile<T> {
     this.streamRx,
   });
 
+  /// Selects the command and stream pairs.
+  ///
+  /// [acknowledgedStreamWrites] makes the stream endpoint prefer a write that
+  /// the peer confirms. Unacknowledged writes give the caller no backpressure
+  /// on some stacks: they are buffered by the controller and any excess is
+  /// dropped without an error, so the device never assembles a full frame.
+  /// Acknowledged writes carry ATT flow control instead. The command pair is
+  /// unaffected; L1 does its own framing and retry.
   factory BleGattProfile.select(
-    Iterable<BleGattCharacteristic<T>> characteristics,
-  ) {
+    Iterable<BleGattCharacteristic<T>> characteristics, {
+    bool acknowledgedStreamWrites = false,
+  }) {
     BleGattEndpoint<T>? commandTx;
     T? commandRx;
     BleGattEndpoint<T>? streamTx;
@@ -103,7 +112,11 @@ class BleGattProfile<T> {
             commandRx ??= characteristic.value;
           }
         case 'FFC4':
-          streamTx = _selectWriteEndpoint(streamTx, characteristic);
+          streamTx = _selectWriteEndpoint(
+            streamTx,
+            characteristic,
+            preferAcknowledged: acknowledgedStreamWrites,
+          );
         case 'FFC5':
           if (characteristic.notify || characteristic.indicate) {
             streamRx ??= characteristic.value;
@@ -129,21 +142,29 @@ class BleGattProfile<T> {
 
   static BleGattEndpoint<T>? _selectWriteEndpoint<T>(
     BleGattEndpoint<T>? current,
-    BleGattCharacteristic<T> characteristic,
-  ) {
+    BleGattCharacteristic<T> characteristic, {
+    bool preferAcknowledged = false,
+  }) {
     if (!characteristic.write && !characteristic.writeWithoutResponse) {
       return current;
     }
 
+    // Acknowledged writes are only an option when the characteristic supports
+    // them; otherwise the unacknowledged mode is all there is.
+    final withoutResponse = preferAcknowledged && characteristic.write
+        ? false
+        : characteristic.writeWithoutResponse;
     final candidate = BleGattEndpoint<T>(
       characteristic.value,
-      withoutResponse: characteristic.writeWithoutResponse,
+      withoutResponse: withoutResponse,
     );
-    if (current == null ||
-        (!current.withoutResponse && candidate.withoutResponse)) {
+    if (current == null) {
       return candidate;
     }
-    return current;
+    final improves = preferAcknowledged
+        ? current.withoutResponse && !candidate.withoutResponse
+        : !current.withoutResponse && candidate.withoutResponse;
+    return improves ? candidate : current;
   }
 
   static String? _normalizeUuid(String uuid) {
