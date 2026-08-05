@@ -2,10 +2,13 @@
 /// Every BLE link supports at least this much, so probing never goes below it.
 const int kMinStreamChunk = 7;
 
-/// Optimistic starting chunk used when the platform reports no MTU, matching
-/// the widely supported 247-byte ATT MTU: `(247 - 3) - 13`. Rejected writes
-/// halve it until the link accepts one, so guessing high costs a few retries
-/// rather than correctness.
+/// Starting chunk used when the platform reports no MTU: `(247 - 3) - 13`.
+///
+/// 247 is the ATT MTU virtually every BLE 4.2+ peripheral negotiates, and this
+/// value is measured to work against the eBadge on Windows. It is deliberately
+/// not raised to the 517-byte spec maximum: an oversized KS_FRAME write is not
+/// rejected cleanly by the WinRT stack, it drops the connection, so every
+/// over-guess costs a reconnect. Probing therefore only ever backs off.
 const int kProbeStreamChunk = 231;
 
 /// Discovers the largest KS_FRAME chunk the link actually accepts.
@@ -37,8 +40,15 @@ class BleChunkCalibrator {
   /// Whether a write at the current size has been accepted by the link.
   bool get isConfirmed => _confirmed;
 
-  /// Record that a write at the current size was accepted.
-  void recordSuccess() => _confirmed = true;
+  /// Record that a write of [acceptedBytes] was accepted.
+  ///
+  /// Only a write that actually filled the current chunk confirms it. Control
+  /// messages such as KS_OPEN are a dozen bytes and succeed on any link, so
+  /// treating them as confirmation would lock in an untested size and silently
+  /// disable backoff.
+  void recordSuccess(int acceptedBytes) {
+    if (acceptedBytes >= _chunkSize) _confirmed = true;
+  }
 
   /// Record that a write was rejected.
   ///

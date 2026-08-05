@@ -615,8 +615,9 @@ class BleManager {
       return Future.error(StateError('Stream Service 未就绪'));
     }
     return _write(connection.writeQueue, endpoint!, l2).then((_) {
-      // The first accepted write confirms the probed chunk size.
-      _chunkCalibrator?.recordSuccess();
+      // Only a write that filled the probed chunk confirms it; KS_OPEN and
+      // friends are far smaller and succeed on any link.
+      _chunkCalibrator?.recordSuccess(l2.length);
     });
   }
 
