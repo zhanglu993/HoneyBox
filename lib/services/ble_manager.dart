@@ -151,6 +151,9 @@ class BleManager {
   /// Monotonic clock the stream pacer measures against.
   final Stopwatch _streamClock = Stopwatch()..start();
 
+  /// How many FFC5 notifications this connection has delivered.
+  int _streamNotifyCount = 0;
+
   /// Backpressure for platforms whose unacknowledged writes return before the
   /// controller has actually sent anything. Null where the stack paces itself.
   BleWritePacer? _streamPacer;
@@ -371,6 +374,8 @@ class BleManager {
         (BluetoothConnectionState cs) {
           if (!_connectionOwner.isCurrent(connectionGeneration)) return;
           if (cs == BluetoothConnectionState.disconnected) {
+            debugPrint('BleManager: link dropped after '
+                '$_streamNotifyCount FFC5 notifications');
             _onDisconnected(connectionGeneration);
           }
         },
@@ -440,17 +445,18 @@ class BleManager {
       // the connection event cannot carry. Measured against this link, a 60ms
       // connection event carries a handful of packets, so space the writes to
       // a rate the radio can actually sustain.
+      final pacingBitrate = resolveStreamPacingBitrate(Platform.environment);
       _streamPacer = Platform.isAndroid
           ? null
           : BleWritePacer(
               minSpacing: spacingForBitrate(
                 chunkBytes: streamChunkSize,
-                bitsPerSecond: kStreamPacingBitrate,
+                bitsPerSecond: pacingBitrate,
               ),
             );
       debugPrint('BleManager: mtu=$mtu streamChunk=$streamChunkSize'
           '${probing ? ' (probing; platform reported no MTU)' : ''}'
-          '${_streamPacer == null ? '' : ' pacing=${_streamPacer!.minSpacing.inMicroseconds / 1000}ms'}');
+          '${_streamPacer == null ? '' : ' pacing=${_streamPacer!.minSpacing.inMicroseconds / 1000}ms@${pacingBitrate}bps'}');
 
       // Windows leaves the link on a 30-60ms interval by default, which caps
       // projection well below the encoder's budget. Ask for the fast profile;
@@ -527,6 +533,14 @@ class BleManager {
           streamNotificationSub = streamRx.onValueReceived.listen((data) {
             if (!_disposed &&
                 _connectionOwner.isCurrent(connectionGeneration)) {
+              // Counting every FFC5 notification separates "the device went
+              // quiet" from "only some message types stopped arriving".
+              _streamNotifyCount++;
+              if (_streamNotifyCount <= 4 || _streamNotifyCount % 10 == 0) {
+                final key = data.length > 2 ? data[2] : -1;
+                debugPrint('BleManager: FFC5 #$_streamNotifyCount '
+                    'len=${data.length} key=0x${key.toRadixString(16)}');
+              }
               _streamNotifyController.add(Uint8List.fromList(data));
             }
           });
@@ -746,6 +760,7 @@ class BleManager {
     _streamWriteStats.reset();
     _streamPacer?.reset();
     _streamPacer = null;
+    _streamNotifyCount = 0;
     final tuned = _tunedRemoteId;
     if (tuned != null) {
       _tunedRemoteId = null;

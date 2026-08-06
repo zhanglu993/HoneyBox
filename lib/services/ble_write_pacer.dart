@@ -2,14 +2,32 @@
 /// 3 bytes of ATT plus the 13-byte L2 + KS header.
 const int kStreamWriteOverhead = 16;
 
-/// Rate the stream is paced to where the platform provides no write
+/// Default rate the stream is paced to where the platform provides no write
 /// backpressure.
 ///
-/// The link measures a ~60 ms connection interval, and BLE carries several
-/// packets per event, so roughly 160 kbps is what the radio sustains. That
-/// also clears the 150 kbps the encoder is configured for, leaving the device's
-/// credit window as the real limiter rather than the controller's buffer.
-const int kStreamPacingBitrate = 160000;
+/// Measured against this link: an acknowledged write round trip takes ~62 ms,
+/// so the connection interval is ~60 ms. Pacing at 160 kbps put five packets
+/// into each event and the device only credited a quarter to a half of them,
+/// meaning the rest never made it on air. This default sits near the rate the
+/// device was observed to actually credit; [resolveStreamPacingBitrate] allows
+/// overriding it while the right value is being measured.
+const int kStreamPacingBitrate = 60000;
+
+/// Environment variable that overrides [kStreamPacingBitrate] at runtime, so a
+/// value can be measured on real hardware without a rebuild.
+const String kStreamPacingEnvironmentKey = 'HONEYBOX_STREAM_PACING_BPS';
+
+/// Reads the pacing rate from [environment], falling back to the default.
+///
+/// A value of `0` disables pacing entirely, which is how the unpaced behaviour
+/// can be compared against a paced one on the same build.
+int resolveStreamPacingBitrate(Map<String, String> environment) {
+  final raw = environment[kStreamPacingEnvironmentKey];
+  if (raw == null) return kStreamPacingBitrate;
+  final parsed = int.tryParse(raw.trim());
+  if (parsed == null || parsed < 0) return kStreamPacingBitrate;
+  return parsed;
+}
 
 /// Spacing that lets [chunkBytes] of payload flow at [bitsPerSecond].
 ///

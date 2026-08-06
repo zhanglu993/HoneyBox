@@ -73,6 +73,11 @@ void main() {
       expect(fast, lessThan(slow));
     });
 
+    test('a zero rate disables pacing', () {
+      expect(spacingForBitrate(chunkBytes: 231, bitsPerSecond: 0),
+          Duration.zero);
+    });
+
     test('nonsense inputs disable pacing instead of stalling the stream', () {
       expect(spacingForBitrate(chunkBytes: 0, bitsPerSecond: 160000),
           Duration.zero);
@@ -80,6 +85,47 @@ void main() {
           Duration.zero);
       expect(spacingForBitrate(chunkBytes: -1, bitsPerSecond: -1),
           Duration.zero);
+    });
+  });
+
+  group('resolveStreamPacingBitrate', () {
+    test('uses the default when the variable is absent', () {
+      expect(resolveStreamPacingBitrate(const {}), kStreamPacingBitrate);
+    });
+
+    test('honours an explicit override', () {
+      expect(
+        resolveStreamPacingBitrate(
+          const {kStreamPacingEnvironmentKey: '120000'},
+        ),
+        120000,
+      );
+    });
+
+    test('accepts zero so an unpaced run can be compared', () {
+      expect(
+        resolveStreamPacingBitrate(const {kStreamPacingEnvironmentKey: '0'}),
+        0,
+      );
+    });
+
+    test('tolerates surrounding whitespace', () {
+      expect(
+        resolveStreamPacingBitrate(
+          const {kStreamPacingEnvironmentKey: '  90000 '},
+        ),
+        90000,
+      );
+    });
+
+    test('falls back on values that are not a usable rate', () {
+      for (final raw in ['', 'fast', '-1', '12.5']) {
+        expect(
+          resolveStreamPacingBitrate({kStreamPacingEnvironmentKey: raw}),
+          kStreamPacingBitrate,
+          reason: 'input "$raw"',
+        );
+      }
     });
   });
 }
