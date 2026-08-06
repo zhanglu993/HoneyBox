@@ -10,6 +10,7 @@ import 'ble_chunk_calibrator.dart';
 import 'ble_gatt_profile.dart';
 import 'ble_link_tuning.dart';
 import 'ble_mtu.dart';
+import 'ble_write_pacer.dart';
 import 'ble_write_queue.dart';
 import 'ble_write_stats.dart';
 import 'l1_engine.dart';
@@ -146,6 +147,13 @@ class BleManager {
 
   /// Latency/throughput sampling for FFC4 writes.
   final BleWriteStats _streamWriteStats = BleWriteStats();
+
+  /// Monotonic clock the stream pacer measures against.
+  final Stopwatch _streamClock = Stopwatch()..start();
+
+  /// Backpressure for platforms whose unacknowledged writes return before the
+  /// controller has actually sent anything. Null where the stack paces itself.
+  BleWritePacer? _streamPacer;
 
   /// Host-side connection-interval preference, where the platform offers one.
   final BleLinkTuning _linkTuning = BleLinkTuning();
@@ -427,8 +435,22 @@ class BleManager {
       _chunkCalibrator = BleChunkCalibrator(
         initial: probing ? kProbeStreamChunk : reportedChunk,
       );
+      // Android's stack blocks each unacknowledged write until the controller
+      // has room; Windows accepts them in ~1.5ms and silently drops whatever
+      // the connection event cannot carry. Measured against this link, a 60ms
+      // connection event carries a handful of packets, so space the writes to
+      // a rate the radio can actually sustain.
+      _streamPacer = Platform.isAndroid
+          ? null
+          : BleWritePacer(
+              minSpacing: spacingForBitrate(
+                chunkBytes: streamChunkSize,
+                bitsPerSecond: kStreamPacingBitrate,
+              ),
+            );
       debugPrint('BleManager: mtu=$mtu streamChunk=$streamChunkSize'
-          '${probing ? ' (probing; platform reported no MTU)' : ''}');
+          '${probing ? ' (probing; platform reported no MTU)' : ''}'
+          '${_streamPacer == null ? '' : ' pacing=${_streamPacer!.minSpacing.inMicroseconds / 1000}ms'}');
 
       // Windows leaves the link on a 30-60ms interval by default, which caps
       // projection well below the encoder's budget. Ask for the fast profile;
@@ -637,8 +659,24 @@ class BleManager {
     if (_disposed || connection == null || !connection.streamReady) {
       return Future.error(StateError('Stream Service 未就绪'));
     }
+    return _writeStreamPaced(connection.writeQueue, endpoint!, l2);
+  }
+
+  Future<void> _writeStreamPaced(
+    BleWriteQueue writeQueue,
+    BleGattEndpoint<BluetoothCharacteristic> endpoint,
+    Uint8List l2,
+  ) async {
+    final pacer = _streamPacer;
+    if (pacer != null) {
+      final delay = pacer.delayBefore(_streamClock.elapsed);
+      if (delay > Duration.zero) {
+        await Future<void>.delayed(delay);
+      }
+      pacer.recordWrite(_streamClock.elapsed);
+    }
     final started = Stopwatch()..start();
-    return _write(connection.writeQueue, endpoint!, l2).then((_) {
+    return _write(writeQueue, endpoint, l2).then((_) {
       started.stop();
       // Only a write that filled the probed chunk confirms it; KS_OPEN and
       // friends are far smaller and succeed on any link.
@@ -702,9 +740,12 @@ class BleManager {
     // The owner invokes retirement before clearing its active value, so stream
     // consumers observe false before the active pair disappears.
     if (resources.streamReady) _setStreamAvailable(false);
-    // The probed write budget and its sampling belong to the retired link.
+    // The probed write budget, its sampling and its pacing belong to the
+    // retired link.
     _chunkCalibrator = null;
     _streamWriteStats.reset();
+    _streamPacer?.reset();
+    _streamPacer = null;
     final tuned = _tunedRemoteId;
     if (tuned != null) {
       _tunedRemoteId = null;
