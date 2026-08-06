@@ -398,13 +398,7 @@ class BleManager {
         }
       }
 
-      // Android's stack paces unacknowledged writes through its own callback;
-      // Windows buffers them and drops the excess silently, so the stream pair
-      // there needs ATT-level flow control.
-      final profile = BleGattProfile.select(
-        characteristics,
-        acknowledgedStreamWrites: !Platform.isAndroid,
-      );
+      final profile = BleGattProfile.select(characteristics);
       final commandTx = profile.commandReady ? profile.commandTx : null;
       final commandRx = profile.commandReady ? profile.commandRx : null;
       var streamTx = profile.streamReady ? profile.streamTx : null;
