@@ -59,14 +59,15 @@ void main() {
     expect(repo.state.configuration, isEmpty);
   });
   test(
-      'writes require exact contract login and per-operation capability including healthStatus bit17',
+      'configuration uses capabilities and verified readback across firmware versions',
       () async {
-    await create(firmware: 'UNKNOWN');
-    await expectLater(
-        read(JwConfigurationDomain.hourSystem),
-        throwsA(isA<JwConfigurationException>()
-            .having((e) => e.stage, 'stage', 'unsupported')));
-    expect(script.sets, isEmpty);
+    await create(firmware: 'T009');
+    final before = await read(JwConfigurationDomain.hourSystem);
+    final result = await set(
+        JwConfigurationChange.scalar(JwConfigurationDomain.hourSystem, 1),
+        before);
+    expect(result.observed.raw.single, 1);
+    expect(script.sets, hasLength(1));
   });
   final bits = {
     JwConfigurationDomain.hourSystem: 44,

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:honeybox/services/jw/jw_codec.dart';
 import 'package:honeybox/services/jw/jw_device_repository.dart';
@@ -19,9 +20,12 @@ void main() {
   int opens = 0;
   bool hold = false;
   Future<void> create(
-      {int login = 0, Future<JwHistoryStore> Function()? factory}) async {
+      {int login = 0,
+      String firmware = 'T005',
+      Future<JwHistoryStore> Function()? factory}) async {
     t = FakeJwTransport();
     installJwDeviceScript(t, loginResult: login);
+    t.readValues['2a26'] = Uint8List.fromList(firmware.codeUnits);
     final ordinary = t.onWrite!;
     t.onWrite = (raw) {
       final frame = JwFrameDecoder().add(raw).single;
@@ -108,6 +112,13 @@ void main() {
         repo.state.lastHistoryResult!.applicationAckTransportDelivered, isTrue);
     expect((await repo.historyInventory()).recordCount, 1);
     expect(repo.state.operationInProgress, isFalse);
+  });
+  test('T009 history reaches durable commit and application ACK', () async {
+    await create(firmware: 'T009');
+    final result = await repo.syncHistory();
+    expect(result.localCommitComplete, isTrue);
+    expect(result.applicationAckTransportDelivered, isTrue);
+    expect((await repo.historyInventory()).recordCount, 1);
   });
   test(
       'measurement is verified stopped before history begins under one operation lock',

@@ -14,24 +14,42 @@ void main() {
   late FakeJwTransport t;
   late JwDeviceRepository repo;
   late JwTestConsoleController c;
-  setUp(() async {
+  Future<void> connect({String firmware = 'T005'}) async {
     final dir = await Directory.systemTemp.createTemp('console_ctl_');
     final identity =
         await JwIdentityStore(File('${dir.path}/id')).loadOrCreate();
     await dir.delete(recursive: true);
     t = FakeJwTransport();
     installJwDeviceScript(t);
+    t.readValues['2a26'] = Uint8List.fromList(firmware.codeUnits);
     repo = JwDeviceRepository(
         session: JwSession(t),
         identityStore: _Identity(identity),
         transport: t);
     await repo.initialize();
     c = JwTestConsoleController(repo);
-  });
+  }
+
+  setUp(connect);
   tearDown(() async {
     c.dispose();
     await repo.dispose();
     await t.dispose();
+  });
+  test('T009 enables normal history and capability-supported operations',
+      () async {
+    c.dispose();
+    await repo.dispose();
+    await t.dispose();
+    await connect(firmware: 'T009');
+    for (final id in [
+      'history-sync',
+      'photo-start',
+      'config-screenBrightness-read'
+    ]) {
+      expect(c.disabledReason(id), isNull, reason: id);
+    }
+    expect(c.disabledReason('history-reset'), contains('重置'));
   });
   test('owned camera stop remains available after console dispose and reopen',
       () async {

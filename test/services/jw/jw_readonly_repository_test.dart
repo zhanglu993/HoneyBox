@@ -207,13 +207,11 @@ void main() {
     response = {'operation': 'wrist', 'responseRawHex': '01'};
     expect((await read('wrist')).savedEnabled, true);
   });
-  test('unknown target rejects reminder without query', () async {
+  test('firmware metadata does not block a supported reminder query', () async {
     await create(firmware: 'OTHER');
-    await expectLater(
-        read('wrist'),
-        throwsA(isA<JwConfigurationException>()
-            .having((e) => e.stage, 'stage', 'unsupported')));
-    expect(t.writes, isEmpty);
+    response = {'operation': 'wrist', 'responseRawHex': '01'};
+    expect((await read('wrist')).savedEnabled, true);
+    expect(calls, hasLength(1));
   });
   test(
       'readonly operation allowed after login refusal and lock excludes concurrent reads',
