@@ -16,6 +16,7 @@ param(
   [string]$ReferenceCapabilities,
   [string]$ExpectedIdentitySha256,
   [string]$OutputDirectory,
+  # RemainingLab requires this switch; Phase1 uses it to authorize destructive first bind.
   [switch]$LabAuthorized,
   [switch]$SkipBuild
 )
@@ -78,7 +79,7 @@ try {
   if ($reference) { $common += @('--expect-functions',[string]$reference.function_list,'--expect-factory',[string]$reference.factory_switch) }
   if ($Mode -in @('History','HistoryReplay')) {$common += @('--history-rounds',"$HistoryRounds",'--history-idle-seconds',"$HistoryIdleSeconds",'--history-total-seconds',"$HistoryTotalSeconds",'--history-max-queue-mb',"$HistoryMaxQueueMb")}
   if ($Mode -eq 'RemainingLab' -and -not $LabAuthorized) {throw 'RemainingLab requires the already approved dedicated test-device authorization flag.'}
-  if ($Mode -like 'Remaining*' -and $LabAuthorized) {$common += @('--lab-authorized','true')}
+  if ($LabAuthorized -and ($Mode -like 'Remaining*' -or $Mode -eq 'Phase1')) {$common += @('--lab-authorized','true')}
   $sdkModes=if ($Mode -eq 'ConfigurationRead') {@($firstMode)} else {@($firstMode,$restartMode)}
   $cancellationGraceSeconds=if ($Mode -eq 'Configuration') {$ScanSeconds*$ScanAttempts+120} else {45}
   foreach ($sdkMode in $sdkModes) {
