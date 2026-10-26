@@ -129,6 +129,44 @@ void main() {
     expect(await writer.file.parent.parent.resolveSymbolicLinks(),
         await Directory('${dir.path}/captures').resolveSymbolicLinks());
   });
+  test('interrupted recording is found and resumed after its last full line',
+      () async {
+    final store = CaptureStore(dir);
+    final profile = CaptureProfile(id: 'A', name: 'S100', channels: [channel]);
+    CapturePacket packet(int seq) => CapturePacket(
+        deviceId: 'A',
+        channel: channel,
+        sequence: seq,
+        time: DateTime.utc(2026, 10, 26),
+        bytes: [seq]);
+    final closed = await store.openRecording(profile);
+    await closed.close();
+    expect(await store.findInterrupted(profile), isNull);
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    // Simulates the app being killed: never closed, partial line at the end.
+    final killed = await store.openRecording(profile);
+    await killed.append(packet(1));
+    await killed.flush();
+    await killed.file.writeAsString('{"hex":', mode: FileMode.append);
+    final found = await store.findInterrupted(profile);
+    expect(found?.path, killed.file.path);
+    expect(
+        await store.findInterrupted(
+            CaptureProfile(id: 'B', name: 'X', channels: [channel])),
+        isNull);
+    final resumed = await store.openRecording(profile, resume: found);
+    await resumed.append(packet(2));
+    await resumed.close();
+    final lines = await killed.file.readAsLines();
+    expect(lines.map((l) => (jsonDecode(l) as Map)['sequence']), [1, 2]);
+    final meta = jsonDecode(
+            await File('${killed.file.parent.path}/device.json').readAsString())
+        as Map;
+    expect(meta['open'], isFalse);
+    expect(meta['resumedAt'], hasLength(1));
+    expect(await store.findInterrupted(profile), isNull);
+    await killed.close(); // release the handle so Windows can delete the dir
+  });
   test('deletes a recording folder and refuses paths outside captures',
       () async {
     final store = CaptureStore(dir);

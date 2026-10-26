@@ -85,19 +85,71 @@ class CaptureStore {
     await temp.rename(_profiles.path);
   }
 
-  Future<CaptureRecording> openRecording(CaptureProfile profile) async {
+  /// [resume] appends to an interrupted recording instead of a new folder.
+  Future<CaptureRecording> openRecording(CaptureProfile profile,
+      {File? resume}) async {
+    if (resume != null) return _resume(resume);
     final folder =
         await Directory('${directory.path}/captures').create(recursive: true);
     // A unique directory avoids unsafe device names and collisions between sessions.
     final session = await folder.createTemp('capture_');
     final file = File('${session.path}/raw.jsonl');
-    await File('${session.path}/device.json').writeAsString(
-        jsonEncode({
-          ...profile.toJson(),
-          'startedAt': DateTime.now().toUtc().toIso8601String(),
-        }),
-        flush: true);
-    return _FileRecording(file, await file.open(mode: FileMode.write));
+    final info = File('${session.path}/device.json');
+    final meta = {
+      ...profile.toJson(),
+      'startedAt': DateTime.now().toUtc().toIso8601String(),
+      'open': true,
+    };
+    await info.writeAsString(jsonEncode(meta), flush: true);
+    return _FileRecording(file, await file.open(mode: FileMode.write), info);
+  }
+
+  Future<CaptureRecording> _resume(File file) async {
+    final info = File('${file.parent.path}/device.json');
+    final meta = jsonDecode(await info.readAsString()) as Map<String, dynamic>;
+    final handle = await file.open(mode: FileMode.append);
+    // The app died mid-write: drop the partial last line before appending.
+    await handle.truncate(await _completeLength(handle));
+    await handle.setPosition(await handle.length());
+    meta['open'] = true;
+    meta['resumedAt'] = [
+      ...?(meta['resumedAt'] as List?),
+      DateTime.now().toUtc().toIso8601String(),
+    ];
+    await info.writeAsString(jsonEncode(meta), flush: true);
+    return _FileRecording(file, handle, info);
+  }
+
+  static Future<int> _completeLength(RandomAccessFile handle) async {
+    var end = await handle.length();
+    const chunk = 4096;
+    while (end > 0) {
+      final start = end > chunk ? end - chunk : 0;
+      await handle.setPosition(start);
+      final nl = (await handle.read(end - start)).lastIndexOf(10);
+      if (nl >= 0) return start + nl + 1;
+      end = start;
+    }
+    return 0;
+  }
+
+  /// Newest recording of [profile] that was never closed (app killed or crashed).
+  Future<File?> findInterrupted(CaptureProfile profile) async {
+    File? found;
+    DateTime? newest;
+    for (final raw in await listRecordings()) {
+      try {
+        final meta = jsonDecode(
+                await File('${raw.parent.path}/device.json').readAsString())
+            as Map<String, dynamic>;
+        if (meta['id'] != profile.id) continue;
+        final at = DateTime.tryParse(meta['startedAt'] as String? ?? '');
+        if (at == null || (newest != null && !at.isAfter(newest))) continue;
+        newest = at;
+        found = meta['open'] == true ? raw : null;
+      } catch (_) {}
+    }
+    return found;
   }
 
   /// Removes one recording folder; refuses paths outside the captures folder.
@@ -129,8 +181,9 @@ class _FileRecording implements CaptureRecording {
   @override
   final File file;
   final RandomAccessFile _handle;
+  final File _info;
   bool _closed = false;
-  _FileRecording(this.file, this._handle);
+  _FileRecording(this.file, this._handle, this._info);
   @override
   Future<void> append(CapturePacket packet) async {
     if (_closed) throw StateError('采集文件已关闭');
@@ -151,5 +204,12 @@ class _FileRecording implements CaptureRecording {
     } finally {
       await _handle.close();
     }
+    try {
+      final meta =
+          jsonDecode(await _info.readAsString()) as Map<String, dynamic>;
+      meta['open'] = false;
+      meta['stoppedAt'] = DateTime.now().toUtc().toIso8601String();
+      await _info.writeAsString(jsonEncode(meta), flush: true);
+    } catch (_) {}
   }
 }

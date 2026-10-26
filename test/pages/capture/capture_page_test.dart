@@ -38,4 +38,49 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await tester.runAsync(() => dir.delete(recursive: true));
   });
+
+  testWidgets('leaving while recording asks before stopping', (tester) async {
+    CaptureLeaveChoice? choice;
+    await tester.pumpWidget(MaterialApp(
+        home: Builder(
+            builder: (context) => TextButton(
+                onPressed: () async => choice = await confirmLeaveCapture(
+                    context,
+                    recording: 2,
+                    canBackground: true),
+                child: const Text('open')))));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('还有 2 台设备在采集'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('capture-leave-background')));
+    await tester.pumpAndSettle();
+    expect(choice, CaptureLeaveChoice.background);
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pumpAndSettle();
+    expect(choice, CaptureLeaveChoice.stay);
+  });
+
+  testWidgets('interrupted files offer resume or new file', (tester) async {
+    final file = File('${Directory.systemTemp.path}/missing_raw.jsonl');
+    bool? choice = false;
+    await tester.pumpWidget(MaterialApp(
+        home: Builder(
+            builder: (context) => TextButton(
+                onPressed: () async => choice =
+                    await confirmResumeCapture(context, {'S100': file}),
+                child: const Text('open')))));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('· S100（0 KB）'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('capture-start-resume')));
+    await tester.pumpAndSettle();
+    expect(choice, isTrue);
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(choice, isNull);
+  });
 }

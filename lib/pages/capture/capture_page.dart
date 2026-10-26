@@ -11,6 +11,77 @@ import '../../services/capture/capture_store.dart';
 import 'capture_records_page.dart';
 import 'capture_setup_page.dart';
 
+enum CaptureLeaveChoice { stay, background, stop }
+
+/// Asked when leaving while devices are still recording.
+Future<CaptureLeaveChoice> confirmLeaveCapture(BuildContext context,
+    {required int recording, required bool canBackground}) async {
+  final choice = await showDialog<CaptureLeaveChoice>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+            title: const Text('正在采集'),
+            content: Text('还有 $recording 台设备在采集，退出页面会停止全部采集。'
+                '${canBackground ? '\n切到后台可以继续采集，通知栏会常驻显示状态。' : ''}'),
+            actions: [
+              TextButton(
+                  key: const Key('capture-leave-stay'),
+                  onPressed: () => Navigator.pop(ctx, CaptureLeaveChoice.stay),
+                  child: const Text('继续采集')),
+              if (canBackground)
+                TextButton(
+                    key: const Key('capture-leave-background'),
+                    onPressed: () =>
+                        Navigator.pop(ctx, CaptureLeaveChoice.background),
+                    child: const Text('切到后台')),
+              TextButton(
+                  key: const Key('capture-leave-stop'),
+                  style: TextButton.styleFrom(
+                      foregroundColor: Theme.of(ctx).colorScheme.error),
+                  onPressed: () => Navigator.pop(ctx, CaptureLeaveChoice.stop),
+                  child: const Text('停止并退出')),
+            ],
+          ));
+  return choice ?? CaptureLeaveChoice.stay;
+}
+
+/// true resumes the interrupted files, false starts new ones, null cancels.
+Future<bool?> confirmResumeCapture(
+    BuildContext context, Map<String, File> interrupted) {
+  String describe(File f) {
+    final kb = f.existsSync() ? f.lengthSync() ~/ 1024 : 0;
+    final t = f.existsSync() ? f.lastModifiedSync() : null;
+    String two(int v) => v.toString().padLeft(2, '0');
+    final at = t == null
+        ? ''
+        : '，最后写入 ${t.month}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
+    return '$kb KB$at';
+  }
+
+  return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+            title: const Text('上次采集异常退出'),
+            content: Text([
+              for (final e in interrupted.entries)
+                '· ${e.key}（${describe(e.value)}）',
+              '',
+              '续写会接在上次文件末尾；写新文件则另起一份，上次文件保留。',
+            ].join('\n')),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+              TextButton(
+                  key: const Key('capture-start-new'),
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('写新文件')),
+              FilledButton(
+                  key: const Key('capture-start-resume'),
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('续写上次文件')),
+            ],
+          ));
+}
+
 class CapturePage extends StatefulWidget {
   final CaptureStore? store;
   const CapturePage({super.key, this.store});
@@ -26,6 +97,7 @@ class _CapturePageState extends State<CapturePage> {
   bool _awake = false, _askedBackground = false;
   String? _notified;
   final _cardKeys = <CaptureSession, GlobalKey>{};
+  final _resume = <String, File>{};
   // Refreshes "seconds since last packet" even when no packets arrive.
   late final Timer _clock = Timer.periodic(const Duration(seconds: 1), (_) {
     if (mounted && _sessions.any((s) => s.busy)) {
@@ -121,8 +193,37 @@ class _CapturePageState extends State<CapturePage> {
   CaptureSession _makeSession(CaptureProfile profile) => CaptureSession(
         profile: profile,
         createConnection: () => CaptureBleConnection(profile.id),
-        openRecording: _store!.openRecording,
+        openRecording: (p) =>
+            _store!.openRecording(p, resume: _resume.remove(p.id)),
       )..addListener(_changed);
+
+  Future<void> _start(Iterable<CaptureSession> targets) async {
+    final list = targets.where((s) => !s.busy).toList();
+    final interrupted = <CaptureSession, File>{};
+    for (final s in list) {
+      try {
+        final f = await _store!.findInterrupted(s.profile);
+        if (f != null) interrupted[s] = f;
+      } catch (_) {}
+    }
+    if (interrupted.isNotEmpty) {
+      if (!mounted) return;
+      final resume = await confirmResumeCapture(context,
+          {for (final e in interrupted.entries) e.key.profile.name: e.value});
+      if (resume == null || !mounted) return;
+      for (final e in interrupted.entries) {
+        if (resume) {
+          _resume[e.key.profile.id] = e.value;
+        } else {
+          _resume.remove(e.key.profile.id);
+        }
+      }
+    }
+    for (final s in list) {
+      unawaited(s.start());
+    }
+  }
+
   void _message(String value) {
     if (mounted) {
       ScaffoldMessenger.of(context)
@@ -250,6 +351,19 @@ class _CapturePageState extends State<CapturePage> {
   Future<void> _stopAll() async => Future.wait(_sessions.map((s) => s.stop()));
   Future<void> _leave() async {
     if (_leaving || _saving) return;
+    final busy = _sessions.where((s) => s.busy).length;
+    if (busy > 0) {
+      final choice = await confirmLeaveCapture(context,
+          recording: busy, canBackground: Platform.isAndroid);
+      if (!mounted) return;
+      if (choice == CaptureLeaveChoice.background) {
+        unawaited(const MethodChannel('honeybox/capture-power')
+            .invokeMethod<void>('moveToBack')
+            .catchError((Object e) => _message('切到后台失败：$e')));
+      }
+      if (choice != CaptureLeaveChoice.stop) return;
+    }
+    if (_leaving) return;
     setState(() => _leaving = true);
     await _stopAll();
     if (mounted) {
@@ -305,8 +419,7 @@ class _CapturePageState extends State<CapturePage> {
                     const Text('多设备独立采集 · 配置自动保存在本机',
                         style: TextStyle(fontWeight: FontWeight.bold)),
                     const SizedBox(height: 8),
-                    const Text(
-                        '采集期间请保持应用在前台。断连将自动重试并继续同一文件；Android 采集时保持屏幕唤醒。'),
+                    const Text('断连会自动重试并继续写同一文件；Android 采集时通知栏常驻，可切到后台。'),
                     if (_error != null) ...[
                       SelectableText(_error!),
                       TextButton(onPressed: _load, child: const Text('重新加载配置'))
@@ -316,11 +429,7 @@ class _CapturePageState extends State<CapturePage> {
                     Wrap(spacing: 8, runSpacing: 8, children: [
                       FilledButton.icon(
                           onPressed: available && _sessions.any((s) => !s.busy)
-                              ? () {
-                                  for (final s in _sessions) {
-                                    if (!s.busy) unawaited(s.start());
-                                  }
-                                }
+                              ? () => _start(_sessions)
                               : null,
                           icon: const Icon(Icons.play_arrow),
                           label: const Text('全部开始')),
@@ -466,7 +575,7 @@ class _CapturePageState extends State<CapturePage> {
                   style: TextStyle(color: Theme.of(context).colorScheme.error)),
             Wrap(spacing: 8, children: [
               TextButton.icon(
-                  onPressed: available && !s.busy ? s.start : null,
+                  onPressed: available && !s.busy ? () => _start([s]) : null,
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('开始')),
               TextButton.icon(

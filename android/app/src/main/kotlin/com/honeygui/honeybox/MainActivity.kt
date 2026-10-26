@@ -71,6 +71,9 @@ class MainActivity : FlutterActivity() {
                     window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 }
                 result.success(null)
+            } else if (call.method == "moveToBack") {
+                moveTaskToBack(true)
+                result.success(null)
             } else if (call.method == "keepAlive") {
                 val text = call.argument<String>("text")
                 if (text != null) {
