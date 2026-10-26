@@ -39,6 +39,8 @@
     <application
         android:label="${HONEYBOX_APP_LABEL}"
         android:name="${applicationName}"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
         <activity

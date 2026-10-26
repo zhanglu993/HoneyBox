@@ -32,6 +32,7 @@ HoneyBox 是一款基于 Flutter 开发的内部设备调试工具，面向电�
 - Android 本地热点配网与 WiFi/TCP 视频连接
 - 应用内版本检查与 APK 更新流程
 - 缓存容量设置和缓存管理
+- 七牛云个人配置、云端文件列表、上传和下载（[使用说明](docs/qiniu-storage.md)）
 - OTA 页面引导用户使用 Realtek OTA App 完成固件升级
 
 ## 当前完成度

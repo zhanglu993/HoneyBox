@@ -36,6 +36,8 @@ class AppLauncherPage extends ConsumerWidget {
               Navigator.pushNamed(context, v);
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(value: '/qiniu-files', child: Text('七牛云文件')),
+              PopupMenuItem(value: '/qiniu-config', child: Text('七牛云配置')),
               PopupMenuItem(value: '/chip-config', child: Text('芯片配置')),
               PopupMenuItem(value: _kUpdateAction, child: Text('检查更新')),
             ],
