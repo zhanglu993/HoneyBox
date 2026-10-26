@@ -194,6 +194,15 @@ class JwProductionAcceptancePort
   }
 
   @override
+  Future<void> bindFirstTime({required bool confirmedFirstBind}) async {
+    final repo = _repository ?? await container.read(jwRepositoryProvider.future);
+    if (repo == null) {
+      throw StateError('Production JW repository unavailable');
+    }
+    await repo.bindFirstTime(confirmedFirstBind: confirmedFirstBind);
+  }
+
+  @override
   Future<void> initialize() async {
     _repository = await container.read(jwRepositoryProvider.future);
     if (_repository == null) {

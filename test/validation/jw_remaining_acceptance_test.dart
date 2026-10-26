@@ -64,6 +64,10 @@ class RemainingPort implements JwRemainingAcceptancePort {
   }
 
   @override
+  Future<void> bindFirstTime({required bool confirmedFirstBind}) =>
+      repository.bindFirstTime(confirmedFirstBind: confirmedFirstBind);
+
+  @override
   Future<void> initialize() async {
     order.add('init');
     wireSub = repository.session.outgoingFrames.listen(wire.add);

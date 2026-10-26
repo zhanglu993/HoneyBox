@@ -192,6 +192,7 @@ abstract interface class JwAcceptancePort {
   List<ScanDevice> get devices;
   Future<void> connect(ScanDevice target);
   Future<void> initialize();
+  Future<void> bindFirstTime({required bool confirmedFirstBind});
   JwDeviceState get state;
   Future<String> identityDigest();
   Future<void> setLanguage(int value);
@@ -669,6 +670,7 @@ class AcceptanceRunner {
   final Future<void> Function(Map<String, Object?>) record;
   final _steps = <Map<String, Object?>>[];
   String? _identity;
+  String _firstBindResult = 'not_run_no_destructive_action_authorization';
   final Map<String, Object?>? historyBaseline;
   final Map<String, Object?>? configurationBaseline;
   final Map<String, Object?>? readOnlyBaseline;
@@ -833,7 +835,14 @@ class AcceptanceRunner {
     });
     await _step('query_login.$tag', () async {
       await port.initialize();
-      _ready();
+      final needsBind = port.state.phase == JwDevicePhase.loginRejected;
+      if (needsBind && !config.labAuthorized) {
+        _ready();
+      }
+      if (!needsBind) {
+        _ready();
+        if (config.labAuthorized) _firstBindResult = 'not_needed';
+      }
       final caps = port.state.capabilities;
       _require(caps != null, 'Missing real capability response');
       if (config.expectedFunctions != null) {
@@ -858,9 +867,20 @@ class AcceptanceRunner {
         'hardware': port.state.info?.hardware,
         'battery': port.state.info?.battery,
         'language': port.state.language,
-        'identitySha256': digest
+        'identitySha256': digest,
+        if (needsBind && config.labAuthorized) 'needFirstBind': true
       };
     });
+    if (port.state.phase == JwDevicePhase.loginRejected &&
+        config.labAuthorized) {
+      await _step('firstBind.$tag', () async {
+        _firstBindResult = 'fail';
+        await port.bindFirstTime(confirmedFirstBind: true);
+        _firstBindResult = 'pass';
+        _ready();
+        return {'phase': port.state.phase.name};
+      });
+    }
     if (_isHistory) _savedHistoryDeviceKey = _historyDeviceKey;
     if (_isConfiguration) _configurationDeviceKey ??= _historyDeviceKey;
   }
@@ -1674,7 +1694,7 @@ class AcceptanceRunner {
       'elapsedMs': now().difference(start).inMilliseconds,
       'identitySha256': _identity,
       'steps': _steps,
-      'firstBind': 'not_run_no_destructive_action_authorization',
+      'firstBind': _firstBindResult,
       if (_isReadOnly) ...{
         'readOnlyDevice': _readOnly?.device,
         'readOnlyResults': _readOnly?.results ?? [],

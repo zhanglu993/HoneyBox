@@ -12,6 +12,8 @@ class TestPort implements JwAcceptancePort {
   int foundOnAttempt = 1;
   int scans = 0, stops = 0, connections = 0, disconnects = 0;
   bool closed = false, failLanguage = false, failDisconnect = false;
+  bool needBind = false, failBind = false;
+  int bindCalls = 0;
   bool provideSample = true;
   Duration sampleDateOffset = Duration.zero;
   final languages = <int>[];
@@ -58,7 +60,26 @@ class TestPort implements JwAcceptancePort {
   }
 
   @override
-  Future<void> initialize() async {}
+  Future<void> initialize() async {
+    if (needBind) {
+      state = state.copyWith(
+          phase: JwDevicePhase.loginRejected,
+          operationError: 'JwLoginException: Device refused login');
+    }
+  }
+
+  @override
+  Future<void> bindFirstTime({required bool confirmedFirstBind}) async {
+    if (!confirmedFirstBind) {
+      throw StateError('First bind requires explicit confirmation');
+    }
+    bindCalls++;
+    if (failBind) {
+      throw StateError('JwLoginException: Device refused first bind');
+    }
+    state = state.copyWith(
+        phase: JwDevicePhase.loggedIn, operationError: null);
+  }
   @override
   Future<String> identityDigest() async => 'd' * 64;
   @override
@@ -109,7 +130,8 @@ void main() {
           int attempts = 3,
           int reconnects = 2,
           String mode = 'full',
-          String? hash}) =>
+          String? hash,
+          bool labAuthorized = false}) =>
       AcceptanceConfig(
           outputDirectory: 'unused',
           address: '64:1A:B2:B8:00:3A',
@@ -117,6 +139,7 @@ void main() {
           scanAttempts: attempts,
           reconnectRounds: reconnects,
           mode: mode,
+          labAuthorized: labAuthorized,
           expectedIdentitySha256: hash);
   Future<Map<String, Object?>> run(TestPort p, AcceptanceConfig c,
           {bool Function()? cancelled}) =>
@@ -260,5 +283,42 @@ void main() {
     expect(p.times, isEmpty);
     expect(p.closed, isTrue);
     expect(p.languages, [0, 1]);
+  });
+  test('need-bind without lab authorization fails at query_login', () async {
+    final p = TestPort()..needBind = true;
+    final report =
+        await run(p, config(mode: 'restart', hash: 'd' * 64));
+    expect(report['exitCode'], 1);
+    expect(report['firstBind'],
+        'not_run_no_destructive_action_authorization');
+    expect(p.bindCalls, 0);
+    expect(p.closed, isTrue);
+  });
+  test('need-bind with lab authorization runs firstBind then continues',
+      () async {
+    final p = TestPort()..needBind = true;
+    final report = await run(
+        p, config(mode: 'restart', hash: 'd' * 64, labAuthorized: true));
+    expect(report['exitCode'], 0);
+    expect(report['firstBind'], 'pass');
+    expect(p.bindCalls, 1);
+    expect(p.state.phase, JwDevicePhase.loggedIn);
+    expect(p.closed, isTrue);
+  });
+  test('lab authorization without need-bind reports firstBind not_needed',
+      () async {
+    final report = await run(
+        TestPort(), config(mode: 'restart', hash: 'd' * 64, labAuthorized: true));
+    expect(report['exitCode'], 0);
+    expect(report['firstBind'], 'not_needed');
+  });
+  test('CLI lab-authorized flag is parsed for Phase1 destructive bind', () {
+    final c = AcceptanceConfig.parse([
+      '--address',
+      '64:1A:B2:B8:00:3A',
+      '--lab-authorized',
+      'true'
+    ]);
+    expect(c.labAuthorized, isTrue);
   });
 }
