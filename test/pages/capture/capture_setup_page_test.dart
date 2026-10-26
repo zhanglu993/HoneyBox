@@ -11,6 +11,64 @@ import 'package:flutter_blue_plus_platform_interface/flutter_blue_plus_platform_
 import '../../helpers/capture_ble_platform.dart';
 
 void main() {
+  // flutter_blue_plus keeps process-wide subscriptions to the platform streams.
+  final platform = CaptureTestPlatform();
+  setUpAll(() => FlutterBluePlusPlatform.instance = platform);
+  setUp(() => platform.polar = false);
+  tearDownAll(platform.close);
+  testWidgets(
+      'Polar preset selects discovered CP data and HR with default options',
+      (tester) async {
+    platform.polar = true;
+    // Default 800x600 leaves the preset under the fixed save bar.
+    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final dir = (await tester
+        .runAsync(() => Directory.systemTemp.createTemp('polar_ui')))!;
+    await tester.runAsync(() async {
+      await tester.pumpWidget(MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: CaptureSetupPage(
+              existingIds: const {},
+              store: CaptureStore(dir),
+              profile: CaptureProfile(id: 'polar-ui', name: 'Polar', channels: [
+                const CaptureChannel(service: '180d', characteristic: '2a37')
+              ]))));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    });
+    await tester.pumpAndSettle();
+    final preset = find.byKey(const Key('capture-polar-preset'));
+    await tester.ensureVisible(preset);
+    await tester.tap(preset);
+    await tester.pumpAndSettle();
+    expect(find.text('启动 5 步 · 停止 2 步'), findsOneWidget);
+    expect(
+        tester
+            .widget<CheckboxListTile>(
+                find.widgetWithText(CheckboxListTile, 'ECG（130 Hz）'))
+            .value,
+        isTrue);
+    expect(
+        tester
+            .widget<DropdownButtonFormField<int>>(
+                find.byKey(const ValueKey('polar-rate-25')))
+            .initialValue,
+        25);
+    expect(
+        tester
+            .widget<DropdownButtonFormField<int>>(
+                find.byKey(const ValueKey('polar-range-8')))
+            .initialValue,
+        8);
+    await tester.runAsync(() async {
+      await tester.pumpWidget(const SizedBox());
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await dir.delete(recursive: true);
+    });
+  });
+
   for (final width in [320.0, 500.0]) {
     testWidgets(
         'scan and signal controls render with production theme at width $width',
@@ -108,8 +166,6 @@ void main() {
   });
   testWidgets('connected services stay collapsed until explicitly opened',
       (tester) async {
-    final platform = CaptureTestPlatform();
-    FlutterBluePlusPlatform.instance = platform;
     final dir = (await tester
         .runAsync(() => Directory.systemTemp.createTemp('service_collapse')))!;
     await tester.runAsync(() async {
@@ -142,7 +198,6 @@ void main() {
     await tester.runAsync(() async {
       await tester.pumpWidget(const SizedBox());
       await Future<void>.delayed(const Duration(milliseconds: 100));
-      await platform.close();
       await dir.delete(recursive: true);
     });
   });

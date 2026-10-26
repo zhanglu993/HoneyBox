@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+// ignore: depend_on_referenced_packages
+import 'package:flutter_blue_plus_platform_interface/flutter_blue_plus_platform_interface.dart';
 import '../android_ble_permissions.dart';
 import 'capture_models.dart';
 import 'capture_session.dart';
@@ -31,9 +33,21 @@ class CaptureBleConnection implements CaptureConnection {
   bool _owned = false;
   CaptureBleConnection(String id) : device = BluetoothDevice.fromId(id);
   @override
-  Stream<void> get disconnected => _events.stream;
+  int? get mtu =>
+      Platform.isWindows && device.mtuNow <= 23 ? null : device.mtuNow;
   @override
-  Future<void> connect() async {
+  Stream<void> get disconnected => _events.stream;
+  // Android returns GATT 133 when several devices connect at the same time.
+  static Future<void> _connecting = Future.value();
+
+  @override
+  Future<void> connect() {
+    final run = _connecting.then((_) => _connect());
+    _connecting = run.then((_) {}, onError: (Object _) {});
+    return run;
+  }
+
+  Future<void> _connect() async {
     await ensureCapturePermissions();
     // Do not take over a connection held by Watch/eBadge or another module.
     if (device.isConnected) throw StateError('设备已被其他功能连接，请先断开后再采集');
@@ -48,13 +62,9 @@ class CaptureBleConnection implements CaptureConnection {
     }, onError: (Object e) {
       if (!_events.isClosed) _events.addError(e);
     });
+    // On Android connect() already negotiates MTU (requests 512).
     await device.connect(
         license: License.nonprofit, timeout: const Duration(seconds: 20));
-    if (Platform.isAndroid) {
-      try {
-        await device.requestMtu(247);
-      } catch (_) {/* Retain negotiated MTU. */}
-    }
     final primary = await device.discoverServices();
     final visited = <BluetoothService>{};
     services = [];
@@ -70,6 +80,20 @@ class CaptureBleConnection implements CaptureConnection {
     for (final service in primary) {
       addService(service);
     }
+    if (Platform.isWindows) await _readWindowsMtu();
+  }
+
+  // flutter_blue_plus rejects requestMtu off Android, so mtuNow stays 23;
+  // the WinRT plugin answers the raw request with the session MaxPduSize.
+  Future<void> _readWindowsMtu() async {
+    final reported = device.mtu
+        .firstWhere((m) => m > 23)
+        .timeout(const Duration(seconds: 2), onTimeout: () => device.mtuNow);
+    try {
+      await FlutterBluePlusPlatform.instance
+          .requestMtu(BmMtuChangeRequest(remoteId: device.remoteId, mtu: 247));
+    } catch (_) {/* Keep mtuNow. */}
+    await reported;
   }
 
   List<BluetoothCharacteristic> get characteristics => [
@@ -91,6 +115,21 @@ class CaptureBleConnection implements CaptureConnection {
     // Track before enabling so partial failures still get cleaned up.
     _enabled.add(c);
     await c.setNotifyValue(true);
+  }
+
+  @override
+  Future<void> write(CaptureChannel channel, List<int> bytes,
+      {required bool withResponse}) async {
+    final matches =
+        characteristics.where((c) => captureChannelFor(c) == channel).toList();
+    if (matches.length != 1) throw StateError('找不到唯一写入特征 ${channel.key}');
+    final c = matches.single;
+    if (withResponse
+        ? !c.properties.write
+        : !c.properties.writeWithoutResponse) {
+      throw StateError('特征不支持所选写入方式：${channel.key}');
+    }
+    await c.write(bytes, withoutResponse: !withResponse, timeout: 10);
   }
 
   @override

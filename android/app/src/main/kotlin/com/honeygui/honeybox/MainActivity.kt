@@ -63,6 +63,26 @@ class MainActivity : FlutterActivity() {
         val exporter = CaptureFileExporter(this)
         captureExporter = exporter
         MethodChannel(messenger, "honeybox/capture-export").setMethodCallHandler(exporter::handle)
+        MethodChannel(messenger, "honeybox/capture-power").setMethodCallHandler { call, result ->
+            if (call.method == "keepAwake") {
+                if (call.arguments == true) {
+                    window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                result.success(null)
+            } else if (call.method == "keepAlive") {
+                val text = call.argument<String>("text")
+                if (text != null) {
+                    CaptureKeepAliveService.start(this, text)
+                } else {
+                    CaptureKeepAliveService.stop(this)
+                }
+                result.success(null)
+            } else {
+                result.notImplemented()
+            }
+        }
         textureRegistry = flutterEngine.renderer
 
         EventChannel(messenger, eventChannelName).setStreamHandler(

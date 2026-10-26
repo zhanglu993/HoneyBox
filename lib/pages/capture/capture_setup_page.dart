@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../../services/capture/capture_ble_transport.dart';
 import '../../services/capture/capture_models.dart';
+import '../../services/capture/capture_polar.dart';
 import '../../services/capture/capture_scan_filter.dart';
 import '../../services/capture/capture_scan_settings.dart';
 import '../../services/capture/capture_store.dart';
@@ -21,6 +22,10 @@ class _CaptureSetupPageState extends State<CaptureSetupPage> {
   final _name = TextEditingController();
   final _filter = TextEditingController();
   final _selected = <CaptureChannel>{};
+  bool _polar = false;
+  PolarCaptureOptions _polarOptions = const PolarCaptureOptions();
+  List<CaptureCommand> _startCommands = [], _stopCommands = [];
+  int _minimumMtu = 0;
   List<ScanResult> _results = [];
   List<BluetoothService> _services = [];
   StreamSubscription<List<ScanResult>>? _scan;
@@ -53,6 +58,13 @@ class _CaptureSetupPageState extends State<CaptureSetupPage> {
     if (profile != null) {
       _name.text = profile.name;
       _selected.addAll(profile.channels);
+      _startCommands = profile.startCommands;
+      _stopCommands = profile.stopCommands;
+      _minimumMtu = profile.minimumMtu;
+      _polar = profile.polarOptions != null;
+      if (_polar) {
+        _polarOptions = PolarCaptureOptions.fromJson(profile.polarOptions!);
+      }
       WidgetsBinding.instance
           .addPostFrameCallback((_) => _connect(profile.id, profile.name));
     }
@@ -150,7 +162,13 @@ class _CaptureSetupPageState extends State<CaptureSetupPage> {
         await connection.close();
         return;
       }
-      if (_id != id && widget.profile?.id != id) _selected.clear();
+      if (_id != id && widget.profile?.id != id) {
+        _selected.clear();
+        _polar = false;
+        _startCommands = [];
+        _stopCommands = [];
+        _minimumMtu = 0;
+      }
       _id = id;
       _name.text = widget.profile?.id == id
           ? widget.profile!.name
@@ -207,13 +225,51 @@ class _CaptureSetupPageState extends State<CaptureSetupPage> {
     }
   }
 
+  void _applyPolar([PolarCaptureOptions? options]) {
+    try {
+      final next = options ?? _polarOptions;
+      final profile = polarCaptureProfile(
+          id: _id!,
+          name: _name.text.trim().isEmpty ? 'Polar H10' : _name.text.trim(),
+          available: _connection!.characteristics
+              .where((c) => c.properties.notify || c.properties.indicate)
+              .map(captureChannelFor),
+          options: next);
+      // CP must also support writes with response.
+      if (next.ecg || next.acc) {
+        final cp = _connection!.characteristics
+            .singleWhere((c) => captureChannelFor(c) == profile.channels[1]);
+        if (!cp.properties.write) throw StateError('Polar 控制点不支持 Write');
+      }
+      setState(() {
+        _polar = true;
+        _polarOptions = next;
+        _selected
+          ..clear()
+          ..addAll(profile.channels);
+        _startCommands = profile.startCommands;
+        _stopCommands = profile.stopCommands;
+        _minimumMtu = profile.minimumMtu;
+        _error = null;
+      });
+    } catch (e) {
+      _setError(e);
+    }
+  }
+
   void _save() {
     if (_name.text.trim().isEmpty || _selected.isEmpty || _id == null) {
       _setError('请填写名称并选择至少一个通知特征');
       return;
     }
     unawaited(_leave(CaptureProfile(
-        id: _id!, name: _name.text.trim(), channels: _selected.toList())));
+        id: _id!,
+        name: _name.text.trim(),
+        channels: _selected.toList(),
+        startCommands: _startCommands,
+        stopCommands: _stopCommands,
+        minimumMtu: _minimumMtu,
+        polarOptions: _polar ? _polarOptions.toJson() : null)));
   }
 
   @override
@@ -296,7 +352,7 @@ class _CaptureSetupPageState extends State<CaptureSetupPage> {
                       child: Text(_error!,
                           style: TextStyle(
                               color: Theme.of(context).colorScheme.error))),
-                const Text('选择设备，再选择要采集的通知特征。只订阅所选通道；不自动发送厂商启动命令。'),
+                const Text('选择设备，再选择要采集的通知特征。Polar 快捷配置会发送启动和停止命令。'),
                 const SizedBox(height: 12),
                 Row(children: [
                   Expanded(
@@ -396,73 +452,161 @@ class _CaptureSetupPageState extends State<CaptureSetupPage> {
                     onTap: () => _connect(
                         r.device.remoteId.str, r.advertisementData.advName),
                   ),
-                if (_services.isNotEmpty) ...[
-                  const Divider(),
-                  TextField(
-                      controller: _name,
-                      decoration: const InputDecoration(labelText: '配置名称')),
-                  const SizedBox(height: 12),
-                  SelectableText('设备：$_id'),
-                  Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton(
-                          onPressed: _busy
-                              ? null
-                              : () {
-                                  final matches = _connection!.characteristics
-                                      .where((c) =>
-                                          normalizeCaptureUuid(
-                                                  c.serviceUuid.str) ==
-                                              'e0ff' &&
-                                          normalizeCaptureUuid(
-                                                  c.characteristicUuid.str) ==
-                                              'ffe1' &&
-                                          (c.properties.notify ||
-                                              c.properties.indicate))
-                                      .map(captureChannelFor)
-                                      .toList();
-                                  if (matches.isEmpty) {
-                                    _setError('当前设备未发现 V101 调试通知 E0FF / FFE1');
-                                  } else {
-                                    setState(() {
-                                      _selected.addAll(matches);
-                                      _error = null;
-                                    });
-                                  }
-                                },
-                          child: const Text('选择 V101 BLE Log（E0FF / FFE1）'))),
-                  for (final service in _services)
-                    Card(
-                        child: ExpansionTile(
-                      initiallyExpanded: false,
-                      title: Text('服务 ${service.uuid.str}'),
-                      subtitle: Text(
-                          '已选 ${service.characteristics.where((c) => _selected.contains(captureChannelFor(c))).length} / ${service.characteristics.length} 个特征'),
+                if (_services.isNotEmpty)
+                  Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        for (final c in service.characteristics)
+                        const Divider(),
+                        TextField(
+                            controller: _name,
+                            decoration:
+                                const InputDecoration(labelText: '配置名称')),
+                        const SizedBox(height: 12),
+                        SelectableText('设备：$_id'),
+                        Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton(
+                                onPressed: _busy
+                                    ? null
+                                    : () {
+                                        final matches = _connection!
+                                            .characteristics
+                                            .where((c) =>
+                                                normalizeCaptureUuid(
+                                                        c.serviceUuid.str) ==
+                                                    'e0ff' &&
+                                                normalizeCaptureUuid(c
+                                                        .characteristicUuid
+                                                        .str) ==
+                                                    'ffe1' &&
+                                                (c.properties.notify ||
+                                                    c.properties.indicate))
+                                            .map(captureChannelFor)
+                                            .toList();
+                                        if (matches.isEmpty) {
+                                          _setError(
+                                              '当前设备未发现 V101 调试通知 E0FF / FFE1');
+                                        } else {
+                                          setState(() {
+                                            _polar = false;
+                                            _startCommands = [];
+                                            _stopCommands = [];
+                                            _minimumMtu = 0;
+                                            _selected
+                                              ..clear()
+                                              ..addAll(matches);
+                                            _error = null;
+                                          });
+                                        }
+                                      },
+                                child: const Text(
+                                    '选择 V101 BLE Log（E0FF / FFE1）'))),
+                        Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton(
+                                key: const Key('capture-polar-preset'),
+                                onPressed: _busy ? null : () => _applyPolar(),
+                                child: const Text(
+                                    '选择 Polar H10（ECG / ACC / HR-RR）'))),
+                        if (_polar) ...[
                           CheckboxListTile(
-                            title: Text(c.uuid.str),
+                              title: const Text('ECG（130 Hz）'),
+                              value: _polarOptions.ecg,
+                              onChanged: _busy
+                                  ? null
+                                  : (v) => _applyPolar(PolarCaptureOptions(
+                                      ecg: v!,
+                                      acc: _polarOptions.acc,
+                                      rate: _polarOptions.rate,
+                                      range: _polarOptions.range))),
+                          CheckboxListTile(
+                              title: const Text('ACC'),
+                              value: _polarOptions.acc,
+                              onChanged: _busy
+                                  ? null
+                                  : (v) => _applyPolar(PolarCaptureOptions(
+                                      ecg: _polarOptions.ecg,
+                                      acc: v!,
+                                      rate: _polarOptions.rate,
+                                      range: _polarOptions.range))),
+                          DropdownButtonFormField<int>(
+                              key: ValueKey('polar-rate-${_polarOptions.rate}'),
+                              initialValue: _polarOptions.rate,
+                              decoration:
+                                  const InputDecoration(labelText: 'ACC 采样率'),
+                              items: [
+                                for (final n in [25, 50, 100, 200])
+                                  DropdownMenuItem(
+                                      value: n, child: Text('$n Hz'))
+                              ],
+                              onChanged: _busy
+                                  ? null
+                                  : (v) => _applyPolar(PolarCaptureOptions(
+                                      ecg: _polarOptions.ecg,
+                                      acc: _polarOptions.acc,
+                                      rate: v!,
+                                      range: _polarOptions.range))),
+                          DropdownButtonFormField<int>(
+                              key: ValueKey(
+                                  'polar-range-${_polarOptions.range}'),
+                              initialValue: _polarOptions.range,
+                              decoration:
+                                  const InputDecoration(labelText: 'ACC 量程'),
+                              items: [
+                                for (final n in [2, 4, 8])
+                                  DropdownMenuItem(
+                                      value: n, child: Text('±$n g'))
+                              ],
+                              onChanged: _busy
+                                  ? null
+                                  : (v) => _applyPolar(PolarCaptureOptions(
+                                      ecg: _polarOptions.ecg,
+                                      acc: _polarOptions.acc,
+                                      rate: _polarOptions.rate,
+                                      range: v!))),
+                          const Text(
+                              '始终采集 HR / RR；ECG / ACC 需要 MTU ≥ 232。等待首个 ECG 包最多 60 秒。'),
+                        ],
+                        if (_startCommands.isNotEmpty ||
+                            _stopCommands.isNotEmpty)
+                          Text(
+                              '启动 ${_startCommands.length} 步 · 停止 ${_stopCommands.length} 步'),
+                        for (final service in _services)
+                          Card(
+                              child: ExpansionTile(
+                            initiallyExpanded: false,
+                            title: Text('服务 ${service.uuid.str}'),
                             subtitle: Text(
-                                '${c.properties.notify ? 'Notify ' : ''}${c.properties.indicate ? 'Indicate ' : ''}'
-                                '${c.properties.read ? 'Read ' : ''}${c.properties.write ? 'Write ' : ''} · 实例 ${c.instanceId}'),
-                            value: _selected.contains(captureChannelFor(c)),
-                            onChanged: _busy ||
-                                    (!c.properties.notify &&
-                                        !c.properties.indicate)
-                                ? null
-                                : (checked) {
-                                    setState(() {
-                                      if (checked!) {
-                                        _selected.add(captureChannelFor(c));
-                                      } else {
-                                        _selected.remove(captureChannelFor(c));
-                                      }
-                                    });
-                                  },
-                          )
-                      ],
-                    )),
-                ],
+                                '已选 ${service.characteristics.where((c) => _selected.contains(captureChannelFor(c))).length} / ${service.characteristics.length} 个特征'),
+                            children: [
+                              for (final c in service.characteristics)
+                                CheckboxListTile(
+                                  title: Text(c.uuid.str),
+                                  subtitle: Text(
+                                      '${c.properties.notify ? 'Notify ' : ''}${c.properties.indicate ? 'Indicate ' : ''}'
+                                      '${c.properties.read ? 'Read ' : ''}${c.properties.write ? 'Write ' : ''} · 实例 ${c.instanceId}'),
+                                  value:
+                                      _selected.contains(captureChannelFor(c)),
+                                  onChanged: _busy ||
+                                          _polar ||
+                                          (!c.properties.notify &&
+                                              !c.properties.indicate)
+                                      ? null
+                                      : (checked) {
+                                          setState(() {
+                                            if (checked!) {
+                                              _selected
+                                                  .add(captureChannelFor(c));
+                                            } else {
+                                              _selected
+                                                  .remove(captureChannelFor(c));
+                                            }
+                                          });
+                                        },
+                                )
+                            ],
+                          )),
+                      ]),
               ]),
       ),
     );

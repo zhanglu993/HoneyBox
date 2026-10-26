@@ -1,13 +1,14 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../services/capture/capture_ble_transport.dart';
 import '../../services/capture/capture_models.dart';
 import '../../services/capture/capture_session.dart';
 import '../../services/capture/capture_store.dart';
+import 'capture_records_page.dart';
 import 'capture_setup_page.dart';
 
 class CapturePage extends StatefulWidget {
@@ -22,15 +23,80 @@ class _CapturePageState extends State<CapturePage> {
   final _sessions = <CaptureSession>[];
   bool _loading = true, _saving = false, _leaving = false, _canPop = false;
   String? _error;
+  bool _awake = false, _askedBackground = false;
+  String? _notified;
+  final _cardKeys = <CaptureSession, GlobalKey>{};
+  // Refreshes "seconds since last packet" even when no packets arrive.
+  late final Timer _clock = Timer.periodic(const Duration(seconds: 1), (_) {
+    if (mounted && _sessions.any((s) => s.busy)) {
+      setState(() {});
+      _keepAlive();
+    }
+  });
+  static const staleAfter = Duration(seconds: 15);
   @override
   void initState() {
     super.initState();
+    _clock;
     unawaited(_load());
   }
 
   void _changed() {
+    final awake = _sessions.any((s) => s.busy);
+    if (Platform.isAndroid && awake != _awake) {
+      _awake = awake;
+      unawaited(const MethodChannel('honeybox/capture-power')
+          .invokeMethod<void>('keepAwake', awake)
+          .catchError((Object e) {
+        _message('保持唤醒失败：$e');
+      }));
+      if (awake) unawaited(_askBackground());
+    }
+    _keepAlive();
     if (mounted) setState(() {});
   }
+
+  /// Notification permission and battery whitelist, asked once per page.
+  Future<void> _askBackground() async {
+    if (_askedBackground) return;
+    _askedBackground = true;
+    try {
+      await Permission.notification.request();
+      if (!await Permission.ignoreBatteryOptimizations.isGranted) {
+        await Permission.ignoreBatteryOptimizations.request();
+      }
+    } catch (_) {}
+  }
+
+  /// Foreground service with an ongoing notification while anything records.
+  void _keepAlive() {
+    if (!Platform.isAndroid || !mounted) return;
+    final text = _sessions.any((s) => s.busy) ? _summary() : null;
+    if (text == _notified) return;
+    _notified = text;
+    unawaited(const MethodChannel('honeybox/capture-power')
+        .invokeMethod<void>('keepAlive', {'text': text}).catchError((Object e) {
+      _message('后台保活启动失败：$e');
+    }));
+  }
+
+  String _summary() {
+    final recording =
+        _sessions.where((s) => s.phase == CapturePhase.recording).length;
+    final bad = [
+      for (final s in _sessions)
+        if (_abnormal(s)) '${s.profile.name} ${_status(s).$2.split(' ').first}'
+    ];
+    return [
+      '${_sessions.length} 台 · 采集中 $recording',
+      if (bad.isNotEmpty) '异常：${bad.join('，')}',
+    ].join(' · ');
+  }
+
+  bool _abnormal(CaptureSession s) =>
+      s.phase == CapturePhase.failed ||
+      s.phase == CapturePhase.reconnecting ||
+      _status(s).$2.startsWith('无数据');
 
   Future<void> _load() async {
     setState(() {
@@ -85,6 +151,7 @@ class _CapturePageState extends State<CapturePage> {
       if (!mounted) return;
       if (old != null) {
         _sessions.remove(old);
+        _cardKeys.remove(old);
         old.dispose();
       }
       _sessions.add(_makeSession(profile));
@@ -118,6 +185,7 @@ class _CapturePageState extends State<CapturePage> {
           if (s != session) s.profile
       ]);
       _sessions.remove(session);
+      _cardKeys.remove(session);
       session.dispose();
     } catch (e) {
       _message('删除失败：$e');
@@ -167,52 +235,16 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   Future<void> _history() async {
-    try {
-      final files = await _store!.listRecordings();
-      final active =
-          _sessions.where((s) => s.busy).map((s) => s.file?.path).toSet();
-      final entries = <(File, String)>[];
-      for (final file in files) {
-        if (active.contains(file.path)) continue;
-        var name = file.parent.path;
-        try {
-          final metadata = jsonDecode(
-                  await File('${file.parent.path}/device.json').readAsString())
-              as Map;
-          name = '${metadata['name']} · ${metadata['startedAt']}';
-        } catch (_) {/* Raw file remains accessible if metadata is damaged. */}
-        entries.add((file, name));
-      }
-      if (!mounted) return;
-      final selected = await showDialog<File>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-                title: const Text('已保存的采集记录'),
-                content: SizedBox(
-                    width: 560,
-                    height: 360,
-                    child: entries.isEmpty
-                        ? const Text('暂无已停止的采集记录。')
-                        : ListView(children: [
-                            for (final entry in entries)
-                              ListTile(
-                                title: Text(entry.$2),
-                                subtitle: Text(entry.$1.parent.path),
-                                trailing:
-                                    const Icon(Icons.file_download_outlined),
-                                onTap: () => Navigator.pop(ctx, entry.$1),
-                              )
-                          ])),
-                actions: [
-                  TextButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: const Text('关闭'))
-                ],
-              ));
-      if (selected != null) await _exportFile(selected);
-    } catch (e) {
-      _message('读取采集记录失败：$e');
-    }
+    final active = _sessions
+        .where((s) => s.busy)
+        .map((s) => s.file?.path)
+        .whereType<String>()
+        .toSet();
+    await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+            builder: (_) => CaptureRecordsPage(
+                store: _store!, activePaths: active, onExport: _exportFile)));
   }
 
   Future<void> _stopAll() async => Future.wait(_sessions.map((s) => s.stop()));
@@ -230,6 +262,17 @@ class _CapturePageState extends State<CapturePage> {
 
   @override
   void dispose() {
+    if (Platform.isAndroid && _awake) {
+      unawaited(const MethodChannel('honeybox/capture-power')
+          .invokeMethod<void>('keepAwake', false)
+          .catchError((Object _) {}));
+    }
+    if (Platform.isAndroid && _notified != null) {
+      unawaited(const MethodChannel('honeybox/capture-power')
+          .invokeMethod<void>(
+              'keepAlive', {'text': null}).catchError((Object _) {}));
+    }
+    _clock.cancel();
     for (final s in _sessions) {
       s.removeListener(_changed);
       s.dispose();
@@ -253,54 +296,144 @@ class _CapturePageState extends State<CapturePage> {
             label: const Text('添加设备')),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 100),
-                children: [
-                  const Text('多设备独立采集 · 配置自动保存在本机',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  const Text('采集期间请保持应用在前台。设备断连后可手动重新开始；需厂商启动命令的设备请先开启数据输出。'),
-                  if (_error != null) ...[
-                    SelectableText(_error!),
-                    TextButton(onPressed: _load, child: const Text('重新加载配置'))
-                  ],
-                  if (_leaving || _saving) const LinearProgressIndicator(),
-                  const SizedBox(height: 12),
-                  Wrap(spacing: 8, runSpacing: 8, children: [
-                    FilledButton.icon(
-                        onPressed: available && _sessions.any((s) => !s.busy)
-                            ? () {
-                                for (final s in _sessions) {
-                                  if (!s.busy) unawaited(s.start());
+            : Column(children: [
+                if (_sessions.isNotEmpty) _overview(),
+                Expanded(
+                    child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 100),
+                  children: [
+                    const Text('多设备独立采集 · 配置自动保存在本机',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    const Text(
+                        '采集期间请保持应用在前台。断连将自动重试并继续同一文件；Android 采集时保持屏幕唤醒。'),
+                    if (_error != null) ...[
+                      SelectableText(_error!),
+                      TextButton(onPressed: _load, child: const Text('重新加载配置'))
+                    ],
+                    if (_leaving || _saving) const LinearProgressIndicator(),
+                    const SizedBox(height: 12),
+                    Wrap(spacing: 8, runSpacing: 8, children: [
+                      FilledButton.icon(
+                          onPressed: available && _sessions.any((s) => !s.busy)
+                              ? () {
+                                  for (final s in _sessions) {
+                                    if (!s.busy) unawaited(s.start());
+                                  }
                                 }
-                              }
-                            : null,
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('全部开始')),
-                    OutlinedButton.icon(
-                        onPressed: available && _sessions.any((s) => s.busy)
-                            ? _stopAll
-                            : null,
-                        icon: const Icon(Icons.stop),
-                        label: const Text('全部停止')),
-                    OutlinedButton.icon(
-                        onPressed: available ? _history : null,
-                        icon: const Icon(Icons.history),
-                        label: const Text('采集记录')),
-                  ]),
-                  if (_sessions.isEmpty && _error == null)
-                    const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 48),
-                        child: Text('还没有采集设备。添加设备并选择服务、通知特征后，下次即可直接复用。')),
-                  for (final s in _sessions) _card(s, available),
-                  if (_store != null)
-                    Padding(
-                        padding: const EdgeInsets.only(top: 16),
-                        child: SelectableText(
-                            '自动保存目录：${_store!.directory.path}/captures\n'
-                            '每次采集独立保存 raw.jsonl 和 device.json；停止后可导出。')),
-                ],
-              ),
+                              : null,
+                          icon: const Icon(Icons.play_arrow),
+                          label: const Text('全部开始')),
+                      OutlinedButton.icon(
+                          onPressed: available && _sessions.any((s) => s.busy)
+                              ? _stopAll
+                              : null,
+                          icon: const Icon(Icons.stop),
+                          label: const Text('全部停止')),
+                      OutlinedButton.icon(
+                          onPressed: available ? _history : null,
+                          icon: const Icon(Icons.history),
+                          label: const Text('采集记录')),
+                    ]),
+                    if (_sessions.isEmpty && _error == null)
+                      const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 48),
+                          child: Text('还没有采集设备。添加设备并选择服务、通知特征后，下次即可直接复用。')),
+                    for (final s in _sessions) _card(s, available),
+                    if (_store != null)
+                      Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: SelectableText(
+                              '自动保存目录：${_store!.directory.path}/captures\n'
+                              '每次采集独立保存 raw.jsonl 和 device.json；停止后可导出。')),
+                  ],
+                )),
+              ]),
+      ),
+    );
+  }
+
+  (Color, String) _status(CaptureSession s) {
+    final scheme = Theme.of(context).colorScheme;
+    final last = s.lastActivity;
+    final age = last == null ? Duration.zero : DateTime.now().difference(last);
+    return switch (s.phase) {
+      CapturePhase.recording when age > staleAfter => (
+          Colors.amber.shade700,
+          '无数据 ${age.inSeconds}s'
+        ),
+      CapturePhase.recording => (Colors.green.shade600, '采集中'),
+      CapturePhase.starting => (scheme.primary, '连接中'),
+      CapturePhase.reconnecting => (Colors.deepOrange, '掉线，重连中'),
+      CapturePhase.stopping => (scheme.outline, '停止中'),
+      CapturePhase.failed => (scheme.error, '失败'),
+      CapturePhase.idle => (scheme.outline, '未采集'),
+    };
+  }
+
+  String _age(CaptureSession s) {
+    final last = s.lastPacketAt;
+    if (last == null || !s.busy) return '';
+    final seconds = DateTime.now().difference(last).inSeconds;
+    return seconds < 60 ? '${seconds}s 前' : '${seconds ~/ 60}min 前';
+  }
+
+  Widget _overview() {
+    final theme = Theme.of(context);
+    final abnormal = _sessions.where(_abnormal).length;
+    final recording =
+        _sessions.where((s) => s.phase == CapturePhase.recording).length;
+    return Material(
+      key: const Key('capture-overview'),
+      color: theme.colorScheme.surfaceContainerHigh,
+      child: ConstrainedBox(
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.35),
+        child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            children: [
+              Text(
+                  '${_sessions.length} 台 · 采集中 $recording'
+                  '${abnormal > 0 ? ' · 异常 $abnormal' : ''}',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                      color: abnormal > 0 ? theme.colorScheme.error : null)),
+              for (final s in _sessions)
+                InkWell(
+                  onTap: () {
+                    final card = _cardKeys[s]?.currentContext;
+                    if (card != null) {
+                      Scrollable.ensureVisible(card,
+                          duration: const Duration(milliseconds: 250));
+                    }
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(children: [
+                      Icon(Icons.circle, size: 12, color: _status(s).$1),
+                      const SizedBox(width: 8),
+                      Expanded(
+                          child: Text(s.profile.name,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      Text(
+                          s.profile.id.length > 5
+                              ? s.profile.id.substring(s.profile.id.length - 5)
+                              : s.profile.id,
+                          style: theme.textTheme.bodySmall),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                          width: 96,
+                          child: Text(_status(s).$2,
+                              style: TextStyle(color: _status(s).$1))),
+                      SizedBox(
+                          width: 92,
+                          child: Text('${s.packetCount} 包 ${_age(s)}',
+                              textAlign: TextAlign.end,
+                              style: theme.textTheme.bodySmall)),
+                    ]),
+                  ),
+                ),
+            ]),
       ),
     );
   }
@@ -310,10 +443,12 @@ class _CapturePageState extends State<CapturePage> {
       CapturePhase.idle: '未采集',
       CapturePhase.starting: '连接及订阅中',
       CapturePhase.recording: '采集中',
+      CapturePhase.reconnecting: '等待重连',
       CapturePhase.stopping: '正在停止',
       CapturePhase.failed: '采集失败'
     };
     return Card(
+        key: _cardKeys.putIfAbsent(s, GlobalKey.new),
         margin: const EdgeInsets.only(top: 16),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -322,7 +457,8 @@ class _CapturePageState extends State<CapturePage> {
             Text(s.profile.name,
                 style: Theme.of(context).textTheme.titleMedium),
             SelectableText(s.profile.id),
-            Text('${labels[s.phase]} · ${s.packetCount} 包 · ${s.byteCount} 字节'),
+            Text(
+                '${labels[s.phase]} · ${s.packetCount} 包 · ${s.byteCount} 字节 · 重连 ${s.reconnectCount} 次'),
             for (final c in s.profile.channels)
               Text('${c.service} / ${c.characteristic} · 实例 ${c.instance}'),
             if (s.error != null)

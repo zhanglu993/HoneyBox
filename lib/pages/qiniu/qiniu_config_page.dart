@@ -77,7 +77,11 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
         await controller.save(config);
       }
       if (mounted) {
-        _feedback(test ? '连接成功，空间可列举；上传和下载权限尚未验证。' : '配置已安全保存到本机。');
+        _feedback(test
+            ? config.downloadDomain.isEmpty
+                ? '连接成功，空间可列举；未填写下载域名，无法生成分享链接。'
+                : '连接成功，空间可列举，下载域名可访问；上传权限尚未验证。'
+            : '配置已安全保存到本机。');
       }
     } catch (_) {
       if (mounted) {

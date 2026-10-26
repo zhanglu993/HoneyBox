@@ -11,6 +11,39 @@ void main() {
       () async => dir = await Directory.systemTemp.createTemp('capture_test'));
   tearDown(() async => dir.delete(recursive: true));
   const channel = CaptureChannel(service: 'e0ff', characteristic: 'ffe1');
+  test('loads version 1 and saves version 2 command profiles', () async {
+    final store = CaptureStore(dir);
+    await File('${dir.path}/capture_profiles.json').writeAsString(jsonEncode({
+      'version': 1,
+      'devices': [
+        {
+          'id': 'A',
+          'name': 'Old',
+          'channels': [channel.toJson()]
+        }
+      ]
+    }));
+    expect((await store.loadProfiles()).single.startCommands, isEmpty);
+    await store.saveProfiles([
+      CaptureProfile(id: 'A', name: 'New', channels: [
+        channel
+      ], startCommands: [
+        CaptureCommand(channel: channel, hex: 'aB', withResponse: false),
+        CaptureCommand(waitChannel: channel, timeoutSeconds: 60)
+      ], stopCommands: [
+        CaptureCommand(channel: channel, hex: '00')
+      ])
+    ]);
+    final restored = (await store.loadProfiles()).single;
+    expect(restored.startCommands.first.hex, 'ab');
+    expect(restored.startCommands.first.withResponse, isFalse);
+    expect(restored.startCommands.last.waitChannel, channel);
+    expect(restored.stopCommands.single.hex, '00');
+    expect(
+        jsonDecode(await File('${dir.path}/capture_profiles.json')
+            .readAsString())['version'],
+        2);
+  });
   test('restores scan settings without changing saved devices', () async {
     final store = CaptureStore(dir);
     await store.saveProfiles([
@@ -95,5 +128,18 @@ void main() {
     expect(map['time'], '2026-10-26T00:00:00.000Z');
     expect(await writer.file.parent.parent.resolveSymbolicLinks(),
         await Directory('${dir.path}/captures').resolveSymbolicLinks());
+  });
+  test('deletes a recording folder and refuses paths outside captures',
+      () async {
+    final store = CaptureStore(dir);
+    final folder = await Directory('${dir.path}/captures/capture_x')
+        .create(recursive: true);
+    final raw = await File('${folder.path}/raw.jsonl').writeAsString('{}');
+    await File('${folder.path}/device.json').writeAsString('{}');
+    await store.deleteRecording(raw);
+    expect(await folder.exists(), isFalse);
+    final outside = await File('${dir.path}/raw.jsonl').writeAsString('{}');
+    await expectLater(store.deleteRecording(outside), throwsStateError);
+    expect(await outside.exists(), isTrue);
   });
 }

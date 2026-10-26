@@ -7,6 +7,7 @@ import 'capture_scan_settings.dart';
 abstract interface class CaptureRecording {
   File get file;
   Future<void> append(CapturePacket packet);
+  Future<void> flush();
   Future<void> close();
 }
 
@@ -52,7 +53,9 @@ class CaptureStore {
     try {
       final data =
           jsonDecode(await _profiles.readAsString()) as Map<String, dynamic>;
-      if (data['version'] != 1) throw const FormatException('配置版本不支持');
+      if (![1, 2].contains(data['version'])) {
+        throw const FormatException('配置版本不支持');
+      }
       final profiles = (data['devices'] as List)
           .map((p) => CaptureProfile.fromJson(p as Map<String, dynamic>))
           .toList();
@@ -75,7 +78,7 @@ class CaptureStore {
     final temp = File('${_profiles.path}.tmp');
     await temp.writeAsString(
         jsonEncode({
-          'version': 1,
+          'version': 2,
           'devices': profiles.map((p) => p.toJson()).toList()
         }),
         flush: true);
@@ -95,6 +98,16 @@ class CaptureStore {
         }),
         flush: true);
     return _FileRecording(file, await file.open(mode: FileMode.write));
+  }
+
+  /// Removes one recording folder; refuses paths outside the captures folder.
+  Future<void> deleteRecording(File raw) async {
+    final folder = raw.parent;
+    final root = Directory('${directory.path}/captures').absolute.path;
+    if (folder.parent.absolute.path != root) {
+      throw StateError('拒绝删除采集目录以外的文件：${folder.path}');
+    }
+    if (await folder.exists()) await folder.delete(recursive: true);
   }
 
   Future<List<File>> listRecordings() async {
@@ -122,6 +135,11 @@ class _FileRecording implements CaptureRecording {
   Future<void> append(CapturePacket packet) async {
     if (_closed) throw StateError('采集文件已关闭');
     await _handle.writeString('${jsonEncode(packet.toJson())}\n');
+  }
+
+  @override
+  Future<void> flush() async {
+    await _handle.flush();
   }
 
   @override

@@ -73,9 +73,15 @@ class QiniuController extends ChangeNotifier {
         config = next;
       });
   Future<void> testConnection(QiniuConfig next) => run('测试连接', (task) async {
-        await service
-            .list(next, prefix: next.prefix, limit: 1, transfer: task)
-            .timeout(const Duration(seconds: 20), onTimeout: () {
+        Future<void> check() async {
+          final page = await service.list(next,
+              prefix: next.prefix, limit: 1, transfer: task);
+          if (next.downloadDomain.isEmpty) return;
+          await service.checkDownload(next, task,
+              key: page.items.isEmpty ? null : page.items.first.key);
+        }
+
+        await check().timeout(const Duration(seconds: 20), onTimeout: () {
           task.cancel();
           throw const QiniuException('连接测试超时（20 秒），请检查网络或手动选择存储区域后重试');
         });

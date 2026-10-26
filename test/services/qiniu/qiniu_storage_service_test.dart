@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:honeybox/services/qiniu/qiniu_config.dart';
 import 'package:honeybox/services/qiniu/qiniu_storage_service.dart';
 import 'package:honeybox/services/qiniu/qiniu_transfer.dart';
 import 'qiniu_signer_test.dart' show config;
@@ -208,5 +209,41 @@ void main() {
     });
     await service.upload(config, file, 'capture/a', QiniuTransfer());
     expect(requests.where((r) => r.startsWith('PUT')).length, 3);
+  });
+  for (final (key, status, error) in [
+    (null, 404, null),
+    ('capture/a.zip', 200, null),
+    ('capture/a.zip', 404, '找不到已有文件'),
+    (null, 401, '签名被拒'),
+  ]) {
+    test('download domain check: key=$key status=$status', () async {
+      final methods = <String>[];
+      server.listen((req) async {
+        methods.add(req.method);
+        req.response.statusCode = status;
+        await req.response.close();
+      });
+      final check = service.checkDownload(config, QiniuTransfer(), key: key);
+      if (error == null) {
+        await check;
+      } else {
+        await expectLater(
+            check,
+            throwsA(isA<QiniuException>()
+                .having((e) => e.message, 'message', contains(error))));
+      }
+      expect(methods, ['HEAD']);
+    });
+  }
+  test('unresolvable download domain is reported as unavailable', () async {
+    const broken = QiniuConfig(
+        accessKey: 'ak',
+        secretKey: 'sk',
+        bucket: 'test',
+        downloadDomain: 'https://missing.invalid');
+    await expectLater(
+        QiniuStorageService().checkDownload(broken, QiniuTransfer()),
+        throwsA(isA<QiniuException>()
+            .having((e) => e.message, 'message', startsWith('下载域名不可用'))));
   });
 }

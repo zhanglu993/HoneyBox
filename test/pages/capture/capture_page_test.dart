@@ -24,8 +24,14 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await tester.pumpAndSettle();
-    expect(find.text('我的手表'), findsOneWidget);
-    expect(find.text('新传感器'), findsOneWidget);
+    // Pinned overview row plus the device card.
+    expect(find.text('我的手表'), findsNWidgets(2));
+    expect(find.text('新传感器'), findsNWidgets(2));
+    final overview = find.byKey(const Key('capture-overview'));
+    expect(find.descendant(of: overview, matching: find.text('2 台 · 采集中 0')),
+        findsOneWidget);
+    expect(find.descendant(of: overview, matching: find.text('未采集')),
+        findsNWidgets(2));
     expect(find.textContaining('e0ff / ffe1'), findsOneWidget);
     expect(find.textContaining('180d / 2a37'), findsOneWidget);
     expect(find.text('全部开始'), findsOneWidget);

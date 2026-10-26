@@ -64,7 +64,8 @@ class QiniuStorageService {
       Future<T> Function(HttpClientResponse) read,
       {Map<String, String> headers = const {},
       List<int>? body,
-      void Function(int)? sent}) async {
+      void Function(int)? sent,
+      bool anyStatus = false}) async {
     transfer.check();
     final client = HttpClient()
       ..connectionTimeout = timeout
@@ -90,7 +91,9 @@ class QiniuStorageService {
       }
       final response = await request.close().timeout(timeout);
       transfer.check();
-      if (response.statusCode != 200) throw _status(response.statusCode);
+      if (!anyStatus && response.statusCode != 200) {
+        throw _status(response.statusCode);
+      }
       final result = await read(response);
       transfer.check();
       return result;
@@ -317,6 +320,35 @@ class QiniuStorageService {
       throw const QiniuException('上传响应校验失败，请刷新列表核对云端文件');
     }
     transfer.onProgress?.call(size, size);
+  }
+
+  /// HEADs [key] (or a missing probe key) through the download domain, so DNS,
+  /// certificate and bucket binding problems show up before a link is shared.
+  Future<void> checkDownload(QiniuConfig config, QiniuTransfer transfer,
+      {String? key}) async {
+    final error = config.validationError(forDownload: true);
+    if (error != null) throw QiniuException(error);
+    final target =
+        key ?? '.honeybox-check-${DateTime.now().microsecondsSinceEpoch}';
+    final uri = downloadResolver?.call(config, target) ??
+        QiniuSigner(config).downloadUri(target);
+    final int code;
+    try {
+      code = await _response('HEAD', uri, transfer, (r) async {
+        await r.drain<void>();
+        return r.statusCode;
+      }, anyStatus: true);
+    } on QiniuCancelled {
+      rethrow;
+    } on QiniuException catch (e) {
+      throw QiniuException('下载域名不可用：${e.message}');
+    }
+    if (code == 200 || (key == null && code == 404)) return;
+    throw QiniuException(switch (code) {
+      401 || 403 => '下载域名可访问，但签名被拒（$code）：请确认域名绑定在此空间，且「私有空间」与实际一致',
+      404 => '下载域名可访问，但找不到已有文件（404）：请确认域名绑定在此空间',
+      _ => '下载域名返回 $code，请检查七牛域名配置',
+    });
   }
 
   Future<File> download(QiniuConfig config, QiniuObject object,
