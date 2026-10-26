@@ -281,12 +281,10 @@ class JwDeviceRepository {
 
   void _requireReadContract(JwConfigurationContract contract) {
     if (contract != JwConfigurationContract.v101S200 ||
-        state.info?.firmware != 'T005' ||
-        state.info?.hardware != 'H001' ||
         state.capabilities == null) {
       throw JwConfigurationException(
           stage: 'unsupported',
-          cause: 'requires explicit V101 S200 T005/H001 contract');
+          cause: 'requires explicit JW protocol contract and capabilities');
     }
   }
 
@@ -890,15 +888,12 @@ class JwDeviceRepository {
 
   void _requireConfiguration(
       JwConfigurationContract contract, JwConfigurationDomain? domain) {
-    final info = state.info, c = state.capabilities;
-    if (contract != JwConfigurationContract.v101S200 ||
-        info?.firmware != 'T005' ||
-        info?.hardware != 'H001' ||
-        c == null) {
+    final c = state.capabilities;
+    if (contract != JwConfigurationContract.v101S200 || c == null) {
       throw JwConfigurationException(
           domain: domain,
           stage: 'unsupported',
-          cause: 'requires explicit V101 S200 T005/H001 contract');
+          cause: 'requires explicit JW protocol contract and capabilities');
     }
     final supported = domain == null
         ? c.healthStatus
@@ -1182,6 +1177,14 @@ class JwDeviceRepository {
           {required JwConfigurationContract contract}) =>
       _remainingOperation(() async {
         _requireReadContract(contract);
+        // This global cursor mutation has only been verified on this target.
+        // Keep its restriction separate from routine reads, settings and sync.
+        if (state.info?.firmware != 'T005' || state.info?.hardware != 'H001') {
+          throw JwConfigurationException(
+              stage: 'unsupported',
+              cause:
+                  'global history cursor reset requires verified T005/H001 target');
+        }
         final c = state.capabilities!;
         _requireReadCapability(
             c.steps ||

@@ -138,11 +138,11 @@ void main() {
       expect(t.writes, isEmpty);
     });
   }
-  test('unknown profile zero TX', () async {
+  test('firmware metadata does not block a supported alarm query', () async {
     await create(firmware: 'Other');
-    await expectLater(
-        read('readAlarm'), throwsA(isA<JwConfigurationException>()));
-    expect(t.writes, isEmpty);
+    response = {'operation': 'readAlarm', 'responseRawHex': ''};
+    expect((await read('readAlarm')).records, isEmpty);
+    expect(t.writes, isNotEmpty);
   });
   test('sport query requires existing JW login zero TX', () async {
     await create(login: 1);
