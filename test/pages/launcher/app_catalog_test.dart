@@ -4,9 +4,10 @@ import 'package:honeybox/pages/launcher/app_catalog.dart';
 
 void main() {
   group('kAppCatalog', () {
-    test('contains exactly ebadge, watch, dashboard in this order', () {
+    test('contains ebadge, watch, dashboard and data capture in this order',
+        () {
       expect(kAppCatalog.map((e) => e.id).toList(),
-          [AppId.ebadge, AppId.watch, AppId.dashboard]);
+          [AppId.ebadge, AppId.watch, AppId.dashboard, AppId.capture]);
     });
 
     test('every entry has non-empty title, subtitle, deviceFilter', () {
@@ -21,7 +22,7 @@ void main() {
     test('uses the product names eBadge, Watch, Dashboard', () {
       expect(
         kAppCatalog.map((e) => e.title).toList(),
-        ['eBadge', 'Watch', 'Dashboard'],
+        ['eBadge', 'Watch', 'Dashboard', '数据采集'],
       );
     });
 
@@ -42,6 +43,7 @@ void main() {
       expect(routeNameFor(AppId.ebadge), '/ebadge-root');
       expect(routeNameFor(AppId.watch), '/watch-root');
       expect(routeNameFor(AppId.dashboard), '/dashboard-root');
+      expect(routeNameFor(AppId.capture), '/capture-root');
     });
   });
 }

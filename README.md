@@ -40,6 +40,7 @@ HoneyBox 是一款基于 Flutter 开发的内部设备调试工具，面向电�
 | --- | --- | --- |
 | eBadge | 可用 | BLE 扫描、连接、内容制作与传输已实现 |
 | Watch / JW | 已接入 | 设备与健康 UI、历史同步/离线记录、配置及协议控制台；以设备能力为准 |
+| 数据采集 | 已实现 | 多设备 BLE 通知采集、独立通道配置、持久化与原始数据导出；实机多设备验收待完成 |
 | 仪表盘 | 预览 | 已保留应用入口，业务功能尚未实现 |
 | 芯片配置 | 预留 | 当前为占位页面 |
 | OTA 升级 | 外部工具 | 由 Realtek OTA App 执行 |
@@ -58,6 +59,8 @@ HoneyBox 是一款基于 Flutter 开发的内部设备调试工具，面向电�
 Android application ID 和 namespace 均为 `com.honeygui.honeybox`，Dart package 名称为 `honeybox`。由于不再沿用旧应用标识，Android 会将 HoneyBox 识别为一个新的独立应用，不能覆盖安装旧版 eBadge。
 
 ## 技术栈
+
+多设备采集的配置、文件格式和使用边界见 [BLE 原始数据采集指南](docs/ble-raw-capture.md)。
 
 - Flutter / Dart
 - Material Design

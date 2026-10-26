@@ -1,0 +1,99 @@
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:honeybox/services/capture/capture_models.dart';
+import 'package:honeybox/services/capture/capture_store.dart';
+import 'package:honeybox/services/capture/capture_scan_settings.dart';
+
+void main() {
+  late Directory dir;
+  setUp(
+      () async => dir = await Directory.systemTemp.createTemp('capture_test'));
+  tearDown(() async => dir.delete(recursive: true));
+  const channel = CaptureChannel(service: 'e0ff', characteristic: 'ffe1');
+  test('restores scan settings without changing saved devices', () async {
+    final store = CaptureStore(dir);
+    await store.saveProfiles([
+      CaptureProfile(id: 'A', name: 'Watch', channels: [channel])
+    ]);
+    await Future.wait([
+      store.saveScanSettings(const CaptureScanSettings(minimumRssi: -70)),
+      store.saveScanSettings(const CaptureScanSettings(
+          strongestFirst: false, minimumRssi: -50, hideUnnamed: true)),
+    ]);
+    final restored = await CaptureStore(dir).loadScanSettings();
+    expect(restored.strongestFirst, isFalse);
+    expect(restored.minimumRssi, -50);
+    expect(restored.hideUnnamed, isTrue);
+    expect((await CaptureStore(dir).loadProfiles()).single.id, 'A');
+  });
+  test('missing scan settings use defaults; invalid settings are retained',
+      () async {
+    final defaults = await CaptureStore(dir).loadScanSettings();
+    expect(defaults.strongestFirst, isTrue);
+    expect(defaults.minimumRssi, -127);
+    expect(defaults.hideUnnamed, isFalse);
+    final file = File('${dir.path}/capture_scan_settings.json');
+    await file.writeAsString('{"minimumRssi":-500}');
+    await expectLater(
+        CaptureStore(dir).loadScanSettings(), throwsFormatException);
+    expect(await file.readAsString(), '{"minimumRssi":-500}');
+  });
+  test('restores multiple devices and their independent channels', () async {
+    final store = CaptureStore(dir);
+    await store.saveProfiles([
+      CaptureProfile(id: 'A', name: '手表', channels: [channel]),
+      CaptureProfile(id: 'B', name: '传感器', channels: [
+        const CaptureChannel(
+            service: '180d', characteristic: '2a37', instance: 2),
+      ]),
+    ]);
+    final restored = await CaptureStore(dir).loadProfiles();
+    expect(restored.map((p) => p.id), ['A', 'B']);
+    expect(restored[1].channels.single.service, '180d');
+    expect(restored[1].channels.single.instance, 2);
+    expect(restored.first.channels.single, channel);
+  });
+  test('corrupt configuration raises an error and leaves source intact',
+      () async {
+    final file = File('${dir.path}/capture_profiles.json');
+    await file.writeAsString('{broken');
+    await expectLater(CaptureStore(dir).loadProfiles(), throwsFormatException);
+    expect(await file.readAsString(), '{broken');
+  });
+  test('replaces saved configuration and keeps earlier recording discoverable',
+      () async {
+    final store = CaptureStore(dir);
+    final first = CaptureProfile(id: 'A', name: 'Before', channels: [channel]);
+    await store.saveProfiles([first]);
+    final writer = await store.openRecording(first);
+    await writer.close();
+    await store.saveProfiles([
+      CaptureProfile(id: 'B', name: 'After', channels: [channel])
+    ]);
+    expect((await CaptureStore(dir).loadProfiles()).single.id, 'B');
+    expect((await CaptureStore(dir).listRecordings()).single.path,
+        writer.file.path);
+  });
+  test('writes exact bytes and ordered metadata then closes the file',
+      () async {
+    final writer = await CaptureStore(dir).openRecording(
+      CaptureProfile(id: 'A', name: '../手表', channels: [channel]),
+    );
+    await writer.append(CapturePacket(
+      deviceId: 'A',
+      channel: channel,
+      sequence: 1,
+      time: DateTime.utc(2026, 10, 26),
+      bytes: [0, 255, 128, 10],
+    ));
+    await writer.close();
+    final map = jsonDecode((await writer.file.readAsLines()).single) as Map;
+    expect(map['hex'], '00ff800a');
+    expect(map['deviceId'], 'A');
+    expect(map['sequence'], 1);
+    expect(map['time'], '2026-10-26T00:00:00.000Z');
+    expect(await writer.file.parent.parent.resolveSymbolicLinks(),
+        await Directory('${dir.path}/captures').resolveSymbolicLinks());
+  });
+}
