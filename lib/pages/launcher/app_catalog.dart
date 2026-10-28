@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 /// 应用启动器内可选的应用标识。新增应用时：先扩展本枚举，然后在
 /// [kAppCatalog] 追加一条对应记录，最后在 lib/app.dart 的路由分发里
 /// 增加对应 <App>AppRoot 的构造。
-enum AppId { ebadge, watch, dashboard }
+enum AppId { ebadge, watch, dashboard, capture }
 
 @immutable
 class AppEntry {
@@ -54,6 +54,15 @@ const List<AppEntry> kAppCatalog = <AppEntry>[
     deviceFilter: 'Dashboard',
     implemented: true,
   ),
+  AppEntry(
+    id: AppId.capture,
+    title: '数据采集',
+    subtitle: '多设备 BLE 原始数据采集与配置管理',
+    icon: Icons.sensors,
+    accent: Color(0xFF6B50A1),
+    deviceFilter: '*',
+    implemented: true,
+  ),
 ];
 
 String routeNameFor(AppId id) {
@@ -64,5 +73,7 @@ String routeNameFor(AppId id) {
       return '/watch-root';
     case AppId.dashboard:
       return '/dashboard-root';
+    case AppId.capture:
+      return '/capture-root';
   }
 }
