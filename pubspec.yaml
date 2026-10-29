@@ -20,7 +20,10 @@ dependencies:
   package_info_plus: ^8.1.1
   open_filex: ^4.5.0
   crypto: ^3.0.5
+  flutter_secure_storage: ^9.2.4
   palette_generator: ^0.3.3+7
+  archive: ^4.5.2
+  share_plus: ^12.0.2
 
 dev_dependencies:
   flutter_test:

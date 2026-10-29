@@ -42,6 +42,7 @@ class MainActivity : FlutterActivity() {
     private var eventSink: EventChannel.EventSink? = null
     private var hotspot: HotspotManager? = null
     private var sta: EBadgeStaManager? = null
+    private var captureExporter: CaptureFileExporter? = null
 
     // In-page video preview players (native MediaPlayer → Flutter texture),
     // keyed by their texture id. One at a time in practice, but keyed for safety.
@@ -59,6 +60,32 @@ class MainActivity : FlutterActivity() {
         NotificationListener.registerChannels(flutterEngine, applicationContext)
 
         val messenger = flutterEngine.dartExecutor.binaryMessenger
+        val exporter = CaptureFileExporter(this)
+        captureExporter = exporter
+        MethodChannel(messenger, "honeybox/capture-export").setMethodCallHandler(exporter::handle)
+        MethodChannel(messenger, "honeybox/capture-power").setMethodCallHandler { call, result ->
+            if (call.method == "keepAwake") {
+                if (call.arguments == true) {
+                    window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                result.success(null)
+            } else if (call.method == "moveToBack") {
+                moveTaskToBack(true)
+                result.success(null)
+            } else if (call.method == "keepAlive") {
+                val text = call.argument<String>("text")
+                if (text != null) {
+                    CaptureKeepAliveService.start(this, text)
+                } else {
+                    CaptureKeepAliveService.stop(this)
+                }
+                result.success(null)
+            } else {
+                result.notImplemented()
+            }
+        }
         textureRegistry = flutterEngine.renderer
 
         EventChannel(messenger, eventChannelName).setStreamHandler(
@@ -712,7 +739,14 @@ class MainActivity : FlutterActivity() {
         return created
     }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (captureExporter?.onActivityResult(requestCode, resultCode, data) == true) return
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
     override fun onDestroy() {
+        captureExporter?.close()
+        captureExporter = null
         encoder?.closeCamera()
         encoder = null
         hotspot?.stop()

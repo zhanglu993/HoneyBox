@@ -6,6 +6,7 @@ import '../dashboard/dashboard_app_root.dart';
 import '../ebadge/ebadge_app_root.dart';
 import '../shared/update_flow.dart';
 import '../watch/watch_app_root.dart';
+import '../capture/capture_page.dart';
 import 'app_catalog.dart';
 import 'widgets/app_card.dart';
 
@@ -35,6 +36,8 @@ class AppLauncherPage extends ConsumerWidget {
               Navigator.pushNamed(context, v);
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(value: '/qiniu-files', child: Text('七牛云文件')),
+              PopupMenuItem(value: '/qiniu-config', child: Text('七牛云配置')),
               PopupMenuItem(value: '/chip-config', child: Text('芯片配置')),
               PopupMenuItem(value: _kUpdateAction, child: Text('检查更新')),
             ],
@@ -101,6 +104,8 @@ class AppLauncherPage extends ConsumerWidget {
         return const WatchAppRoot();
       case AppId.dashboard:
         return const DashboardAppRoot();
+      case AppId.capture:
+        return const CapturePage();
     }
   }
 }
