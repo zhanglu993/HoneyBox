@@ -21,14 +21,162 @@ class MemoryStore extends QiniuCredentialStore {
 
 class FakeService extends QiniuStorageService {
   String? key;
+  int uploads = 0;
   @override
   Future<void> upload(
       QiniuConfig config, File file, String key, QiniuTransfer transfer) async {
     this.key = key;
+    uploads++;
   }
 }
 
 void main() {
+  for (final wrongBucket in [false, true]) {
+    testWidgets(
+        wrongBucket
+            ? 'copy refuses a mismatched upload bucket without uploading'
+            : 'mixed selection uploads only pending records and retains uploaded links',
+        (tester) async {
+      final dir = (await tester
+          .runAsync(() => Directory.systemTemp.createTemp('records_mixed')))!;
+      final service = FakeService();
+      final controller = QiniuController(
+          store: const MemoryStore(QiniuConfig(
+              accessKey: 'ak',
+              secretKey: 'sk',
+              bucket: 'test',
+              downloadDomain: 'https://files.example.com')),
+          service: service);
+      String? copied;
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String;
+        }
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null));
+      await tester.runAsync(() async {
+        for (final name in wrongBucket ? ['A'] : ['A', 'B']) {
+          final folder = await Directory('${dir.path}/captures/$name')
+              .create(recursive: true);
+          await File('${folder.path}/device.json').writeAsString(jsonEncode(
+              {'name': name, 'id': name, 'startedAt': '2026-10-29T09:00:00Z'}));
+          await File('${folder.path}/raw.jsonl').writeAsString('{}\n');
+          if (name == 'A') {
+            await File('${folder.path}/upload.json').writeAsString(jsonEncode({
+              'key': 'captures/existing.zip',
+              'bucket': wrongBucket ? 'other' : 'test',
+              'live': true
+            }));
+          }
+        }
+        await tester.pumpWidget(ProviderScope(
+            overrides: [
+              qiniuControllerProvider.overrideWith((ref) => controller)
+            ],
+            child: MaterialApp(
+                home: CaptureRecordsPage(
+                    store: CaptureStore(dir),
+                    onExport: (_) async {},
+                    tempDirectory: () async => dir))));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      });
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('capture-copy-links')));
+      await tester.pumpAndSettle();
+      expect(service.uploads, 0);
+      expect(copied, isNull);
+      if (wrongBucket) {
+        expect(find.textContaining('与当前配置不同'), findsOneWidget);
+      } else {
+        expect(find.textContaining('尚未上传'), findsOneWidget);
+        await tester.runAsync(() async {
+          await tester.tap(find.byKey(const Key('capture-upload')));
+          for (var i = 0; i < 50 && copied == null; i++) {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        });
+        await tester.pump();
+        expect(service.uploads, 1);
+        expect(service.key, contains('B_B'));
+        expect(service.key, isNot(contains('A_A')));
+        expect(copied!.split('\n'), hasLength(2));
+        expect(copied, contains('captures/existing.zip'));
+        expect(find.text('复制选中链接（2）'), findsOneWidget);
+        final previous = jsonDecode(
+                File('${dir.path}/captures/A/upload.json').readAsStringSync())
+            as Map;
+        expect(previous['key'], 'captures/existing.zip');
+      }
+      await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(() => dir.delete(recursive: true));
+    });
+  }
+  testWidgets(
+      'uploaded records copy deduplicated fresh links without another upload after reopening',
+      (tester) async {
+    final dir = (await tester
+        .runAsync(() => Directory.systemTemp.createTemp('records_relink')))!;
+    final service = FakeService();
+    final controller = QiniuController(
+        store: const MemoryStore(QiniuConfig(
+            accessKey: 'ak',
+            secretKey: 'sk',
+            bucket: 'test',
+            downloadDomain: 'https://files.example.com')),
+        service: service);
+    String? copied;
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        copied = (call.arguments as Map)['text'] as String;
+      }
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+    await tester.runAsync(() async {
+      for (final name in ['A', 'B', 'C']) {
+        final folder = await Directory('${dir.path}/captures/$name')
+            .create(recursive: true);
+        await File('${folder.path}/device.json').writeAsString(jsonEncode(
+            {'name': name, 'id': name, 'startedAt': '2026-10-29T09:00:00Z'}));
+        await File('${folder.path}/raw.jsonl').writeAsString('{}\n');
+        await File('${folder.path}/upload.json').writeAsString(jsonEncode({
+          'key': name == 'C' ? 'captures/second.zip' : 'captures/shared.zip',
+          'bucket': 'test',
+          'uploadedAt': '2026-10-26T09:00:00Z'
+        }));
+      }
+      await tester.pumpWidget(ProviderScope(
+          overrides: [
+            qiniuControllerProvider.overrideWith((ref) => controller)
+          ],
+          child: MaterialApp(
+              home: CaptureRecordsPage(
+                  store: CaptureStore(dir), onExport: (_) async {}))));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    });
+    await tester.pump();
+    expect(find.text('复制链接'), findsNWidgets(3));
+    await tester.tap(find.byKey(const Key('capture-copy-links')));
+    await tester.pumpAndSettle();
+    final links = copied!.split('\n');
+    expect(links, hasLength(2));
+    expect(links.map((url) => Uri.parse(url).path),
+        unorderedEquals(['/captures/shared.zip', '/captures/second.zip']));
+    expect(service.uploads, 0);
+    copied = null;
+    await tester.tap(find.text('复制链接').first);
+    await tester.pumpAndSettle();
+    expect(copied, isNotNull);
+    expect(service.uploads, 0);
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(() => dir.delete(recursive: true));
+  });
   testWidgets('latest batch is preselected, uploaded and its link copied',
       (tester) async {
     final dir = (await tester

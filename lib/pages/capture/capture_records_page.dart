@@ -29,7 +29,7 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
   final _selected = <String>{};
   bool _loading = true;
   String _error = '';
-  Uri? _link;
+  String? _link;
 
   @override
   void initState() {
@@ -44,7 +44,8 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
     super.dispose();
   }
 
-  Future<void> _load({bool selectLatest = true}) async {
+  Future<void> _load(
+      {bool selectLatest = true, bool preserveSelection = false}) async {
     try {
       await _qiniu.ensureLoaded();
       final files = await widget.store.listRecordings();
@@ -56,9 +57,14 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
           (b.startedAt ?? DateTime(0)).compareTo(a.startedAt ?? DateTime(0)));
       if (!mounted) return;
       setState(() {
+        final previous = _selected.toSet();
         _records = records;
         _selected.clear();
-        if (selectLatest) {
+        if (preserveSelection) {
+          _selected.addAll(records
+              .where((r) => previous.contains(r.raw.path))
+              .map((r) => r.raw.path));
+        } else if (selectLatest) {
           _selected.addAll(latestCaptureBatch(records).map((r) => r.raw.path));
         }
         _loading = false;
@@ -86,29 +92,83 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
   }
 
   Future<void> _copy(Uri link) async {
-    await Clipboard.setData(ClipboardData(text: link.toString()));
-    if (mounted) setState(() => _link = link);
-    _say('链接已复制，7 天内有效');
+    await _copyLinks([link]);
   }
 
-  Future<void> _upload() async {
+  Future<void> _copyLinks(Iterable<Uri> links) async {
+    final unique = links.map((link) => link.toString()).toSet();
+    try {
+      final text = unique.join('\n');
+      await Clipboard.setData(ClipboardData(text: text));
+      if (mounted) setState(() => _link = text);
+      _say(
+          '${unique.length == 1 ? '链接已复制' : '已复制 ${unique.length} 个链接'}，7 天内有效');
+    } catch (_) {
+      _say('复制链接失败，请重试');
+    }
+  }
+
+  Future<void> _copyKeys(Iterable<String> keys) {
+    final now = DateTime.now();
+    return _copyLinks(keys
+        .toSet()
+        .map((key) => captureShareLink(_qiniu.config!, key, now: now)));
+  }
+
+  List<CaptureRecord> get _selectedRecords =>
+      _records.where((r) => _selected.contains(r.raw.path)).toList();
+
+  String? _bucketError(Iterable<CaptureRecord> records) {
+    for (final record in records) {
+      if (record.upload?['bucket'] != _qiniu.config!.bucket) {
+        return '该记录上传到空间 ${record.upload?['bucket']}，与当前配置不同';
+      }
+    }
+    return null;
+  }
+
+  Future<void> _copySelected() async {
+    if (_qiniu.busy) return;
     final error = _configError();
     if (error != null) return _say(error);
-    final records =
-        _records.where((r) => _selected.contains(r.raw.path)).toList();
+    final records = _selectedRecords;
+    if (records.isEmpty) return _say('请先勾选要复制链接的记录');
+    if (records.any((r) => r.uploadedKey == null)) {
+      return _say('选中记录中有尚未上传的文件，请先上传或取消勾选');
+    }
+    final bucketError = _bucketError(records);
+    if (bucketError != null) return _say(bucketError);
+    await _copyKeys(records.map((r) => r.uploadedKey!));
+  }
+
+  Future<void> _upload({bool force = false}) async {
+    final error = _configError();
+    if (error != null) return _say(error);
+    final records = _selectedRecords;
     if (records.isEmpty) return _say('请先勾选要上传的记录');
     final config = _qiniu.config!;
+    final reused = force
+        ? <CaptureRecord>[]
+        : records.where((r) => r.uploadedKey != null).toList();
+    final pending =
+        force ? records : records.where((r) => r.uploadedKey == null).toList();
+    final bucketError = _bucketError(reused);
+    if (bucketError != null) return _say(bucketError);
+    if (pending.isEmpty) return _copySelected();
     try {
       final key = await _qiniu.run('上传采集记录', (task) async {
         final temp = await widget.tempDirectory();
-        return uploadCaptureBatch(_qiniu.service, config, records, task, temp,
+        return uploadCaptureBatch(_qiniu.service, config, pending, task, temp,
             live: {
-              for (final r in records)
+              for (final r in pending)
                 if (_live(r)) r.raw.path
             });
       });
-      await _copy(captureShareLink(config, key));
-      await _load();
+      await _copyKeys([
+        for (final record in reused) record.uploadedKey!,
+        key,
+      ]);
+      await _load(preserveSelection: true);
     } catch (_) {
       _say(_qiniu.error.isEmpty ? '上传失败' : _qiniu.error);
     }
@@ -195,6 +255,9 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
         listenable: _qiniu,
         builder: (context, _) {
           final busy = _qiniu.busy;
+          final selected = _selectedRecords;
+          final allUploaded = selected.isNotEmpty &&
+              selected.every((r) => r.uploadedKey != null);
           return Scaffold(
             appBar: AppBar(title: const Text('采集记录'), actions: [
               if (_records.isNotEmpty)
@@ -243,10 +306,11 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       if (r.uploadedKey != null)
-                                        IconButton(
-                                            visualDensity:
-                                                VisualDensity.compact,
-                                            tooltip: '复制下载链接',
+                                        TextButton.icon(
+                                            style: TextButton.styleFrom(
+                                                visualDensity:
+                                                    VisualDensity.compact),
+                                            label: const Text('复制链接'),
                                             onPressed:
                                                 busy ? null : () => _relink(r),
                                             icon: const Icon(Icons.link)),
@@ -282,10 +346,20 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
                 Row(children: [
                   Expanded(
                       child: FilledButton.icon(
-                          key: const Key('capture-upload'),
-                          onPressed: busy || _selected.isEmpty ? null : _upload,
-                          icon: const Icon(Icons.cloud_upload_outlined),
-                          label: Text('上传（${_selected.length}）并复制链接'))),
+                          key: Key(allUploaded
+                              ? 'capture-copy-links'
+                              : 'capture-upload'),
+                          onPressed: busy || _selected.isEmpty
+                              ? null
+                              : allUploaded
+                                  ? _copySelected
+                                  : () => _upload(),
+                          icon: Icon(allUploaded
+                              ? Icons.copy
+                              : Icons.cloud_upload_outlined),
+                          label: Text(allUploaded
+                              ? '复制选中链接（${_selected.length}）'
+                              : '上传（${_selected.length}）并复制链接'))),
                   const SizedBox(width: 8),
                   if (busy)
                     OutlinedButton(
@@ -297,6 +371,19 @@ class _CaptureRecordsPageState extends ConsumerState<CaptureRecordsPage> {
                         onPressed: _selected.isEmpty ? null : _delete,
                         icon: const Icon(Icons.delete_outline)),
                 ]),
+                if (!busy && allUploaded)
+                  TextButton(
+                      key: const Key('capture-reupload'),
+                      onPressed: () => _upload(force: true),
+                      child: const Text('重新上传选中记录（更新快照）')),
+                if (!busy &&
+                    !allUploaded &&
+                    selected.any((r) => r.uploadedKey != null))
+                  TextButton.icon(
+                      key: const Key('capture-copy-links'),
+                      onPressed: _copySelected,
+                      icon: const Icon(Icons.copy),
+                      label: const Text('仅复制链接')),
               ]),
             )),
           );

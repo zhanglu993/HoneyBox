@@ -92,6 +92,8 @@ class CapturePage extends StatefulWidget {
 class _CapturePageState extends State<CapturePage> {
   CaptureStore? _store;
   final _sessions = <CaptureSession>[];
+  final _selectedIds = <String>{};
+  bool _startingBatch = false;
   bool _loading = true, _saving = false, _leaving = false, _canPop = false;
   String? _error;
   bool _awake = false, _askedBackground = false;
@@ -182,6 +184,7 @@ class _CapturePageState extends State<CapturePage> {
       _store = store;
       for (final p in profiles) {
         _sessions.add(_makeSession(p));
+        _selectedIds.add(p.id);
       }
     } catch (e) {
       _error = '配置加载失败：$e';
@@ -199,28 +202,36 @@ class _CapturePageState extends State<CapturePage> {
 
   Future<void> _start(Iterable<CaptureSession> targets) async {
     final list = targets.where((s) => !s.busy).toList();
-    final interrupted = <CaptureSession, File>{};
-    for (final s in list) {
-      try {
-        final f = await _store!.findInterrupted(s.profile);
-        if (f != null) interrupted[s] = f;
-      } catch (_) {}
-    }
-    if (interrupted.isNotEmpty) {
+    if (_startingBatch || list.isEmpty) return;
+    setState(() => _startingBatch = true);
+    try {
+      final interrupted = <CaptureSession, File>{};
       if (!mounted) return;
-      final resume = await confirmResumeCapture(context,
-          {for (final e in interrupted.entries) e.key.profile.name: e.value});
-      if (resume == null || !mounted) return;
-      for (final e in interrupted.entries) {
-        if (resume) {
-          _resume[e.key.profile.id] = e.value;
-        } else {
-          _resume.remove(e.key.profile.id);
+      for (final s in list) {
+        try {
+          final f = await _store!.findInterrupted(s.profile);
+          if (f != null) interrupted[s] = f;
+        } catch (_) {}
+      }
+      if (interrupted.isNotEmpty) {
+        if (!mounted) return;
+        final resume = await confirmResumeCapture(context,
+            {for (final e in interrupted.entries) e.key.profile.name: e.value});
+        if (resume == null || !mounted) return;
+        for (final e in interrupted.entries) {
+          if (resume) {
+            _resume[e.key.profile.id] = e.value;
+          } else {
+            _resume.remove(e.key.profile.id);
+          }
         }
       }
-    }
-    for (final s in list) {
-      unawaited(s.start());
+      if (!mounted) return;
+      for (final s in list) {
+        unawaited(s.start());
+      }
+    } finally {
+      if (mounted) setState(() => _startingBatch = false);
     }
   }
 
@@ -250,12 +261,15 @@ class _CapturePageState extends State<CapturePage> {
       ];
       await _store!.saveProfiles(profiles);
       if (!mounted) return;
+      final wasSelected = old == null || _selectedIds.contains(old.profile.id);
       if (old != null) {
+        _selectedIds.remove(old.profile.id);
         _sessions.remove(old);
         _cardKeys.remove(old);
         old.dispose();
       }
       _sessions.add(_makeSession(profile));
+      if (wasSelected) _selectedIds.add(profile.id);
     } catch (e) {
       _message('配置保存失败：$e');
     } finally {
@@ -286,6 +300,7 @@ class _CapturePageState extends State<CapturePage> {
           if (s != session) s.profile
       ]);
       _sessions.remove(session);
+      _selectedIds.remove(session.profile.id);
       _cardKeys.remove(session);
       session.dispose();
     } catch (e) {
@@ -350,7 +365,7 @@ class _CapturePageState extends State<CapturePage> {
 
   Future<void> _stopAll() async => Future.wait(_sessions.map((s) => s.stop()));
   Future<void> _leave() async {
-    if (_leaving || _saving) return;
+    if (_leaving || _saving || _startingBatch) return;
     final busy = _sessions.where((s) => s.busy).length;
     if (busy > 0) {
       final choice = await confirmLeaveCapture(context,
@@ -396,9 +411,13 @@ class _CapturePageState extends State<CapturePage> {
 
   @override
   Widget build(BuildContext context) {
-    final available = !_loading && !_saving && !_leaving && _store != null;
+    final available =
+        !_loading && !_saving && !_leaving && !_startingBatch && _store != null;
+    final selected =
+        _sessions.where((s) => _selectedIds.contains(s.profile.id)).toList();
     return PopScope(
-      canPop: _canPop || (!_sessions.any((s) => s.busy) && !_saving),
+      canPop: _canPop ||
+          (!_sessions.any((s) => s.busy) && !_saving && !_startingBatch),
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) unawaited(_leave());
       },
@@ -411,13 +430,14 @@ class _CapturePageState extends State<CapturePage> {
         body: _loading
             ? const Center(child: CircularProgressIndicator())
             : Column(children: [
-                if (_sessions.isNotEmpty) _overview(),
+                if (_sessions.isNotEmpty) _overview(available),
                 Expanded(
                     child: ListView(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 100),
                   children: [
                     const Text('多设备独立采集 · 配置自动保存在本机',
                         style: TextStyle(fontWeight: FontWeight.bold)),
+                    const Text('勾选要采集的设备后点击“开始选中”，未勾选的设备不会启动。'),
                     const SizedBox(height: 8),
                     const Text('断连会自动重试并继续写同一文件；Android 采集时通知栏常驻，可切到后台。'),
                     if (_error != null) ...[
@@ -428,11 +448,27 @@ class _CapturePageState extends State<CapturePage> {
                     const SizedBox(height: 12),
                     Wrap(spacing: 8, runSpacing: 8, children: [
                       FilledButton.icon(
-                          onPressed: available && _sessions.any((s) => !s.busy)
-                              ? () => _start(_sessions)
+                          key: const Key('capture-start-selected'),
+                          onPressed: available && selected.any((s) => !s.busy)
+                              ? () => _start(selected)
                               : null,
                           icon: const Icon(Icons.play_arrow),
-                          label: const Text('全部开始')),
+                          label: Text('开始选中（${selected.length}）')),
+                      TextButton(
+                          key: const Key('capture-toggle-selection'),
+                          onPressed: !available || _sessions.isEmpty
+                              ? null
+                              : () => setState(() {
+                                    if (selected.length == _sessions.length) {
+                                      _selectedIds.clear();
+                                    } else {
+                                      _selectedIds.addAll(
+                                          _sessions.map((s) => s.profile.id));
+                                    }
+                                  }),
+                          child: Text(selected.length == _sessions.length
+                              ? '全不选'
+                              : '全选')),
                       OutlinedButton.icon(
                           onPressed: available && _sessions.any((s) => s.busy)
                               ? _stopAll
@@ -487,7 +523,7 @@ class _CapturePageState extends State<CapturePage> {
     return seconds < 60 ? '${seconds}s 前' : '${seconds ~/ 60}min 前';
   }
 
-  Widget _overview() {
+  Widget _overview(bool available) {
     final theme = Theme.of(context);
     final abnormal = _sessions.where(_abnormal).length;
     final recording =
@@ -519,26 +555,38 @@ class _CapturePageState extends State<CapturePage> {
                   child: Padding(
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Row(children: [
+                      Checkbox(
+                          key: ValueKey('capture-select-${s.profile.id}'),
+                          value: _selectedIds.contains(s.profile.id),
+                          onChanged: !available
+                              ? null
+                              : (value) => setState(() {
+                                    if (value == true) {
+                                      _selectedIds.add(s.profile.id);
+                                    } else {
+                                      _selectedIds.remove(s.profile.id);
+                                    }
+                                  })),
                       Icon(Icons.circle, size: 12, color: _status(s).$1),
                       const SizedBox(width: 8),
                       Expanded(
-                          child: Text(s.profile.name,
-                              maxLines: 1, overflow: TextOverflow.ellipsis)),
-                      Text(
-                          s.profile.id.length > 5
-                              ? s.profile.id.substring(s.profile.id.length - 5)
-                              : s.profile.id,
-                          style: theme.textTheme.bodySmall),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                          width: 96,
-                          child: Text(_status(s).$2,
-                              style: TextStyle(color: _status(s).$1))),
-                      SizedBox(
-                          width: 92,
-                          child: Text('${s.packetCount} 包 ${_age(s)}',
-                              textAlign: TextAlign.end,
-                              style: theme.textTheme.bodySmall)),
+                          child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                            Row(children: [
+                              Expanded(
+                                  child: Text(s.profile.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis)),
+                              const SizedBox(width: 8),
+                              Text(_status(s).$2,
+                                  style: TextStyle(color: _status(s).$1)),
+                            ]),
+                            Text(
+                                '${s.profile.id.length > 5 ? s.profile.id.substring(s.profile.id.length - 5) : s.profile.id}'
+                                ' · ${s.packetCount} 包 ${_age(s)}',
+                                style: theme.textTheme.bodySmall),
+                          ])),
                     ]),
                   ),
                 ),
@@ -563,8 +611,23 @@ class _CapturePageState extends State<CapturePage> {
           padding: const EdgeInsets.all(16),
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(s.profile.name,
-                style: Theme.of(context).textTheme.titleMedium),
+            Row(children: [
+              Checkbox(
+                  key: ValueKey('capture-card-select-${s.profile.id}'),
+                  value: _selectedIds.contains(s.profile.id),
+                  onChanged: !available
+                      ? null
+                      : (value) => setState(() {
+                            if (value == true) {
+                              _selectedIds.add(s.profile.id);
+                            } else {
+                              _selectedIds.remove(s.profile.id);
+                            }
+                          })),
+              Expanded(
+                  child: Text(s.profile.name,
+                      style: Theme.of(context).textTheme.titleMedium)),
+            ]),
             SelectableText(s.profile.id),
             Text(
                 '${labels[s.phase]} · ${s.packetCount} 包 · ${s.byteCount} 字节 · 重连 ${s.reconnectCount} 次'),
