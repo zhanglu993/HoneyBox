@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../providers/watch_notification_provider.dart';
@@ -102,6 +104,17 @@ class _WatchNotificationPageState extends ConsumerState<WatchNotificationPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('通知转发')),
+        body: const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text('通知转发暂未适配 iOS', textAlign: TextAlign.center),
+          ),
+        ),
+      );
+    }
     final state = ref.watch(watchNotificationProvider);
     final notifier = ref.read(watchNotificationProvider.notifier);
 
