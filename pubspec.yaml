@@ -23,6 +23,7 @@ dependencies:
   flutter_secure_storage: ^9.2.4
   palette_generator: ^0.3.3+7
   archive: ^4.5.2
+  share_plus: ^12.0.2
 
 dev_dependencies:
   flutter_test:

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../services/qiniu/qiniu_config.dart';
 import '../../services/qiniu/qiniu_controller.dart';
 import '../../services/qiniu/qiniu_config_transfer.dart';
@@ -112,7 +113,7 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
     }
   }
 
-  Future<void> _exportConfig() async {
+  Future<void> _exportConfig({required bool share}) async {
     final config = _config();
     final error = config.validationError();
     if (error != null) {
@@ -122,7 +123,7 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('导出七牛云配置'),
+        title: Text(share ? '分享七牛云配置' : '保存七牛云配置'),
         content:
             const Text('导出的文件包含 AccessKey 和 SecretKey，未加密。请妥善保管，只分享给信任的人。'),
         actions: [
@@ -131,13 +132,20 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
               child: const Text('取消')),
           FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('继续导出')),
+              child: Text(share ? '继续分享' : '继续保存')),
         ],
       ),
     );
     if (confirmed != true || !mounted) return;
     try {
       final bytes = QiniuConfigTransfer.encode(config);
+      if (share) {
+        await SharePlus.instance.share(ShareParams(
+          files: [XFile.fromData(bytes, mimeType: 'application/json')],
+          fileNameOverrides: ['honeybox-qiniu-config.json'],
+        ));
+        return;
+      }
       final path = await FilePicker.platform.saveFile(
         dialogTitle: '导出七牛云配置',
         fileName: 'honeybox-qiniu-config.json',
@@ -149,7 +157,9 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
       }
       if (mounted) _feedback('配置已导出，请妥善保管文件。');
     } catch (_) {
-      if (mounted) _feedback('导出失败，请检查文件权限后重试。', failure: true);
+      if (mounted) {
+        _feedback(share ? '无法打开分享面板，请重试。' : '保存失败，请检查文件权限后重试。', failure: true);
+      }
     }
   }
 
@@ -215,9 +225,18 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
                                   label: const Text('导入配置'),
                                 ),
                                 OutlinedButton.icon(
-                                  onPressed: disabled ? null : _exportConfig,
-                                  icon: const Icon(Icons.file_upload_outlined),
-                                  label: const Text('导出配置'),
+                                  onPressed: disabled
+                                      ? null
+                                      : () => _exportConfig(share: true),
+                                  icon: const Icon(Icons.share_outlined),
+                                  label: const Text('分享配置'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: disabled
+                                      ? null
+                                      : () => _exportConfig(share: false),
+                                  icon: const Icon(Icons.save_alt),
+                                  label: const Text('保存配置文件'),
                                 ),
                               ]),
                               const SizedBox(height: 20),
