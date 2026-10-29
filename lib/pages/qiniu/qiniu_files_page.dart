@@ -307,6 +307,8 @@ class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
                                           isDense: true))),
                               const SizedBox(width: 8),
                               FilledButton(
+                                  style: FilledButton.styleFrom(
+                                      minimumSize: const Size(0, 48)),
                                   onPressed: busy ? null : () => _list(),
                                   child: const Text('查询')),
                             ]),
@@ -316,6 +318,8 @@ class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
                                 crossAxisAlignment: WrapCrossAlignment.center,
                                 children: [
                                   FilledButton.icon(
+                                      style: FilledButton.styleFrom(
+                                          minimumSize: const Size(0, 48)),
                                       onPressed: busy ? null : _chooseUpload,
                                       icon: const Icon(Icons.upload_file),
                                       label: const Text('上传文件')),
