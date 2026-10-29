@@ -11,12 +11,13 @@ import '../../services/jw/jw_scan_policy.dart';
 import '../../services/app_settings.dart';
 import '../../services/system_settings.dart';
 import '../shared/app_drawer.dart';
+import 'scan_device_order.dart';
 import 'widgets/device_tile.dart';
 
 /// Fallback device-name filter used when a caller doesn't specify one.
 const String _kFallbackFilter = 'eBadge';
 
-/// 调试模式下注入到扫描列表首行的虚拟设备。id 前缀 `DEBUG:` 触发
+/// 调试模式下注入扫描列表的虚拟设备。id 前缀 `DEBUG:` 触发
 /// [BleNotifier.connect] 的旁路(不调用真实 BLE 栈)。
 class ScanPage extends ConsumerStatefulWidget {
   /// BLE-name prefix filter applied by default when the page opens.
@@ -187,7 +188,7 @@ class _ScanPageState extends ConsumerState<ScanPage>
 
   List<ScanDevice> _applyFilter(List<ScanDevice> all) {
     final q = _filter.trim().toLowerCase();
-    return all.where((d) {
+    return sortedScanDevicesBySignal(all.where((d) {
       if (_onlyConnectable && !d.connectable) return false;
       return JwScanPolicy.matches(
           query: q,
@@ -195,7 +196,7 @@ class _ScanPageState extends ConsumerState<ScanPage>
               !_filterEdited &&
               widget.defaultDeviceFilter == 'Watch',
           device: d);
-    }).toList();
+    }).toList());
   }
 
   @override
@@ -205,7 +206,7 @@ class _ScanPageState extends ConsumerState<ScanPage>
 
     final bleState = ref.watch(bleNotifierProvider);
     final all = ref.watch(scannedDevicesProvider);
-    // 调试模式:首行注入当前应用的虚拟设备,让它也走 _applyFilter,
+    // 调试模式:注入当前应用的虚拟设备,让它也走 _applyFilter,
     // 语义上和真实设备一致(输入不匹配的过滤词一并被隐藏)。
     final debugOn = ref.watch(appSettingsProvider).debugMode;
     final debugDevice = ScanDevice(
@@ -270,6 +271,7 @@ class _ScanPageState extends ConsumerState<ScanPage>
                       itemBuilder: (context, index) {
                         final device = devices[index];
                         return DeviceTile(
+                          key: ValueKey(device.deviceId),
                           deviceId: device.deviceId,
                           name: device.name,
                           rssi: device.rssi,

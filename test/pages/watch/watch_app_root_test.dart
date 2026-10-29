@@ -14,6 +14,7 @@ import 'dart:io';
 
 class _Manager implements manager.BleManager {
   final scanFilters = <String?>[];
+  String? selectedDeviceId;
   void Function(ScanResult)? scanCallback;
   @override
   Stream<manager.BleState> get onStateChanged => const Stream.empty();
@@ -32,9 +33,67 @@ class _Manager implements manager.BleManager {
 
   @override
   Future<void> disconnect() async {}
+
+  @override
+  Future<bool> connect(String deviceId, String deviceName,
+      {bool allowJw = false}) async {
+    selectedDeviceId = deviceId;
+    return false;
+  }
 }
 
 void main() {
+  testWidgets(
+      'Watch scan page reorders updated RSSI and selects the visible row',
+      (tester) async {
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final manager = _Manager();
+    await tester.pumpWidget(ProviderScope(overrides: [
+      bleManagerProvider.overrideWithValue(manager),
+    ], child: const MaterialApp(home: WatchAppRoot())));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    void advertise(String id, int rssi) {
+      manager.scanCallback!(ScanResult(
+          device: BluetoothDevice.fromId(id),
+          advertisementData: AdvertisementData(
+              advName: 'V101 $id',
+              txPowerLevel: null,
+              appearance: null,
+              connectable: true,
+              manufacturerData: {},
+              serviceData: {},
+              serviceUuids: [Guid('000001ff-3c17-d293-8e48-14fe2e4da212')]),
+          rssi: rssi,
+          timeStamp: DateTime.utc(2026, 10, 29)));
+    }
+
+    advertise('weak', -80);
+    advertise('strong', -40);
+    await tester.pump();
+    expect(
+        tester
+            .widgetList<DeviceTile>(find.byType(DeviceTile))
+            .map((tile) => tile.deviceId),
+        ['strong', 'weak']);
+
+    advertise('weak', -30);
+    await tester.pump();
+    expect(
+        tester
+            .widgetList<DeviceTile>(find.byType(DeviceTile))
+            .map((tile) => tile.deviceId),
+        ['weak', 'strong']);
+    tester.widgetList<DeviceTile>(find.byType(DeviceTile)).first.onConnect!();
+    await tester.pump();
+    expect(manager.selectedDeviceId, 'weak');
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+
   testWidgets(
       'Watch broad scan retains renamed legacy and JW advertisement forms',
       (tester) async {
