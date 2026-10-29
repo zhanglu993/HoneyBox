@@ -44,9 +44,13 @@ class QiniuEndpoints {
 class QiniuStorageService {
   final QiniuEndpoints? endpoints;
   final Uri? discoveryEndpoint;
+  final Uri? managementEndpoint;
   final Uri Function(QiniuConfig, String)? downloadResolver;
   QiniuStorageService(
-      {this.endpoints, this.discoveryEndpoint, this.downloadResolver});
+      {this.endpoints,
+      this.discoveryEndpoint,
+      this.downloadResolver,
+      this.managementEndpoint});
   static const timeout = Duration(seconds: 30);
 
   QiniuException _status(int code) => QiniuException(
@@ -320,6 +324,33 @@ class QiniuStorageService {
       throw const QiniuException('上传响应校验失败，请刷新列表核对云端文件');
     }
     transfer.onProgress?.call(size, size);
+  }
+
+  /// Delete exactly one object. Failed or ambiguous requests are not retried.
+  Future<void> delete(
+      QiniuConfig config, String key, QiniuTransfer transfer) async {
+    final error = config.validationError();
+    if (error != null) throw QiniuException(error);
+    if (key.isEmpty ||
+        key.contains('\u0000') ||
+        utf8Length('${config.bucket}:$key') > 750) {
+      throw const QiniuException('文件路径无效');
+    }
+    final entry = base64Url.encode(utf8.encode('${config.bucket}:$key'));
+    final uri = (managementEndpoint ?? Uri.parse('https://rs.qiniuapi.com'))
+        .replace(path: '/delete/$entry');
+    final date =
+        '${DateTime.now().toUtc().toIso8601String().replaceAll(RegExp('[-:]'), '').substring(0, 15)}Z';
+    const type = 'application/x-www-form-urlencoded';
+    final auth = QiniuSigner(config)
+        .managementToken('POST', uri, contentType: type, timestamp: date);
+    await _response('POST', uri, transfer, (response) async {
+      await response.drain<void>();
+    }, headers: {
+      'Authorization': auth,
+      'Content-Type': type,
+      'X-Qiniu-Date': date
+    }, body: const []);
   }
 
   /// HEADs [key] (or a missing probe key) through the download domain, so DNS,

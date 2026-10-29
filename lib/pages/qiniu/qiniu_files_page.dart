@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../services/qiniu/qiniu_config.dart';
 import '../../services/qiniu/qiniu_controller.dart';
 import '../../services/qiniu/qiniu_storage_service.dart';
+import '../../services/qiniu/qiniu_signer.dart';
 import '../../services/qiniu/qiniu_transfer.dart';
 import 'qiniu_config_page.dart';
 
@@ -20,6 +21,7 @@ class QiniuFilesPage extends ConsumerStatefulWidget {
 class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
   final _prefix = TextEditingController();
   final _items = <QiniuObject>[];
+  final _selected = <String>{};
   String _marker = '', _activePrefix = '', _message = '';
   bool _loaded = false, _picking = false;
   Future<void> Function()? _retry;
@@ -57,6 +59,7 @@ class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
     _prefix.text = _controller.config?.prefix ?? '';
     setState(() {
       _items.clear();
+      _selected.clear();
       _marker = '';
       _message = '';
     });
@@ -76,7 +79,10 @@ class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
               .list(config, prefix: prefix, marker: marker, transfer: task));
       if (!mounted) return;
       setState(() {
-        if (!more) _items.clear();
+        if (!more) {
+          _items.clear();
+          _selected.clear();
+        }
         final existing = _items.map((e) => e.key).toSet();
         _items.addAll(page.items.where((e) => existing.add(e.key)));
         _marker = page.marker == marker ? '' : page.marker;
@@ -222,6 +228,79 @@ class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
     throw const QiniuException('当前版本仅提供 Android 和 Windows 文件导出');
   }
 
+  Future<void> _copyAddress(QiniuObject object) async {
+    final config = _controller.config;
+    if (config == null) return;
+    final error = config.validationError(forDownload: true);
+    if (error != null) {
+      _say(error);
+      return;
+    }
+    try {
+      final uri = QiniuSigner(config).downloadUri(object.key);
+      await Clipboard.setData(ClipboardData(text: uri.toString()));
+      _say(config.privateBucket ? '已复制私有空间临时链接，有效期 1 小时。' : '已复制远端地址。');
+    } catch (_) {
+      _say('复制失败，请检查下载域名和配置。');
+    }
+  }
+
+  Future<void> _deleteSelected() async {
+    final config = _controller.config;
+    if (config == null || _controller.busy || _selected.isEmpty) return;
+    final keys = _selected.toList();
+    final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: Text('删除 ${keys.length} 个远端文件？'),
+              content: SizedBox(
+                  width: 500,
+                  child: SingleChildScrollView(
+                      child:
+                          Text('文件将从七牛云空间删除，无法在此恢复：\n\n${keys.join('\n')}'))),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('取消')),
+                FilledButton(
+                    key: const Key('qiniu-delete-confirm'),
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('确认删除')),
+              ],
+            ));
+    if (confirmed != true || !mounted) return;
+    final removed = <String>[];
+    final failed = <String>[];
+    try {
+      await _controller.run('删除文件', (transfer) async {
+        for (final key in keys) {
+          if (transfer.cancelled) {
+            failed.add(key);
+            continue;
+          }
+          try {
+            await _controller.service.delete(config, key, transfer);
+            removed.add(key);
+          } catch (_) {
+            failed.add(key);
+          }
+        }
+      });
+    } catch (_) {
+      for (final key in keys) {
+        if (!removed.contains(key) && !failed.contains(key)) failed.add(key);
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _items.removeWhere((item) => removed.contains(item.key));
+      _selected.removeAll(removed);
+      _message = failed.isEmpty
+          ? '已删除 ${removed.length} 个文件。'
+          : '已删除 ${removed.length} 个，${failed.length} 个未确认删除；请刷新列表后重试。';
+    });
+  }
+
   void _details(QiniuObject object) {
     showDialog<void>(
         context: context,
@@ -324,6 +403,31 @@ class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
                                       icon: const Icon(Icons.upload_file),
                                       label: const Text('上传文件')),
                                   Text('已加载 ${_items.length} 个文件'),
+                                  if (_items.isNotEmpty)
+                                    TextButton(
+                                      onPressed: busy
+                                          ? null
+                                          : () => setState(() {
+                                                if (_selected.length ==
+                                                    _items.length) {
+                                                  _selected.clear();
+                                                } else {
+                                                  _selected.addAll(_items
+                                                      .map((item) => item.key));
+                                                }
+                                              }),
+                                      child: Text(
+                                          _selected.length == _items.length
+                                              ? '取消全选'
+                                              : '全选已加载'),
+                                    ),
+                                  if (_selected.isNotEmpty)
+                                    TextButton.icon(
+                                      key: const Key('qiniu-delete-selected'),
+                                      onPressed: busy ? null : _deleteSelected,
+                                      icon: const Icon(Icons.delete_outline),
+                                      label: Text('删除选中（${_selected.length}）'),
+                                    ),
                                   if (_retry != null && !busy)
                                     TextButton.icon(
                                         onPressed: _retry,
@@ -373,19 +477,43 @@ class _QiniuFilesPageState extends ConsumerState<QiniuFilesPage> {
                                 }
                                 final object = _items[index];
                                 return ListTile(
-                                    leading: const Icon(
-                                        Icons.insert_drive_file_outlined),
+                                    leading: Checkbox(
+                                      key: ValueKey(
+                                          'qiniu-select-${object.key}'),
+                                      value: _selected.contains(object.key),
+                                      onChanged: busy
+                                          ? null
+                                          : (value) => setState(() {
+                                                if (value == true) {
+                                                  _selected.add(object.key);
+                                                } else {
+                                                  _selected.remove(object.key);
+                                                }
+                                              }),
+                                    ),
                                     title: Text(object.key),
                                     subtitle: Text(
                                         '${_size(object.size)}${object.uploadedAt == null ? '' : ' · ${object.uploadedAt!.toLocal().toString().split('.').first}'}'),
                                     onTap: busy ? null : () => _details(object),
-                                    trailing: IconButton(
-                                        tooltip: '下载文件',
-                                        onPressed: busy
-                                            ? null
-                                            : () => _download(object),
-                                        icon: const Icon(
-                                            Icons.download_outlined)));
+                                    trailing: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          IconButton(
+                                              key: ValueKey(
+                                                  'qiniu-copy-${object.key}'),
+                                              tooltip: '复制远端地址',
+                                              onPressed: busy
+                                                  ? null
+                                                  : () => _copyAddress(object),
+                                              icon: const Icon(Icons.link)),
+                                          IconButton(
+                                              tooltip: '下载文件',
+                                              onPressed: busy
+                                                  ? null
+                                                  : () => _download(object),
+                                              icon: const Icon(
+                                                  Icons.download_outlined)),
+                                        ]));
                               })),
                 ],
               ]));
