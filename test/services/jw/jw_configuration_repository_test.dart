@@ -68,6 +68,17 @@ void main() {
             .having((e) => e.stage, 'stage', 'unsupported')));
     expect(script.sets, isEmpty);
   });
+  test('T100 allows configuration reads but keeps writes locked', () async {
+    await create(firmware: 'T100');
+    final before = await read(JwConfigurationDomain.hourSystem);
+    await expectLater(
+      set(JwConfigurationChange.scalar(before.domain, before.scalarValue!),
+          before),
+      throwsA(isA<JwConfigurationException>()
+          .having((e) => e.stage, 'stage', 'unsupported')),
+    );
+    expect(script.sets, isEmpty);
+  });
   final bits = {
     JwConfigurationDomain.hourSystem: 44,
     JwConfigurationDomain.distanceUnit: 45,

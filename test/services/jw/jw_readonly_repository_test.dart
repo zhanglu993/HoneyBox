@@ -135,6 +135,22 @@ void main() {
     response = null;
     calls.clear();
   });
+  for (final op in [
+    'health',
+    'wrist',
+    'dnd',
+    'heatWindow',
+    'highHrDiagnostic'
+  ]) {
+    test('T100/H001 reads $op with validated reply', () async {
+      await create(firmware: 'T100');
+      response = Map<String, dynamic>.from((fixture['cases'] as List)
+          .firstWhere((c) =>
+              c['operation'] == op && c['expected']['fields'] != null) as Map);
+      await read(op);
+      expect(calls, hasLength(1));
+    });
+  }
   for (final dynamic item in fixture['cases']) {
     final c = Map<String, dynamic>.from(item as Map);
     test('independent readonly contract ${c['id']}', () async {

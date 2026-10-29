@@ -46,10 +46,12 @@ DerivedData/
 build/
 
 # macOS
-macos/
+/macos/Flutter/ephemeral/
 *.xcworkspace
 !ios/Runner.xcworkspace/
 !ios/Runner.xcworkspace/**
+!macos/Runner.xcworkspace/
+!macos/Runner.xcworkspace/**
 xcuserdata/
 
 # Linux

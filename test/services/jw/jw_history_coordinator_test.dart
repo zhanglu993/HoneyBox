@@ -198,6 +198,35 @@ void main() {
     expect(result.counts[JwHistoryType.metabolism]!.newlyPersisted, 1);
     expect(acks(), 1);
   });
+  test('START declares counts for modern history types', () async {
+    start =
+        jwHex('0000000100000200000300000400000500000600000e00010f0001100001');
+    final resultFuture = begin();
+    await started();
+    feed(0x5b, 'a4e3543239000000');
+    feed(0x5b, '6f7665726f766572');
+    feed(0x60,
+        '8053543203378403e00137332f0026003d003c00625e0246f1ff0c00a4015a001e004100393000004101500027010100');
+    feed(0x60, '6f7665726f766572');
+    feed(0x64, 'ea070a04000352fe030937002f00a40103000000');
+    feed(0x64, '6f7665726f766572');
+    finish(modern: false);
+    final result = await resultFuture;
+    expect(result.counts[JwHistoryType.pressure]!.expectedCount, 1);
+    expect(result.counts[JwHistoryType.metabolism]!.expectedCount, 1);
+    expect(result.counts[JwHistoryType.readiness]!.expectedCount, 1);
+    expect(acks(), 1);
+  });
+  test('missing announced modern records prevents confirmation', () async {
+    start =
+        jwHex('0000000100000200000300000400000500000600000e00010f0000100000');
+    final future = begin();
+    final check = expectLater(future, fails('countMismatch'));
+    await started();
+    finish();
+    await check;
+    expect(acks(), 0);
+  });
   test('conflicting same sequence is rejected despite valid CRC', () async {
     final f = begin();
     final check = expectLater(f, fails('sequenceConflict'));
@@ -225,6 +254,12 @@ void main() {
     final f = begin();
     await expectLater(f, fails('parse'));
     expect(acks(), 0);
+    final files = await root
+        .list(recursive: true)
+        .where((e) => e is File && e.path.contains('quarantine'))
+        .toList();
+    expect(files, isNotEmpty);
+    expect(await (files.single as File).readAsString(), contains('050007'));
   });
   test('total budget ends a stream that keeps producing valid progress',
       () async {

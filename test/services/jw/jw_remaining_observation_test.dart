@@ -138,6 +138,19 @@ void main() {
       expect(t.writes, isEmpty);
     });
   }
+  for (final entry in {
+    'readAlarm': '',
+    'readSupportDeviceSport': '00000000',
+    'checkSpO2MeasureEnable': '02',
+    'queryDeviceSportStatus': '0000ff',
+  }.entries) {
+    test('T100/H001 supports ${entry.key} read only', () async {
+      response = {'operation': entry.key, 'responseRawHex': entry.value};
+      await create(firmware: 'T100');
+      await read(entry.key);
+      expect(t.writes, isNotEmpty);
+    });
+  }
   test('unknown profile zero TX', () async {
     await create(firmware: 'Other');
     await expectLater(

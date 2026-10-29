@@ -69,4 +69,32 @@ void main() {
     expect(n.state.single.firstSeen, first);
     expect(n.state.single.identitySeen, isNotNull);
   });
+  test('matches a full advertised byte sequence without confusing device names',
+      () {
+    final d = ScanDevice(
+        deviceId: 'uuid',
+        name: 'S200',
+        rssi: -40,
+        manufacturerData: {
+          0x07d0: [6, 0, 1, 0, 0x3c, 0x69, 0x36, 0x6b, 0x6a, 0, 0x5b]
+        });
+    expect(
+        JwScanPolicy.matches(
+            query: '69:36:6B:6A:00:5B', isDefaultWatchFilter: false, device: d),
+        isTrue);
+    expect(
+        JwScanPolicy.matches(
+            query: '69:36:6B:6A:00:4F', isDefaultWatchFilter: false, device: d),
+        isFalse);
+    final n = ScannedDevicesNotifier();
+    addTearDown(n.dispose);
+    n.addDevice(d);
+    n.addDevice(ScanDevice(deviceId: 'uuid', name: '', rssi: -41));
+    expect(
+        JwScanPolicy.matches(
+            query: '69:36:6B:6A:00:5B',
+            isDefaultWatchFilter: false,
+            device: n.state.single),
+        isTrue);
+  });
 }

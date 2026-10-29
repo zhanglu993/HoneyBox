@@ -207,6 +207,7 @@ class BleManager {
   /// batches that arrive mid-teardown are dropped instead of mutating providers
   /// whose ScanPage widget is already being disposed (markNeedsBuild crash).
   bool _scanActive = false;
+  int _scanGeneration = 0;
 
   // --------------------------------------------------------------------------
   // Construction / disposal
@@ -254,8 +255,10 @@ class BleManager {
   }) async {
     if (_disposed) return;
     stopScan();
+    final generation = _scanGeneration;
 
     final allowed = await _ensureBlePermissions();
+    if (_disposed || generation != _scanGeneration) return;
     if (!allowed) {
       // Report failed startup even if the manager was already disconnected.
       if (_state == BleState.disconnected && !_disposed) {
@@ -280,6 +283,7 @@ class BleManager {
         }
       },
       onError: (Object error) {
+        debugPrint('BLE scan stream failed: $error');
         _setState(BleState.disconnected);
       },
     );
@@ -288,11 +292,20 @@ class BleManager {
     _scanErrorSub = FlutterBluePlus.scanResults.listen(
       (_) {},
       onError: (Object error) {
+        debugPrint('BLE scan stream failed: $error');
         _setState(BleState.disconnected);
       },
     );
 
     try {
+      if (Platform.isMacOS) {
+        final adapter =
+            await waitForAppleBleAdapter(FlutterBluePlus.adapterState);
+        if (_disposed || generation != _scanGeneration) return;
+        if (adapter != BluetoothAdapterState.on) {
+          throw StateError('Bluetooth adapter state: $adapter');
+        }
+      }
       // Android-only scan tuning (androidScanMode / androidUsesFineLocation)
       // is not applicable on Windows desktop, so branch the call by platform.
       if (Platform.isAndroid) {
@@ -309,6 +322,8 @@ class BleManager {
         );
       }
     } catch (e) {
+      if (_disposed || generation != _scanGeneration) return;
+      debugPrint('BLE scan failed: $e');
       stopScan();
       _setState(BleState.disconnected);
     }
@@ -316,6 +331,7 @@ class BleManager {
 
   /// Stop an ongoing scan.
   void stopScan() {
+    _scanGeneration++;
     _scanActive = false;
     _scanSub?.cancel();
     _scanSub = null;
@@ -899,3 +915,13 @@ class BleManager {
     _deviceName = null;
   }
 }
+
+/// CoreBluetooth initially reports unknown while its manager is starting.
+Future<BluetoothAdapterState> waitForAppleBleAdapter(
+        Stream<BluetoothAdapterState> states) =>
+    states
+        .where((state) =>
+            state != BluetoothAdapterState.unknown &&
+            state != BluetoothAdapterState.turningOn)
+        .first
+        .timeout(const Duration(seconds: 10));
