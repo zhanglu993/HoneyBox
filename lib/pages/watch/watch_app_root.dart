@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/ble_provider.dart';
 import '../../providers/current_app_provider.dart';
+import '../../providers/rtl8762_ota_provider.dart';
 import '../scan/scan_page.dart';
 import 'watch_device_page.dart';
 import 'jw_device_page.dart';
@@ -25,7 +26,10 @@ class _WatchAppRootState extends ConsumerState<WatchAppRoot> {
     ref.listen<ConnectedDeviceInfo?>(connectedDeviceProvider, (prev, next) {
       // A popped route remains mounted during its exit animation. Its delayed
       // disconnect must not pop the Launcher after this route left the stack.
-      if (prev != null && next == null && !_leaving) {
+      if (prev != null &&
+          next == null &&
+          !_leaving &&
+          !ref.read(rtl8762OtaInProgressProvider)) {
         Navigator.of(context).popUntil((r) =>
             r.settings.name == '/watch-root' ||
             (r.settings.name?.startsWith('/jw-history') ?? false) ||
@@ -37,6 +41,7 @@ class _WatchAppRootState extends ConsumerState<WatchAppRoot> {
     });
 
     final connected = ref.watch(connectedDeviceProvider);
+    final otaInProgress = ref.watch(rtl8762OtaInProgressProvider);
     final child = connected != null
         ? connected.isJw
             ? JwDevicePage(
@@ -45,17 +50,20 @@ class _WatchAppRootState extends ConsumerState<WatchAppRoot> {
                 deviceName: connected.name,
                 deviceId: connected.deviceId,
               )
-        : ScanPage(
-            defaultDeviceFilter: 'Watch',
-            appTitle: 'Watch',
-            // Broad scan preserves FD50/manufacturer-only JW adverts. Shared
-            // legacy adverts are candidates too; discovered GATT selects SDK.
-            acceptJwCandidates: true,
-            onBrowseSavedHistory: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                    settings: const RouteSettings(name: '/jw-history-devices'),
-                    builder: (_) => const JwSavedHistoryDevicesPage())),
-          );
+        : otaInProgress
+            ? const SizedBox.shrink()
+            : ScanPage(
+                defaultDeviceFilter: 'Watch',
+                appTitle: 'Watch',
+                // Broad scan preserves FD50/manufacturer-only JW adverts. Shared
+                // legacy adverts are candidates too; discovered GATT selects SDK.
+                acceptJwCandidates: true,
+                onBrowseSavedHistory: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                        settings:
+                            const RouteSettings(name: '/jw-history-devices'),
+                        builder: (_) => const JwSavedHistoryDevicesPage())),
+              );
 
     return PopScope(
       canPop: true,

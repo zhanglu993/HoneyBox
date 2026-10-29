@@ -121,6 +121,13 @@ class JwDevicePage extends ConsumerWidget {
               '固件：${state.info?.firmware ?? "未提供"} · 硬件：${state.info?.hardware ?? "未提供"}'),
           Text(
               '电量：${state.info?.battery == null ? "未读取" : "${state.info!.battery}%"}'),
+          if (deviceName.toUpperCase() == 'S200')
+            OutlinedButton.icon(
+              key: const Key('rtl8762-ota-entry'),
+              onPressed: () => Navigator.of(context).pushNamed('/watch-ota'),
+              icon: const Icon(Icons.system_update_alt),
+              label: const Text('RTL8762 固件升级'),
+            ),
           if (caps != null) ...[
             Text(
                 '能力：${caps.rawHex} · 工厂开关：0x${caps.factorySwitchRaw.toRadixString(16)}'),
