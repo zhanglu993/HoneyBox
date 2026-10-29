@@ -293,12 +293,14 @@ class BleManager {
       if (Platform.isAndroid) {
         await FlutterBluePlus.startScan(
           withServices: serviceUuid == null ? const [] : [Guid(serviceUuid)],
+          oneByOne: true,
           androidScanMode: AndroidScanMode.lowLatency,
           androidUsesFineLocation: true,
         );
       } else {
         await FlutterBluePlus.startScan(
           withServices: serviceUuid == null ? const [] : [Guid(serviceUuid)],
+          oneByOne: true,
         );
       }
     } catch (e) {

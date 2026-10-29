@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -13,6 +14,13 @@ import '../../services/update_service.dart';
 /// then hand the APK to the system installer. Manages its own dialogs and
 /// snackbars, so the caller only needs to supply a live [context].
 Future<void> runUpdateCheck(BuildContext context) async {
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('iOS 版本请通过原安装渠道更新')),
+    );
+    return;
+  }
+
   // Capture navigator/messenger up front so they can be used across the awaits
   // below without tripping `use_build_context_synchronously`.
   final navigator = Navigator.of(context, rootNavigator: true);

@@ -97,7 +97,14 @@ class BleNotifier extends StateNotifier<BleState> {
     _managerStateSub = _bleManager.onStateChanged.listen((next) {
       if (next != manager.BleState.disconnected) return;
       final info = _ref.read(connectedDeviceProvider);
-      if (info == null) return;
+      if (info == null) {
+        // A delayed stop event may arrive after a new scan has started.
+        if (state == BleState.scanning &&
+            _bleManager.state == manager.BleState.disconnected) {
+          state = BleState.disconnected;
+        }
+        return;
+      }
       if (info.deviceId.startsWith(kDebugDeviceIdPrefix)) return;
       _ref.read(connectedDeviceProvider.notifier).state = null;
       if (state != BleState.disconnected) state = BleState.disconnected;
@@ -134,6 +141,13 @@ class BleNotifier extends StateNotifier<BleState> {
             manufacturerData: result.advertisementData.manufacturerData),
       ));
     }, serviceUuid: serviceUuid);
+    // Permission denial can return while the manager is already disconnected
+    // and therefore does not emit a state change.
+    if (mounted &&
+        state == BleState.scanning &&
+        _bleManager.state == manager.BleState.disconnected) {
+      state = BleState.disconnected;
+    }
   }
 
   void stopScan() {

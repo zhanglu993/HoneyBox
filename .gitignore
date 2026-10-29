@@ -36,7 +36,6 @@ android/mapfeature/src/main/cpp/libjpeg-turbo/fuzz/
 android/mapfeature/src/main/cpp/libjpeg-turbo/test/
 
 # iOS
-ios/
 *.hmap
 *.ipa
 *.dSYM.zip
@@ -49,6 +48,8 @@ build/
 # macOS
 macos/
 *.xcworkspace
+!ios/Runner.xcworkspace/
+!ios/Runner.xcworkspace/**
 xcuserdata/
 
 # Linux

@@ -1,0 +1,12 @@
+diff --git a/packages/flutter_tools/lib/src/ios/devices.dart b/packages/flutter_tools/lib/src/ios/devices.dart
+index d25373e6..9dbbdb77 100644
+--- a/packages/flutter_tools/lib/src/ios/devices.dart
++++ b/packages/flutter_tools/lib/src/ios/devices.dart
+@@ -917,6 +917,7 @@ class IOSDevice extends Device {
+     final Future<Uri?> vmUrlFromMDns = MDnsVmServiceDiscovery.instance!.getVMServiceUriForLaunch(
+       packageId,
+       this,
++      deviceVmservicePort: debuggingOptions.deviceVmServicePort,
+       usesIpv6: debuggingOptions.ipv6,
+       useDeviceIPAsHost: isWirelesslyConnected,
+       throwOnMissingLocalNetworkPermissionsError: !discoverVMUrlFromLogs,
