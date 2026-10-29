@@ -1,7 +1,11 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/qiniu/qiniu_config.dart';
 import '../../services/qiniu/qiniu_controller.dart';
+import '../../services/qiniu/qiniu_config_transfer.dart';
 
 class QiniuConfigPage extends ConsumerStatefulWidget {
   const QiniuConfigPage({super.key});
@@ -92,6 +96,63 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
     }
   }
 
+  Future<void> _importConfig() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(withData: true);
+      if (result == null || !mounted) return;
+      final bytes = result.files.single.bytes;
+      if (bytes == null) throw const FormatException();
+      final config = QiniuConfigTransfer.decode(bytes);
+      await ref.read(qiniuControllerProvider).save(config);
+      if (!mounted) return;
+      setState(() => _fill(config));
+      _feedback('配置已导入并安全保存到本机。');
+    } catch (_) {
+      if (mounted) _feedback('导入失败：请选择有效的七牛云配置文件。', failure: true);
+    }
+  }
+
+  Future<void> _exportConfig() async {
+    final config = _config();
+    final error = config.validationError();
+    if (error != null) {
+      _feedback(error, failure: true);
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('导出七牛云配置'),
+        content:
+            const Text('导出的文件包含 AccessKey 和 SecretKey，未加密。请妥善保管，只分享给信任的人。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('继续导出')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      final bytes = QiniuConfigTransfer.encode(config);
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '导出七牛云配置',
+        fileName: 'honeybox-qiniu-config.json',
+        bytes: bytes,
+      );
+      if (path == null) return;
+      if (!Platform.isAndroid && !Platform.isIOS) {
+        await File(path).writeAsBytes(bytes, flush: true);
+      }
+      if (mounted) _feedback('配置已导出，请妥善保管文件。');
+    } catch (_) {
+      if (mounted) _feedback('导出失败，请检查文件权限后重试。', failure: true);
+    }
+  }
+
   void _feedback(String message, {bool failure = false}) {
     setState(() {
       _notice = message;
@@ -146,6 +207,19 @@ class _QiniuConfigPageState extends ConsumerState<QiniuConfigPage> {
                               const SizedBox(height: 8),
                               const Text(
                                   '配置仅保存在当前设备，不会同步给其他人。Key 使用本机安全存储；请使用具有目标空间权限的密钥。'),
+                              const SizedBox(height: 16),
+                              Wrap(spacing: 12, runSpacing: 8, children: [
+                                OutlinedButton.icon(
+                                  onPressed: disabled ? null : _importConfig,
+                                  icon: const Icon(Icons.file_open_outlined),
+                                  label: const Text('导入配置'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: disabled ? null : _exportConfig,
+                                  icon: const Icon(Icons.file_upload_outlined),
+                                  label: const Text('导出配置'),
+                                ),
+                              ]),
                               const SizedBox(height: 20),
                               _field(_ak, 'AccessKey', disabled,
                                   required: true),
