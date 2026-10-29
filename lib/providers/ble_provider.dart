@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/ble_manager.dart' as manager;
@@ -81,8 +82,13 @@ class BleNotifier extends StateNotifier<BleState> {
   final manager.BleManager _bleManager;
   final Ref _ref;
   StreamSubscription<manager.BleState>? _managerStateSub;
+  final List<ScanDevice> _pendingScanDevices = [];
+  Timer? _scanDeliveryTimer;
+  final bool _batchScanResults;
 
-  BleNotifier(this._bleManager, this._ref) : super(BleState.disconnected) {
+  BleNotifier(this._bleManager, this._ref, {bool? batchScanResults})
+      : _batchScanResults = batchScanResults ?? Platform.isIOS,
+        super(BleState.disconnected) {
     // Subscribe to manager-level disconnect events so unexpected BLE
     // disconnections are reflected in the Riverpod state.
     //
@@ -113,11 +119,14 @@ class BleNotifier extends StateNotifier<BleState> {
 
   @override
   void dispose() {
+    _scanDeliveryTimer?.cancel();
+    _pendingScanDevices.clear();
     _managerStateSub?.cancel();
     super.dispose();
   }
 
   Future<void> startScan({String? serviceUuid}) async {
+    _discardPendingScanDevices();
     state = BleState.scanning;
     final devicesNotifier = _ref.read(scannedDevicesProvider.notifier);
     devicesNotifier.clear();
@@ -129,7 +138,7 @@ class BleNotifier extends StateNotifier<BleState> {
       final advName = result.advertisementData.advName.trim();
       final name = advName.isNotEmpty ? advName : device.platformName.trim();
       final displayName = name.isEmpty ? '未知设备' : name;
-      devicesNotifier.addDevice(ScanDevice(
+      final scanDevice = ScanDevice(
         deviceId: device.remoteId.toString(),
         name: displayName,
         rssi: result.rssi,
@@ -139,11 +148,36 @@ class BleNotifier extends StateNotifier<BleState> {
                 .map((u) => u.toString())
                 .toSet(),
             manufacturerData: result.advertisementData.manufacturerData),
-      ));
+      );
+      if (!_batchScanResults) {
+        devicesNotifier.addDevice(scanDevice);
+        return;
+      }
+      _pendingScanDevices.add(scanDevice);
+      _scanDeliveryTimer ??= Timer(const Duration(milliseconds: 200), () {
+        _flushScanDevices();
+      });
     }, serviceUuid: serviceUuid);
   }
 
+  void _flushScanDevices() {
+    _scanDeliveryTimer?.cancel();
+    _scanDeliveryTimer = null;
+    if (_pendingScanDevices.isEmpty || !mounted) return;
+    final batch = List<ScanDevice>.of(_pendingScanDevices);
+    _pendingScanDevices.clear();
+    final notifier = _ref.read(scannedDevicesProvider.notifier);
+    if (notifier.mounted) notifier.addDevices(batch);
+  }
+
+  void _discardPendingScanDevices() {
+    _scanDeliveryTimer?.cancel();
+    _scanDeliveryTimer = null;
+    _pendingScanDevices.clear();
+  }
+
   void stopScan() {
+    _flushScanDevices();
     _bleManager.stopScan();
     // Only fall back to disconnected if we were actually scanning. ScanPage's
     // dispose() calls this even when it's being torn down *because* a connect
@@ -155,6 +189,7 @@ class BleNotifier extends StateNotifier<BleState> {
 
   Future<bool> connect(String deviceId, String deviceName,
       {bool allowJw = false}) async {
+    _discardPendingScanDevices();
     // 调试模式旁路:虚拟设备不发起真实 GATT 连接,直接把
     // connectedDeviceProvider 置为一个"看起来已连"的 info,让
     // EBadgeAppRoot 自动切到 DevicePage。BleManager 不参与,不占资源。
@@ -215,44 +250,55 @@ class BleNotifier extends StateNotifier<BleState> {
 class ScannedDevicesNotifier extends StateNotifier<List<ScanDevice>> {
   ScannedDevicesNotifier() : super([]);
 
-  void addDevice(ScanDevice device) {
-    final index = state.indexWhere((d) => d.deviceId == device.deviceId);
-    final previous = index >= 0 ? state[index] : null;
-    final named = device.name.trim().isNotEmpty && device.name != '未知设备';
-    final name = named ? device.name : previous?.name ?? device.name;
-    final now = DateTime.now();
-    final merged = ScanDevice(
-        deviceId: device.deviceId,
-        name: name,
-        rssi: device.rssi,
-        connectable: device.connectable,
-        debug: device.debug,
-        jwCandidate: device.jwCandidate || (previous?.jwCandidate ?? false),
-        firstSeen: previous?.firstSeen ?? device.firstSeen ?? now,
-        identitySeen: previous?.identitySeen ??
-            device.identitySeen ??
-            (named ? now : null));
-    if (previous != null &&
-        previous.rssi == merged.rssi &&
-        previous.name == merged.name &&
-        previous.connectable == merged.connectable &&
-        previous.jwCandidate == merged.jwCandidate) {
-      return;
+  void addDevice(ScanDevice device) => addDevices([device]);
+
+  /// Merge advertisements in arrival order and publish one list per batch.
+  void addDevices(Iterable<ScanDevice> devices) {
+    final updated = [...state];
+    final indices = <String, int>{
+      for (var i = 0; i < updated.length; i++) updated[i].deviceId: i,
+    };
+    var changed = false;
+    for (final device in devices) {
+      final index = indices[device.deviceId];
+      final previous = index == null ? null : updated[index];
+      final named = device.name.trim().isNotEmpty && device.name != '未知设备';
+      final name = named ? device.name : previous?.name ?? device.name;
+      final now = DateTime.now();
+      final merged = ScanDevice(
+          deviceId: device.deviceId,
+          name: name,
+          rssi: device.rssi,
+          connectable: device.connectable,
+          debug: device.debug,
+          jwCandidate: device.jwCandidate || (previous?.jwCandidate ?? false),
+          firstSeen: previous?.firstSeen ?? device.firstSeen ?? now,
+          identitySeen: previous?.identitySeen ??
+              device.identitySeen ??
+              (named ? now : null));
+      if (previous != null &&
+          previous.rssi == merged.rssi &&
+          previous.name == merged.name &&
+          previous.connectable == merged.connectable &&
+          previous.jwCandidate == merged.jwCandidate) {
+        continue;
+      }
+      if (merged.jwCandidate &&
+          (previous == null ||
+              !previous.jwCandidate ||
+              (previous.identitySeen == null && merged.identitySeen != null))) {
+        debugPrint(
+            'JW scan: id=${merged.deviceId} first=${merged.firstSeen?.toUtc().toIso8601String()} identity=${merged.identitySeen?.toUtc().toIso8601String()} name=${merged.name}');
+      }
+      changed = true;
+      if (index == null) {
+        indices[device.deviceId] = updated.length;
+        updated.add(merged);
+      } else {
+        updated[index] = merged;
+      }
     }
-    if (merged.jwCandidate &&
-        (previous == null ||
-            (!previous.jwCandidate) ||
-            (previous.identitySeen == null && merged.identitySeen != null))) {
-      debugPrint(
-          'JW scan: id=${merged.deviceId} first=${merged.firstSeen?.toUtc().toIso8601String()} identity=${merged.identitySeen?.toUtc().toIso8601String()} name=${merged.name}');
-    }
-    if (index >= 0) {
-      final updated = [...state];
-      updated[index] = merged;
-      state = updated;
-    } else {
-      state = [...state, merged];
-    }
+    if (changed) state = updated;
   }
 
   void clear() => state = [];
