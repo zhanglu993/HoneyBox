@@ -13,8 +13,6 @@ import 'package:honeybox/services/jw/history/jw_history_store.dart';
 import 'dart:io';
 
 class _Manager implements manager.BleManager {
-  @override
-  manager.BleState get state => manager.BleState.scanning;
   final scanFilters = <String?>[];
   void Function(ScanResult)? scanCallback;
   @override

@@ -4,8 +4,6 @@ HoneyBox 是一款基于 Flutter 开发的内部设备调试工具，面向电�
 
 > 本项目仅用于研发和调试，不作为商业产品发布。
 
-iOS 基础工程已加入，最低支持 iOS 15.0。Watch 的部分 BLE 和只读通信已在真机验证，其他功能仍在适配中；Mac 环境配置和当前限制见 [iOS 开发指南](docs/ios-development.md)。
-
 ## 仓库说明
 
 - **GitHub（开发仓库）**：[realmcu/HoneyBox](https://github.com/realmcu/HoneyBox)。项目的代码开发、Issue、Pull Request 和版本发布均以 GitHub 为准。

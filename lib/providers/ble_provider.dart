@@ -141,13 +141,6 @@ class BleNotifier extends StateNotifier<BleState> {
             manufacturerData: result.advertisementData.manufacturerData),
       ));
     }, serviceUuid: serviceUuid);
-    // Permission denial can return while the manager is already disconnected
-    // and therefore does not emit a state change.
-    if (mounted &&
-        state == BleState.scanning &&
-        _bleManager.state == manager.BleState.disconnected) {
-      state = BleState.disconnected;
-    }
   }
 
   void stopScan() {

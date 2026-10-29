@@ -257,7 +257,12 @@ class BleManager {
 
     final allowed = await _ensureBlePermissions();
     if (!allowed) {
-      _setState(BleState.disconnected);
+      // Report failed startup even if the manager was already disconnected.
+      if (_state == BleState.disconnected && !_disposed) {
+        _stateController.add(BleState.disconnected);
+      } else {
+        _setState(BleState.disconnected);
+      }
       return;
     }
 

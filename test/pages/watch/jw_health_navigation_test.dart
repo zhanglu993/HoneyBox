@@ -26,8 +26,6 @@ import 'jw_health_page_test.dart' show settleIo;
 
 class _Manager implements manager.BleManager {
   @override
-  manager.BleState get state => manager.BleState.scanning;
-  @override
   Stream<manager.BleState> get onStateChanged => const Stream.empty();
   @override
   void dispose() {}
