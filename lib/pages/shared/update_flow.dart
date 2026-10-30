@@ -21,6 +21,13 @@ Future<void> runUpdateCheck(BuildContext context) async {
     return;
   }
 
+  if (defaultTargetPlatform == TargetPlatform.macOS) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('macOS 版本请通过原安装渠道更新')),
+    );
+    return;
+  }
+
   // Capture navigator/messenger up front so they can be used across the awaits
   // below without tripping `use_build_context_synchronously`.
   final navigator = Navigator.of(context, rootNavigator: true);

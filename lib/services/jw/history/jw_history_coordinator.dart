@@ -23,15 +23,20 @@ const _types = <int, JwHistoryType>{
   0x60: JwHistoryType.metabolism,
   0x64: JwHistoryType.readiness
 };
-const _traditional = <JwHistoryType>[
-  JwHistoryType.steps,
-  JwHistoryType.sleep,
-  JwHistoryType.heartTemperature,
-  JwHistoryType.bloodPressure,
-  JwHistoryType.exercise,
-  JwHistoryType.bloodOxygen,
-  JwHistoryType.hrv
-];
+
+// START type IDs from firmware T_HISTORY_DATA_TYPE.
+const _startTypes = <int, JwHistoryType>{
+  0: JwHistoryType.steps,
+  1: JwHistoryType.sleep,
+  2: JwHistoryType.heartTemperature,
+  3: JwHistoryType.bloodPressure,
+  4: JwHistoryType.exercise,
+  5: JwHistoryType.bloodOxygen,
+  6: JwHistoryType.hrv,
+  0x0e: JwHistoryType.pressure,
+  0x0f: JwHistoryType.metabolism,
+  0x10: JwHistoryType.readiness,
+};
 
 class _Counts {
   int received = 0, persisted = 0, quarantined = 0;
@@ -292,7 +297,12 @@ class JwHistoryCoordinator {
         if (_queue.isNotEmpty) {
           final item = _queue.removeFirst();
           _queuedBytes -= 8 + item.$1.payload.length;
-          await _process(item.$2);
+          try {
+            await _process(item.$2);
+          } on _RoundFailure {
+            _diagnostic ??= item.$1;
+            rethrow;
+          }
           continue;
         }
         if (_start && _end && _markers.containsAll(_expectedMarkers)) {
@@ -435,11 +445,11 @@ class JwHistoryCoordinator {
     final types = <int>{};
     for (var i = 0; i < bytes.length; i += 3) {
       final type = bytes[i];
-      if (type >= _traditional.length || !types.add(type)) {
+      final historyType = _startTypes[type];
+      if (historyType == null || !types.add(type)) {
         throw _RoundFailure('parse', 'Unknown/duplicate START type');
       }
-      _counts[_traditional[type]]!.expected =
-          (bytes[i + 1] << 8) | bytes[i + 2];
+      _counts[historyType]!.expected = (bytes[i + 1] << 8) | bytes[i + 2];
     }
     final required = {0, 1, 2, 3, 4, 5, if (capabilities.hrv) 6};
     if (!types.containsAll(required)) {

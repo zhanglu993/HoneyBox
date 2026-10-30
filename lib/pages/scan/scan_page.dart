@@ -271,6 +271,7 @@ class _ScanPageState extends ConsumerState<ScanPage>
                         final device = devices[index];
                         return DeviceTile(
                           deviceId: device.deviceId,
+                          manufacturerData: device.manufacturerData,
                           name: device.name,
                           rssi: device.rssi,
                           connectable: device.connectable,

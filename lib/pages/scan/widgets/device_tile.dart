@@ -8,6 +8,7 @@ class DeviceTile extends StatelessWidget {
   final String name;
   final int? rssi;
   final bool connectable;
+  final Map<int, List<int>> manufacturerData;
   final bool isConnecting;
   final VoidCallback? onConnect;
 
@@ -20,6 +21,7 @@ class DeviceTile extends StatelessWidget {
     required this.name,
     this.rssi,
     this.connectable = true,
+    this.manufacturerData = const {},
     this.isConnecting = false,
     this.onConnect,
     this.debug = false,
@@ -63,6 +65,13 @@ class DeviceTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    if (manufacturerData.isNotEmpty)
+                      Text(
+                          manufacturerData.entries
+                              .map((e) =>
+                                  "厂商 ${e.key.toRadixString(16).padLeft(4, '0').toUpperCase()}: ${e.value.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(':')}")
+                              .join('\n'),
+                          style: tt.bodySmall),
                     const SizedBox(height: 7),
                     Wrap(
                       spacing: 6,

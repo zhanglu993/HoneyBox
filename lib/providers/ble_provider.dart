@@ -21,6 +21,7 @@ class ScanDevice {
   final int rssi;
   final bool connectable;
   final bool jwCandidate;
+  final Map<int, List<int>> manufacturerData;
   final DateTime? firstSeen;
   final DateTime? identitySeen;
 
@@ -35,6 +36,7 @@ class ScanDevice {
     this.connectable = true,
     this.debug = false,
     this.jwCandidate = false,
+    this.manufacturerData = const {},
     this.firstSeen,
     this.identitySeen,
   });
@@ -143,6 +145,7 @@ class BleNotifier extends StateNotifier<BleState> {
         name: displayName,
         rssi: result.rssi,
         connectable: result.advertisementData.connectable,
+        manufacturerData: result.advertisementData.manufacturerData,
         jwCandidate: JwScanPolicy.isCandidate(
             serviceUuids: result.advertisementData.serviceUuids
                 .map((u) => u.toString())
@@ -272,6 +275,10 @@ class ScannedDevicesNotifier extends StateNotifier<List<ScanDevice>> {
           connectable: device.connectable,
           debug: device.debug,
           jwCandidate: device.jwCandidate || (previous?.jwCandidate ?? false),
+          manufacturerData: {
+            ...?previous?.manufacturerData,
+            ...device.manufacturerData
+          },
           firstSeen: previous?.firstSeen ?? device.firstSeen ?? now,
           identitySeen: previous?.identitySeen ??
               device.identitySeen ??
@@ -280,7 +287,9 @@ class ScannedDevicesNotifier extends StateNotifier<List<ScanDevice>> {
           previous.rssi == merged.rssi &&
           previous.name == merged.name &&
           previous.connectable == merged.connectable &&
-          previous.jwCandidate == merged.jwCandidate) {
+          previous.jwCandidate == merged.jwCandidate &&
+          _sameManufacturerData(
+              previous.manufacturerData, merged.manufacturerData)) {
         continue;
       }
       if (merged.jwCandidate &&
@@ -302,4 +311,16 @@ class ScannedDevicesNotifier extends StateNotifier<List<ScanDevice>> {
   }
 
   void clear() => state = [];
+}
+
+bool _sameManufacturerData(Map<int, List<int>> a, Map<int, List<int>> b) {
+  if (a.length != b.length) return false;
+  for (final entry in a.entries) {
+    final other = b[entry.key];
+    if (other == null || other.length != entry.value.length) return false;
+    for (var i = 0; i < other.length; i++) {
+      if (other[i] != entry.value[i]) return false;
+    }
+  }
+  return true;
 }

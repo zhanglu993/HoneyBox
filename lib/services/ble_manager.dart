@@ -250,7 +250,7 @@ class BleManager {
     return requestAndroidBlePermissions();
   }
 
-  Future<BluetoothAdapterState?> _waitForIosAdapter() async {
+  Future<BluetoothAdapterState?> _waitForAppleAdapter() async {
     final wait = Completer<BluetoothAdapterState?>();
     _adapterWait = wait;
     _adapterWaitSub = FlutterBluePlus.adapterState.listen((state) {
@@ -302,9 +302,13 @@ class BleManager {
     _setState(BleState.scanning);
     _scanActive = true;
 
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    if (defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.macOS) {
       try {
-        final adapterState = await _waitForIosAdapter();
+        final wait = _waitForAppleAdapter();
+        final adapterState = defaultTargetPlatform == TargetPlatform.macOS
+            ? await wait.timeout(const Duration(seconds: 10))
+            : await wait;
         if (_disposed || generation != _scanGeneration) return;
         if (adapterState != BluetoothAdapterState.on) {
           stopScan();
@@ -330,6 +334,7 @@ class BleManager {
         }
       },
       onError: (Object error) {
+        debugPrint('BLE scan stream failed: $error');
         _setState(BleState.disconnected);
       },
     );
@@ -338,6 +343,7 @@ class BleManager {
     _scanErrorSub = FlutterBluePlus.scanResults.listen(
       (_) {},
       onError: (Object error) {
+        debugPrint('BLE scan stream failed: $error');
         _setState(BleState.disconnected);
       },
     );
@@ -360,6 +366,7 @@ class BleManager {
       }
     } catch (e) {
       if (_disposed || generation != _scanGeneration) return;
+      debugPrint('BLE scan failed: $e');
       stopScan();
       _setState(BleState.disconnected);
     }
