@@ -403,7 +403,13 @@ void main() {
     await tester.enterText(find.byKey(const Key('jw-health-goal-steps')), '40');
     await tester.runAsync(() async {
       await tester.tap(find.byKey(const Key('jw-health-goal-save')));
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      for (var i = 0; i < 250; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (find.byKey(const Key('jw-health-goal-save')).evaluate().isEmpty) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
     });
     await tester.pumpAndSettle();
     expect(find.textContaining('50%'), findsWidgets);
