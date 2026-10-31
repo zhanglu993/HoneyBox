@@ -8,12 +8,14 @@ import 'ota_preflight.dart';
 class DeviceCapabilities {
   final bool confirmed;
   final int? icType;
+  /// Configured target family, not a value read from the device.
+  final int? expectedIcType;
   final int? currentVersion;
   final int? capacity;
   final int? imageId;
   /// Evidence that this image layout is compatible with the selected device.
   final bool layoutConfirmed;
-  const DeviceCapabilities({this.confirmed = false, this.icType,
+  const DeviceCapabilities({this.confirmed = false, this.icType, this.expectedIcType,
       this.currentVersion, this.capacity, this.imageId,
       this.layoutConfirmed = false});
 }

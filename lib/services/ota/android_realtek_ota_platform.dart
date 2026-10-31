@@ -15,7 +15,7 @@ class AndroidRealtekOtaPlatform implements OtaPlatform {
       .receiveBroadcastStream()
       .where((e) => e is Map)
       .map((e) => Map<String, Object?>.from(e as Map));
-  Future<DeviceCapabilities> deviceCapabilities() async {
+  Future<DeviceCapabilities> deviceCapabilities({int? expectedIcType}) async {
     final values = await _commands.invokeMapMethod<String, Object?>('deviceCapabilities');
     final ic = values?['icType'];
     final id = values?['imageId'];
@@ -24,6 +24,7 @@ class AndroidRealtekOtaPlatform implements OtaPlatform {
     return DeviceCapabilities(
       confirmed: ic is int && ic > 0 && id is int && id > 0 &&
           version is int && version >= 0 && capacity is int && capacity > 0,
+      expectedIcType: expectedIcType,
       icType: ic is int ? ic : null, imageId: id is int ? id : null,
       currentVersion: version is int ? version : null,
       capacity: capacity is int ? capacity : null,

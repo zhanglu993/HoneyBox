@@ -22,8 +22,10 @@ final otaPlatformProvider = Provider<OtaPlatform>((ref) =>
 final firmwareParserProvider = Provider<FirmwareParser>((ref) =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android
         ? const AndroidRealtekFirmwareParser() : _UnknownParser());
-final otaDeviceCapabilitiesProvider =
-    Provider<DeviceCapabilities>((ref) => const DeviceCapabilities());
+// Product configuration for the RTL8762D entry; this is not device readback.
+const rtl8762dExpectedIcType = 9;
+final otaDeviceCapabilitiesProvider = Provider<DeviceCapabilities>((ref) =>
+    const DeviceCapabilities(expectedIcType: rtl8762dExpectedIcType));
 
 class _UnknownParser implements FirmwareParser {
   @override
@@ -183,7 +185,8 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
       final session = _session;
       var capabilities = ref.read(otaDeviceCapabilitiesProvider);
       if (!capabilities.confirmed && _platform is AndroidRealtekOtaPlatform) {
-        capabilities = await _platform.deviceCapabilities();
+        capabilities = await _platform.deviceCapabilities(
+            expectedIcType: capabilities.expectedIcType);
       }
       final inspection = await FirmwareInspection.inspect(path,
           capabilities, ref.read(firmwareParserProvider));
