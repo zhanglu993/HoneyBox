@@ -7,7 +7,15 @@ import 'ota_preflight.dart';
 /// Device evidence supplied by the adapter; false never authorizes a write.
 class DeviceCapabilities {
   final bool confirmed;
-  const DeviceCapabilities({this.confirmed = false});
+  final int? icType;
+  final int? currentVersion;
+  final int? capacity;
+  final int? imageId;
+  /// Evidence that this image layout is compatible with the selected device.
+  final bool layoutConfirmed;
+  const DeviceCapabilities({this.confirmed = false, this.icType,
+      this.currentVersion, this.capacity, this.imageId,
+      this.layoutConfirmed = false});
 }
 
 abstract interface class FirmwareParser {

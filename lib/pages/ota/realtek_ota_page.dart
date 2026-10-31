@@ -9,6 +9,7 @@ import '../../providers/ble_provider.dart';
 import '../../providers/rtl8762_ota_provider.dart';
 import '../../services/ota/ota_platform.dart';
 import '../../services/ota/android_realtek_ota_platform.dart';
+import '../../services/ota/android_realtek_firmware_parser.dart';
 import '../../services/ota/firmware_inspection.dart';
 import '../../services/ota/ota_preflight.dart';
 import '../../services/ota/ota_session.dart';
@@ -18,7 +19,9 @@ final otaPlatformProvider = Provider<OtaPlatform>((ref) =>
         ? AndroidRealtekOtaPlatform()
         : const UnsupportedOtaPlatform());
 
-final firmwareParserProvider = Provider<FirmwareParser>((ref) => _UnknownParser());
+final firmwareParserProvider = Provider<FirmwareParser>((ref) =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? const AndroidRealtekFirmwareParser() : _UnknownParser());
 final otaDeviceCapabilitiesProvider =
     Provider<DeviceCapabilities>((ref) => const DeviceCapabilities());
 
@@ -178,8 +181,12 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
     try {
       final path = _path!;
       final session = _session;
+      var capabilities = ref.read(otaDeviceCapabilitiesProvider);
+      if (!capabilities.confirmed && _platform is AndroidRealtekOtaPlatform) {
+        capabilities = await _platform.deviceCapabilities();
+      }
       final inspection = await FirmwareInspection.inspect(path,
-          ref.read(otaDeviceCapabilitiesProvider), ref.read(firmwareParserProvider));
+          capabilities, ref.read(firmwareParserProvider));
       if (!mounted) return;
       if (session != _session || session?.outcome != null || !_ready) {
         setState(() => _running = false);

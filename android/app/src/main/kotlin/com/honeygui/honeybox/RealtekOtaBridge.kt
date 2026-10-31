@@ -7,6 +7,9 @@ import com.realsil.sdk.core.RtkConfigure
 import com.realsil.sdk.core.RtkCore
 import com.realsil.sdk.dfu.DfuConstants
 import com.realsil.sdk.dfu.RtkDfu
+import com.realsil.sdk.dfu.image.FirmwareLoaderX
+import com.realsil.sdk.dfu.image.LoadParams
+import com.realsil.sdk.dfu.exception.LoadFileException
 import com.realsil.sdk.dfu.model.DfuBufferCheckConfig
 import com.realsil.sdk.dfu.model.DfuConfig
 import com.realsil.sdk.dfu.model.DfuProgressInfo
@@ -68,6 +71,62 @@ class RealtekOtaBridge(context: Context, messenger: BinaryMessenger) {
                         } catch (e: Exception) {
                             cleanup()
                             result.error("init", e.message, null)
+                        }
+                    }
+                }
+                "deviceCapabilities" -> {
+                    val info = target
+                    val versions = info?.imageVersionInfos
+                    val image = if (versions?.size == 1) versions[0] else null
+                    result.success(mapOf(
+                        "icType" to info?.icType?.takeIf { it > 0 },
+                        "imageId" to image?.imageId?.takeIf { it > 0 },
+                        "currentVersion" to image?.version?.takeIf { it >= 0 },
+                        "capacity" to image?.sectionSize?.takeIf { it > 0 },
+                    ))
+                }
+                "inspectFirmware" -> {
+                    val file = call.argument<String>("path")
+                    if (file.isNullOrBlank() || !File(file).isFile || File(file).length() == 0L) {
+                        result.success(mapOf("errorCode" to "invalid_file"))
+                    } else {
+                        try {
+                            val params = LoadParams.Builder().with(app).setFilePath(file)
+                                .setOtaDeviceInfo(target)
+                                .setIcCheckEnabled(true).setVersionCheckEnabled(true)
+                                .setSectionSizeCheckEnabled(true).setIgnoreException(false).build()
+                            val info = FirmwareLoaderX.loadImageBinInfo(params)
+                            if (info == null) {
+                                result.success(mapOf("errorCode" to "no_result"))
+                            } else {
+                                val streams = info.subBinInputStreams ?: emptyList()
+                                val subFiles = info.subFileInfos ?: emptyList()
+                                val images = streams.map { stream ->
+                                    val matching = subFiles.filter { it.imageId == stream.imageId && it.binId == stream.binId }
+                                    mapOf("imageId" to stream.imageId, "binId" to stream.binId,
+                                        "offset" to if (!info.isPackFile) 0L else matching.singleOrNull()?.c,
+                                        "size" to stream.imageSize, "version" to stream.imageVersion,
+                                        "icType" to stream.icType)
+                                }
+                                // Status and updateEnabled default to success even without a parsed header.
+                                // No matching SDK fixture has validated header or section/version checks yet.
+                                result.success(mapOf("status" to info.status, "updateEnabled" to info.updateEnabled,
+                                    "icType" to info.icType, "version" to info.version,
+                                    "type" to if (info.isPackFile) "Realtek pack" else "Realtek single",
+                                    "images" to images,
+                                    "subFiles" to subFiles.map { mapOf("imageId" to it.imageId,
+                                        "binId" to it.binId, "offset" to it.c, "size" to it.size,
+                                        "version" to it.imageVersion) },
+                                    "formatVerified" to false,
+                                    "capacityCheckAvailable" to false, "versionCheckAvailable" to false,
+                                    "sdkCapacityCheckOption" to true, "sdkVersionCheckOption" to true))
+                                streams.forEach { try { it.close() } catch (_: Exception) { } }
+                            }
+                        } catch (e: LoadFileException) {
+                            result.success(mapOf("errorCode" to e.errCode, "errorType" to e.errType,
+                                "message" to e.message))
+                        } catch (e: Exception) {
+                            result.success(mapOf("exception" to e.javaClass.simpleName, "message" to e.message))
                         }
                     }
                 }
