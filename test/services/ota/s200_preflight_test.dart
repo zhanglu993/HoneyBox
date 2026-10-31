@@ -164,7 +164,7 @@ void main() {
             .explanation,
         contains('请在 OTA 档案注册表中添加'));
   });
-  test('large profile, S200 limit and device capacity precedence', () async {
+  test('APP bank capacity comes from the matched profile', () async {
     const size = 0x90000;
     const large = OtaDeviceProfile(
         id: 'large',
@@ -174,6 +174,7 @@ void main() {
         customerName: 'S200_62#',
         appBankSize: 0x100000,
         batteryMinPercent: 70,
+        batterySource: BatterySource.basAndBwps,
         evidence: 'synthetic test');
     final original = await file.readAsBytes();
     final bytes = Uint8List(512 + size)..setRange(0, original.length, original);
@@ -205,9 +206,9 @@ void main() {
     expect(
         status(await inspect(registry: registry, reportedCapacity: 0x80000),
             'capacity'),
-        OtaCheckStatus.block);
-    expect(status(await inspect(reportedCapacity: 0x100000), 'capacity'),
         OtaCheckStatus.pass);
+    expect(status(await inspect(reportedCapacity: 0x100000), 'capacity'),
+        OtaCheckStatus.block);
     expect(status(await inspect(registry: registry, battery: 50), 'battery'),
         OtaCheckStatus.block);
     expect(status(await inspect(battery: 50), 'battery'), OtaCheckStatus.pass);
@@ -237,6 +238,6 @@ void main() {
         'version': 0x30000010
       }
     ];
-    expect((await inspect(version: 0x3000000f)).report.canStart, isTrue);
+    expect((await inspect(version: 0x3000000f, battery: 30, charging: null)).report.canStart, isTrue);
   }, skip: !real.existsSync() ? 'real firmware not available' : false);
 }

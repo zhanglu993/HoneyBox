@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:honeybox/services/ota/ota_platform.dart';
+import 'package:honeybox/services/ota/device_probe.dart';
+import 'package:honeybox/services/ota/ota_device_profile.dart';
 
 /// Programmable transport for OTA tests; no native calls are made.
 class OtaFakePlatform implements OtaPlatform {
@@ -34,5 +36,16 @@ class OtaFakePlatform implements OtaPlatform {
     calls.add('close');
     await closeDelay;
     if (closeError != null) throw closeError!;
+  }
+}
+
+class OtaFakeProbe implements DeviceProbe {
+  final List<String> calls;
+  final DeviceProbeResult result;
+  OtaFakeProbe(this.calls, {this.result = const DeviceProbeResult()});
+  @override
+  Future<DeviceProbeResult> probe(String deviceId, {OtaDeviceProfile? profile}) async {
+    calls.add('probe');
+    return result;
   }
 }

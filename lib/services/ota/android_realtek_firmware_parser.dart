@@ -39,8 +39,9 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
         single['binId'] is int &&
         single['version'] is int &&
         single['size'] is int;
-    // SDK 预解析 331452 = 文件长 - 512 - 12，已处理 MP 头；启动仍传原文件。
     // 出处：固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核。
+    // 设备拒绝带 512B MP 头的文件；SDK 是否剥离须由调用方验证。
+    // Dart 启动时保持原文件，不自行剥离。
     final sdkMismatch = sdkFields &&
         header.imageId != null &&
         (single['imageId'] != header.imageId ||
@@ -61,14 +62,15 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
     final match = registry.match(header);
     final profile = match.profile;
     final expectedIc =
-        capabilities.icType ?? capabilities.expectedIcType ?? profile?.icType;
+        capabilities.otaDeviceInfo?.icType ?? capabilities.icType ?? capabilities.expectedIcType ?? profile?.icType;
     final chip = header.icType == null || expectedIc == null
         ? OtaCheckStatus.unknown
         : header.icType == expectedIc
             ? OtaCheckStatus.pass
             : OtaCheckStatus.block;
     final mismatch = profile != null &&
-        (header.icType != profile.icType ||
+        ((capabilities.otaDeviceInfo != null && capabilities.otaDeviceInfo!.icType != profile.icType) ||
+            header.icType != profile.icType ||
             header.imageId == null ||
             !profile.acceptsImageId(header.imageId!) ||
             header.customerName != profile.customerName ||
@@ -85,8 +87,13 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
             : format == OtaCheckStatus.pass
                 ? OtaCheckStatus.pass
                 : OtaCheckStatus.unknown;
-    final limit = capabilities.deviceReportedCapacity ?? profile?.appBankSize;
-    final capacity = profile == null ||
+    final limit = profile?.appBankSize;
+    // 出处：固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核。
+    // FFF1 临时容量仅在 multi 位有效；APP bank 容量仍以档案为准。
+    final info = capabilities.otaDeviceInfo;
+    final multiLimit = info != null && info.modeBits & 0x10 != 0 ? info.tempBankSizeBytes : null;
+    final tooLargeForMulti = multiLimit != null && header.imageSize != null && header.imageSize! > multiLimit;
+    final capacity = tooLargeForMulti ? OtaCheckStatus.block : profile == null ||
             header.imageSize == null ||
             limit == null ||
             limit <= 0
@@ -114,19 +121,18 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
     final batteryValue = capabilities.batteryPercent;
     final charging = capabilities.charging;
     final threshold = profile?.batteryMinPercent;
-    final battery = threshold == null
+    final source = profile?.batterySource;
+    final noBatteryCheck = profile != null && (threshold == null || source == BatterySource.none);
+    final hasChargingSource = source == BatterySource.bwps || source == BatterySource.basAndBwps;
+    final battery = noBatteryCheck
         ? OtaCheckStatus.pass
-        : batteryValue == null || batteryValue < 0 || batteryValue > 100
+        : profile == null || batteryValue == null || batteryValue <= 0 || batteryValue > 100
             ? OtaCheckStatus.unknown
-            : batteryValue >= threshold
+            : batteryValue >= threshold!
                 ? OtaCheckStatus.pass
-                : !profile!.batteryRequiresChargingBelowMin
-                    ? OtaCheckStatus.block
-                    : charging == true
-                        ? OtaCheckStatus.pass
-                        : charging == false
-                            ? OtaCheckStatus.block
-                            : OtaCheckStatus.unknown;
+                : !hasChargingSource || charging == null
+                    ? OtaCheckStatus.unknown
+                    : charging ? OtaCheckStatus.pass : OtaCheckStatus.block;
     const missingProfile =
         '未找到匹配的设备档案,请在 OTA 档案注册表中添加(icType/imageId/customerName)';
     return FirmwareParseResult(
@@ -141,19 +147,19 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
           OtaCheck(
               'chip',
               chip,
-              '芯片检查：${chip.name}；${capabilities.icType != null ? '设备上报' : capabilities.expectedIcType != null ? '所选芯片' : '匹配档案（非设备读回）'}'),
+              '芯片检查：${chip.name}；${capabilities.otaDeviceInfo != null || capabilities.icType != null ? '设备上报' : capabilities.expectedIcType != null ? '所选芯片' : '匹配档案（非设备读回）'}'),
           OtaCheck(
               'compatibility',
               compatible,
               profile == null
                   ? '$missingProfile；匹配结果：${match.status.name}'
-                  : '兼容性：${compatible.name}；档案：${profile.displayName}'),
+                  : '兼容性：${compatible.name}；档案：${profile.displayName}${infoIcMismatch(capabilities, profile) ? '；FFF1 芯片类型不匹配' : ''}'),
           OtaCheck(
               'capacity',
               capacity,
               profile == null
                   ? missingProfile
-                  : '容量：${capacity.name}；${capabilities.deviceReportedCapacity != null ? '设备上报' : '设备档案'}'),
+                  : '容量：${capacity.name}；${tooLargeForMulti ? 'FFF1 multi 临时容量不足' : '设备档案'}'),
           OtaCheck(
               'version',
               version,
@@ -161,11 +167,12 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
           OtaCheck(
               'battery',
               battery,
-              battery == OtaCheckStatus.unknown
-                  ? '警告：电量或充电状态未知，请确认后重新检查'
-                  : threshold == null
-                      ? '档案未配置电量阈值，不检查电量'
-                      : '电量：${battery.name}；阈值 $threshold%'),
+              noBatteryCheck
+                  ? '档案未启用电量检查'
+                  : '电量：${battery.name}；来源 ${source?.name ?? '未知'}，阈值 ${threshold ?? '未知'}%；${batteryValue == null ? '百分比未知' : '百分比 $batteryValue%'}；${charging == null || !hasChargingSource ? '充电状态未知' : charging ? '正在充电' : '未充电'}'),
         ]);
   }
 }
+
+bool infoIcMismatch(DeviceCapabilities capabilities, OtaDeviceProfile profile) =>
+    capabilities.otaDeviceInfo != null && capabilities.otaDeviceInfo!.icType != profile.icType;

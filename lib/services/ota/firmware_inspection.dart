@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 
 import 'ota_preflight.dart';
+import 'device_probe.dart';
 
 /// Device evidence supplied by the adapter; false never authorizes a write.
 class DeviceCapabilities {
@@ -12,6 +13,7 @@ class DeviceCapabilities {
   /// Configured target family, not a value read from the device.
   final int? expectedIcType;
   final int? currentVersion;
+  final OtaDeviceInfoRecord? otaDeviceInfo;
   final int? batteryPercent;
   final bool? charging;
   final int? deviceReportedCapacity;
@@ -26,6 +28,7 @@ class DeviceCapabilities {
       this.icType,
       this.expectedIcType,
       this.currentVersion,
+      this.otaDeviceInfo,
       this.capacity,
       this.imageId,
       this.batteryPercent,

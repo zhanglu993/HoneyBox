@@ -40,7 +40,7 @@ class Rtl8762Upgrade {
   Future<void> run(Uint8List source,
       {void Function(String phase, int done, int total)? onProgress}) async {
     final image = S200FirmwareImage.parse(source);
-    final profile = OtaProfileRegistry.defaultProfiles[0];
+    final profile = OtaProfileRegistry.defaultProfileById('s200');
     try {
       onProgress?.call('检查设备', 0, image.imageBytes.length);
       final info = await device.inspectNormal();

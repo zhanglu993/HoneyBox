@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'realtek_image_header.dart';
 
+enum BatterySource { bas, bwps, basAndBwps, none }
+
 class OtaDeviceProfile {
   final String id, displayName, evidence;
   final int icType;
@@ -10,6 +12,7 @@ class OtaDeviceProfile {
   final String? customerName;
   final int? appBankSize, tempBankSize, flashAddress, batteryMinPercent;
   final bool batteryRequiresChargingBelowMin;
+  final BatterySource batterySource;
 
   const OtaDeviceProfile(
       {required this.id,
@@ -26,6 +29,7 @@ class OtaDeviceProfile {
       this.flashAddress,
       this.batteryMinPercent,
       this.batteryRequiresChargingBelowMin = true,
+      this.batterySource = BatterySource.none,
       required this.evidence});
 
   bool acceptsImageId(int value) =>
@@ -65,6 +69,10 @@ class OtaDeviceProfile {
 
       final customer = json['customerName'];
       final charging = json['batteryRequiresChargingBelowMin'];
+      final source = json['batterySource'];
+      if (source != null && (source is! String || !BatterySource.values.any((v) => v.name == source))) {
+        throw const FormatException('batterySource 无效');
+      }
       if (customer != null && (customer is! String || customer.isEmpty))
         throw const FormatException('customerName 必须是非空字符串');
       if (charging != null && charging is! bool)
@@ -93,6 +101,7 @@ class OtaDeviceProfile {
           tempBankSize: number('tempBankSize'),
           flashAddress: number('flashAddress'),
           batteryMinPercent: battery,
+          batterySource: source == null ? BatterySource.none : BatterySource.values.firstWhere((v) => v.name == source),
           batteryRequiresChargingBelowMin: charging as bool? ?? true,
           evidence: requiredString('evidence'));
     } on FormatException {
@@ -114,6 +123,12 @@ class OtaProfileMatch {
 class OtaProfileRegistry {
   final List<OtaDeviceProfile> profiles;
   const OtaProfileRegistry([this.profiles = defaultProfiles]);
+  static OtaDeviceProfile defaultProfileById(String id) {
+    for (final profile in defaultProfiles) {
+      if (profile.id == id) return profile;
+    }
+    throw StateError('未找到默认 OTA 档案: $id');
+  }
   static const defaultProfiles = <OtaDeviceProfile>[
     OtaDeviceProfile(
         id: 's200',
@@ -126,6 +141,9 @@ class OtaProfileRegistry {
         appBankSize: 0x64000,
         tempBankSize: 0x64000,
         batteryMinPercent: 30,
+        // 出处：固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核。
+        // BWPS 暂未实现读取，充电状态 unknown。
+        batterySource: BatterySource.basAndBwps,
         batteryRequiresChargingBelowMin: true,
         evidence: '固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核'),
   ];

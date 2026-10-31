@@ -8,7 +8,7 @@ import 'ota_device_profile.dart';
 class S200FirmwareImage {
   static const _headerSize = 1024;
   static const _packHeaderSize = 512;
-  static final _profile = OtaProfileRegistry.defaultProfiles[0];
+  static final _profile = OtaProfileRegistry.defaultProfileById('s200');
 
   final Uint8List imageBytes;
   final int version;

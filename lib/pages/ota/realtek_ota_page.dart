@@ -14,6 +14,7 @@ import '../../services/ota/firmware_inspection.dart';
 import '../../services/ota/ota_preflight.dart';
 import '../../services/ota/ota_session.dart';
 import '../../services/ota/ota_device_profile.dart';
+import '../../services/ota/device_probe.dart';
 
 final otaPlatformProvider = Provider<OtaPlatform>((ref) =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android
@@ -28,6 +29,9 @@ final firmwareParserProvider = Provider<FirmwareParser>((ref) =>
         ? AndroidRealtekFirmwareParser(
             registry: ref.watch(otaProfileRegistryProvider))
         : _UnknownParser());
+final otaDeviceProbeProvider = Provider<DeviceProbe>((ref) =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? const FlutterBlueDeviceProbe() : const UnknownDeviceProbe());
 final otaDeviceCapabilitiesProvider =
     Provider<DeviceCapabilities>((ref) => const DeviceCapabilities());
 
@@ -180,16 +184,25 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         _session = null;
         await _platform.close();
       }
-      var capabilities = ref.read(otaDeviceCapabilitiesProvider);
-      if (_platform is AndroidRealtekOtaPlatform) {
-        capabilities = await _platform.deviceCapabilities(
-            widget.device.deviceId,
-            expectedIcType: capabilities.expectedIcType,
-            deviceReportedCapacity: capabilities.deviceReportedCapacity,
-            batteryPercent: capabilities.batteryPercent,
-            charging: capabilities.charging,
-            allowSameOrOlderVersion: capabilities.allowSameOrOlderVersion);
+      final configured = ref.read(otaDeviceCapabilitiesProvider);
+      DeviceProbeResult probe;
+      try {
+        // 固件尚未选择，无法安全匹配档案。临时连接结束后才交给 SDK。
+        probe = await ref.read(otaDeviceProbeProvider).probe(widget.device.deviceId);
+      } catch (error) {
+        probe = const DeviceProbeResult();
+        if (mounted) setState(() => _errorDetails = '设备预读取失败或超时，设备信息未知：$error');
       }
+      final capabilities = DeviceCapabilities(
+          confirmed: probe.currentVersion != null,
+          icType: probe.otaDeviceInfo?.icType,
+          currentVersion: probe.currentVersion,
+          otaDeviceInfo: probe.otaDeviceInfo,
+          batteryPercent: probe.batteryPercent,
+          charging: probe.charging,
+          expectedIcType: configured.expectedIcType,
+          deviceReportedCapacity: configured.deviceReportedCapacity,
+          allowSameOrOlderVersion: configured.allowSameOrOlderVersion);
       if (_disposed) return;
       _capabilities = capabilities;
       final session = OtaSession(

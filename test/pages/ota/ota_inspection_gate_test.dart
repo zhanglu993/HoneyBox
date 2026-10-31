@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:honeybox/pages/ota/realtek_ota_page.dart';
 import 'package:honeybox/providers/ble_provider.dart';
 import 'package:honeybox/services/ota/firmware_inspection.dart';
+import 'package:honeybox/services/ota/device_probe.dart';
 import '../../helpers/ota_fake_platform.dart';
 import 'package:honeybox/services/ota/ota_preflight.dart';
 
@@ -29,12 +30,15 @@ class _Picker extends FilePicker {
 class _Parser implements FirmwareParser {
   _Parser(this.status);
   final OtaCheckStatus status;
+  DeviceCapabilities? received;
   @override
-  Future<FirmwareParseResult> parse(String path, DeviceCapabilities capabilities) async =>
-      FirmwareParseResult(type: 'test', images: ['image'], checks: [
+  Future<FirmwareParseResult> parse(String path, DeviceCapabilities capabilities) async {
+    received = capabilities;
+    return FirmwareParseResult(type: 'test', images: ['image'], checks: [
         OtaCheck('format', status, '检查未通过：${status.name}'),
         const OtaCheck('compatibility', OtaCheckStatus.pass, 'ok'),
       ]);
+  }
 }
 
 void main() {
@@ -42,12 +46,14 @@ void main() {
     testWidgets('inspection ${status.name} gates start', (tester) async {
       FilePicker.platform = _Picker();
       final platform = OtaFakePlatform();
+      final parser = _Parser(status);
       addTearDown(() async {
         await platform.controller.close();
       });
       await tester.pumpWidget(ProviderScope(overrides: [
         otaPlatformProvider.overrideWithValue(platform),
-        firmwareParserProvider.overrideWithValue(_Parser(status)),
+        firmwareParserProvider.overrideWithValue(parser),
+        otaDeviceProbeProvider.overrideWithValue(OtaFakeProbe(platform.calls, result: const DeviceProbeResult(currentVersion: 2, otaDeviceInfo: OtaDeviceInfoRecord(icType: 9, otaVersion: 1, secureVersion: 0, modeBits: 0, maxBuffer: 2048, tempBankSizeBytes: null, imgIndicator: 0)))),
         otaDeviceCapabilitiesProvider.overrideWithValue(const DeviceCapabilities(confirmed: true)),
       ], child: MaterialApp(home: RealtekOtaPage(
           device: ScanDevice(deviceId: 'device', name: 'test', rssi: -40)))));
@@ -65,6 +71,9 @@ void main() {
         }
       });
       await tester.pump();
+      expect(platform.calls.take(2).toList(), ['probe', 'prepare']);
+      expect(parser.received?.currentVersion, 2);
+      expect(parser.received?.icType, 9);
       expect(platform.starts, status == OtaCheckStatus.pass ? 1 : 0);
       if (status != OtaCheckStatus.pass) {
         expect(find.textContaining('检查未通过：${status.name}'), findsOneWidget);
