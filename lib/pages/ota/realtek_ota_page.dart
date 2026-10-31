@@ -1,13 +1,19 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/ble_provider.dart';
 import '../../providers/rtl8762_ota_provider.dart';
+import '../../services/ota/ota_platform.dart';
+import '../../services/ota/android_realtek_ota_platform.dart';
+
+final otaPlatformProvider = Provider<OtaPlatform>((ref) =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? const AndroidRealtekOtaPlatform()
+        : const UnsupportedOtaPlatform());
 
 class RealtekOtaPage extends ConsumerStatefulWidget {
   final ScanDevice device;
@@ -18,8 +24,7 @@ class RealtekOtaPage extends ConsumerStatefulWidget {
 }
 
 class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
-  static const _commands = MethodChannel('honeybox/realtek-ota');
-  static const _events = EventChannel('honeybox/realtek-ota/events');
+  late final OtaPlatform _platform;
   StreamSubscription<dynamic>? _subscription;
   String? _path;
   String? _name;
@@ -27,13 +32,17 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
   double? _progress;
   bool _running = false;
   bool _ready = false;
+  String? _errorDetails;
+  bool _pendingVerification = false;
+  bool _preparing = false;
 
   @override
   void initState() {
     super.initState();
-    if (Platform.isAndroid) {
-      _subscription = _events.receiveBroadcastStream().listen((event) {
-        if (!mounted || event is! Map) return;
+    _platform = ref.read(otaPlatformProvider);
+    if (_platform.supported) {
+      _subscription = _platform.events.listen((event) {
+        if (!mounted) return;
         final message = event['message'];
         final progress = event['progress'];
         final done = event['done'] == true;
@@ -43,34 +52,49 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
           if (done) _running = false;
           if (event['ready'] == true) _ready = true;
           if (done) _ready = false;
+          if (event['errorType'] != null || event['errorCode'] != null) {
+            _errorDetails =
+                'SDK 错误类型：${event['errorType'] ?? '未知'}，错误码：${event['errorCode'] ?? '未知'}';
+          }
+          if (done) {
+            _pendingVerification = event['outcome'] == 'pendingVerification';
+          }
         });
         if (done) ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
       }, onError: (Object error) {
         if (!mounted) return;
         setState(() {
-          _running = false;
-          _status = '升级失败：$error';
+          _ready = false;
+          _status = _running
+              ? '升级状态通信中断，设备可能仍在写入。请勿断电，等待设备状态确认：$error'
+              : '连接状态通信失败：$error';
         });
-        ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
       });
       unawaited(_prepare());
     }
   }
 
   Future<void> _prepare() async {
+    if (_preparing || _running) return;
+    setState(() {
+      _preparing = true;
+      _ready = false;
+    });
     try {
       if (mounted) setState(() => _status = '正在连接设备');
-      await _commands
-          .invokeMethod<void>('prepare', {'address': widget.device.deviceId});
+      await _platform.close();
+      await _platform.prepare(widget.device.deviceId);
     } catch (error) {
       if (mounted) setState(() => _status = '连接失败：$error');
+    } finally {
+      if (mounted) setState(() => _preparing = false);
     }
   }
 
   @override
   void dispose() {
     _subscription?.cancel();
-    if (Platform.isAndroid) unawaited(_commands.invokeMethod<void>('close'));
+    unawaited(_platform.close().catchError((Object _) {}));
     super.dispose();
   }
 
@@ -91,7 +115,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
   }
 
   Future<void> _start() async {
-    if (_path == null || _running) return;
+    if (_path == null || _running || _preparing || !_ready) return;
     setState(() {
       _running = true;
       _progress = null;
@@ -99,7 +123,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
     });
     ref.read(rtl8762OtaInProgressProvider.notifier).state = true;
     try {
-      await _commands.invokeMethod<void>('start', {'path': _path});
+      await _platform.start(_path!);
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -120,8 +144,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
               automaticallyImplyLeading: !_running),
           body: Padding(
               padding: const EdgeInsets.all(24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+              child: ListView(
                 children: [
                   Text('设备：${widget.device.name}'),
                   const SizedBox(height: 12),
@@ -131,16 +154,25 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
                       child: const Text('选择固件')),
                   FilledButton(
                       onPressed: !_running &&
+                              !_preparing &&
                               _ready &&
                               _path != null &&
-                              Platform.isAndroid
+                              _platform.supported
                           ? _start
                           : null,
                       child: const Text('开始升级')),
                   const SizedBox(height: 20),
                   if (_progress != null)
                     LinearProgressIndicator(value: _progress),
-                  Text(Platform.isAndroid ? _status : '当前仅支持 Android'),
+                  Text(_platform.supported ? _status : '当前平台暂不支持 OTA'),
+                  if (_pendingVerification)
+                    const Text('结果待核验：SDK 已报告完成，尚未确认设备运行的新固件版本。'),
+                  if (_errorDetails != null) SelectableText(_errorDetails!),
+                  if (!_running && _platform.supported)
+                    OutlinedButton(
+                      onPressed: _preparing ? null : _prepare,
+                      child: const Text('重新连接'),
+                    ),
                 ],
               )),
         ),
