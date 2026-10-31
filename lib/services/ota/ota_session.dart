@@ -1,3 +1,5 @@
+import 'dart:async';
+
 /// Platform-neutral OTA lifecycle. SDK callbacks are inputs, not proof of success.
 enum OtaPhase {
   idle,
@@ -38,10 +40,69 @@ class OtaEvent {
 }
 
 class OtaSession {
-  OtaSession(this.id, {DateTime Function()? now}) : _now = now ?? DateTime.now {
+  OtaSession(this.id, {DateTime Function()? now,
+      Map<OtaPhase, Duration>? phaseTimeouts, this.onTimeout,
+      Timer Function(Duration, void Function())? timerFactory})
+      : _now = now ?? DateTime.now,
+        _timeouts = {...defaultPhaseTimeouts, ...?phaseTimeouts},
+        _timerFactory = timerFactory ?? Timer.new {
     lastActivity = _now();
   }
+  static const defaultPhaseTimeouts = <OtaPhase, Duration>{
+    OtaPhase.connecting: Duration(seconds: 60),
+    OtaPhase.transferring: Duration(minutes: 5),
+    OtaPhase.validating: Duration(minutes: 2),
+    OtaPhase.activating: Duration(minutes: 2),
+    OtaPhase.rebooting: Duration(minutes: 2),
+    OtaPhase.reconnecting: Duration(minutes: 2),
+    OtaPhase.verifying: Duration(minutes: 2),
+  };
   final DateTime Function() _now;
+  final Map<OtaPhase, Duration> _timeouts;
+  final void Function(OtaSession)? onTimeout;
+  final Timer Function(Duration, void Function()) _timerFactory;
+  Timer? _timer;
+  String? failureDescription;
+
+  void dispose() { _timer?.cancel(); _timer = null; }
+
+  bool checkTimeout() {
+    final limit = _timeouts[phase];
+    if (limit == null || !hasTimedOut(limit)) return false;
+    phase = OtaPhase.finished;
+    outcome = OtaOutcome.failed;
+    rawType = null;
+    rawCode = null;
+    failureDescription = '阶段超时';
+    dispose();
+    onTimeout?.call(this);
+    return true;
+  }
+
+  void _scheduleTimeout() {
+    dispose();
+    final limit = _timeouts[phase];
+    if (limit == null || onTimeout == null || outcome != null) return;
+    _timer = _timerFactory(limit, () {
+      if (!checkTimeout() && outcome == null) _scheduleTimeout();
+    });
+  }
+
+  /// A reboot disconnect is expected; elsewhere it is a failure.
+  bool disconnect(String sessionId) {
+    if (sessionId != id) return false;
+    if (phase == OtaPhase.reconnecting && outcome == null) return true;
+    if (outcome != null) return outcome == OtaOutcome.failed;
+    if (phase == OtaPhase.activating || phase == OtaPhase.rebooting) {
+      phase = OtaPhase.reconnecting;
+      lastActivity = _now();
+      _scheduleTimeout();
+      return true;
+    }
+    failureDescription = '设备已断开';
+    return apply(OtaEvent(sessionId: id, phase: OtaPhase.finished,
+        outcome: OtaOutcome.failed));
+  }
   late DateTime lastActivity;
   bool hasTimedOut(Duration limit) =>
       outcome == null && _now().difference(lastActivity) >= limit;
@@ -85,6 +146,7 @@ class OtaSession {
       final next = event.progress!.clamp(0.0, 1.0);
       if (progress == null || next > progress!) progress = next;
     }
+    _scheduleTimeout();
     return true;
   }
 }

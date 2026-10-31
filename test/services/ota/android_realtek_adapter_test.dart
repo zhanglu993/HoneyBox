@@ -32,4 +32,25 @@ void main() {
     await adapter.close();
     expect(calls.where((call) => call.method == 'close').length, 2);
   });
+  test('活动会话拒绝重复准备和启动，关闭后允许重试', () async {
+    final calls = <MethodCall>[];
+    const channel = MethodChannel('honeybox/realtek-ota');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(() => TestDefaultBinaryMessengerBinding.instance
+        .defaultBinaryMessenger.setMockMethodCallHandler(channel, null));
+    final adapter = AndroidRealtekOtaPlatform();
+    await adapter.prepare('device', sessionId: 'one');
+    await adapter.start('file');
+    await expectLater(adapter.start('file'), throwsStateError);
+    await expectLater(adapter.prepare('device', sessionId: 'two'), throwsStateError);
+    expect(calls.where((call) => call.method == 'start').length, 1);
+    await adapter.close();
+    await adapter.prepare('device', sessionId: 'two');
+    await adapter.close();
+  });
+
 }

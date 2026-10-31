@@ -2,20 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:honeybox/services/ota/ota_platform.dart';
-
-class WaitingPlatform implements OtaPlatform {
-  final waiting = Completer<void>();
-  @override
-  bool get supported => true;
-  @override
-  Stream<Map<String, Object?>> get events => const Stream.empty();
-  @override
-  Future<void> prepare(String deviceId, {String? sessionId}) => waiting.future;
-  @override
-  Future<void> start(String filePath) async {}
-  @override
-  Future<void> close() async {}
-}
+import '../../helpers/ota_fake_platform.dart';
 
 void main() {
   test('unsupported platform cannot prepare or start an upgrade', () async {
@@ -55,11 +42,14 @@ void main() {
 
   test('prepare timeout bounds the wait without claiming native cancellation',
       () async {
-    final platform = WaitingPlatform();
+    final platform = OtaFakePlatform();
+    final waiting = Completer<void>();
+    platform.prepareDelay = waiting.future;
     await expectLater(
         platform.prepareWithTimeout('device', const Duration(milliseconds: 1)),
         throwsA(isA<TimeoutException>()));
-    expect(platform.waiting.isCompleted, isFalse);
-    platform.waiting.complete();
+    expect(waiting.isCompleted, isFalse);
+    waiting.complete();
+    await platform.controller.close();
   });
 }

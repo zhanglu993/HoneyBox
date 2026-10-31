@@ -1,36 +1,14 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:honeybox/pages/ota/realtek_ota_page.dart';
 import 'package:honeybox/providers/ble_provider.dart';
-import 'package:honeybox/services/ota/ota_platform.dart';
-
-class FakeOta implements OtaPlatform {
-  final controller =
-      StreamController<Map<String, Object?>>.broadcast(sync: true);
-  int prepares = 0;
-  String? sessionId;
-  @override
-  bool get supported => true;
-  @override
-  Stream<Map<String, Object?>> get events => controller.stream;
-  @override
-  Future<void> prepare(String deviceId, {String? sessionId}) async {
-    prepares++;
-    this.sessionId = sessionId;
-  }
-
-  @override
-  Future<void> start(String path) async {}
-  @override
-  Future<void> close() async {}
-}
+import '../../helpers/ota_fake_platform.dart';
 
 void main() {
   testWidgets('failed upgrade retains error details and offers reconnect',
       (tester) async {
-    final platform = FakeOta();
+    final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
         overrides: [otaPlatformProvider.overrideWithValue(platform)],
         child: MaterialApp(
@@ -55,7 +33,7 @@ void main() {
     await platform.controller.close();
   });
   testWidgets('stale events do not change the current session', (tester) async {
-    final platform = FakeOta();
+    final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
         overrides: [otaPlatformProvider.overrideWithValue(platform)],
         child: MaterialApp(
@@ -76,7 +54,7 @@ void main() {
   });
   testWidgets('SDK completion is explicitly pending verification',
       (tester) async {
-    final platform = FakeOta();
+    final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
         overrides: [otaPlatformProvider.overrideWithValue(platform)],
         child: MaterialApp(

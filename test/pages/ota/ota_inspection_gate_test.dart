@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:honeybox/pages/ota/realtek_ota_page.dart';
 import 'package:honeybox/providers/ble_provider.dart';
 import 'package:honeybox/services/ota/firmware_inspection.dart';
-import 'package:honeybox/services/ota/ota_platform.dart';
+import '../../helpers/ota_fake_platform.dart';
 import 'package:honeybox/services/ota/ota_preflight.dart';
 
 class _Picker extends FilePicker {
@@ -39,27 +37,11 @@ class _Parser implements FirmwareParser {
       ]);
 }
 
-class _Platform implements OtaPlatform {
-  final controller = StreamController<Map<String, Object?>>.broadcast(sync: true);
-  String? id;
-  int starts = 0;
-  @override
-  bool get supported => true;
-  @override
-  Stream<Map<String, Object?>> get events => controller.stream;
-  @override
-  Future<void> prepare(String deviceId, {String? sessionId}) async { id = sessionId; }
-  @override
-  Future<void> start(String filePath) async { starts++; }
-  @override
-  Future<void> close() async {}
-}
-
 void main() {
   for (final status in [OtaCheckStatus.block, OtaCheckStatus.unknown, OtaCheckStatus.pass]) {
     testWidgets('inspection ${status.name} gates start', (tester) async {
       FilePicker.platform = _Picker();
-      final platform = _Platform();
+      final platform = OtaFakePlatform();
       addTearDown(() async {
         await platform.controller.close();
       });
@@ -70,7 +52,7 @@ void main() {
       ], child: MaterialApp(home: RealtekOtaPage(
           device: ScanDevice(deviceId: 'device', name: 'test', rssi: -40)))));
       await tester.pump();
-      platform.controller.add({'sessionId': platform.id, 'ready': true});
+      platform.controller.add({'sessionId': platform.sessionId, 'ready': true});
       await tester.pump();
       await tester.tap(find.text('选择固件'));
       await tester.pump();
