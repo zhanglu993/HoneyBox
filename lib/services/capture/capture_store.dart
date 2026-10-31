@@ -18,6 +18,29 @@ class CaptureStore {
       CaptureStore(await getApplicationSupportDirectory());
   File get _profiles => File('${directory.path}/capture_profiles.json');
   Future<void> _scanWrites = Future.value();
+  Future<void> _notificationWrites = Future.value();
+
+  Future<Set<String>> loadReconnectNotifications() async {
+    await _notificationWrites;
+    final file = File('${directory.path}/capture_reconnect_notifications.json');
+    if (!await file.exists()) return {};
+    final data = jsonDecode(await file.readAsString()) as List;
+    return data.cast<String>().toSet();
+  }
+
+  Future<void> saveReconnectNotifications(Set<String> ids) {
+    final snapshot = ids.toList()..sort();
+    final operation = _notificationWrites.then((_) async {
+      await directory.create(recursive: true);
+      final file =
+          File('${directory.path}/capture_reconnect_notifications.json');
+      final temp = File('${file.path}.tmp');
+      await temp.writeAsString(jsonEncode(snapshot), flush: true);
+      await temp.rename(file.path);
+    });
+    _notificationWrites = operation.catchError((Object _) {});
+    return operation;
+  }
 
   Future<CaptureScanSettings> loadScanSettings() async {
     await _scanWrites;

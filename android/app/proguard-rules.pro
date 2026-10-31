@@ -2,6 +2,11 @@
 -dontwarn com.amap.ams.gnss.GnssSoftLocator
 -dontwarn net.jafama.FastMath
 
+# Bundled Realtek SDK contains optional SPP and USB transports; this app uses
+# GattDfuAdapter (BLE) and does not ship the separate optional transports.
+-dontwarn com.realsil.sdk.bbpro.core.**
+-dontwarn com.realsil.sdk.core.usb.**
+
 # AMap SDKs use reflection and JNI internally。三个包缺一不可：
 #   com.amap.**     对外 API 与地图/定位/搜索实现（jar 内 3038 个类）
 #   com.autonavi.** 地图内核与导航核心（668 个类）。native 层用 JNI 反射

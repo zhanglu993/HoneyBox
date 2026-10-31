@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 /// 应用启动器内可选的应用标识。新增应用时：先扩展本枚举，然后在
 /// [kAppCatalog] 追加一条对应记录，最后在 lib/app.dart 的路由分发里
 /// 增加对应 <App>AppRoot 的构造。
-enum AppId { ebadge, watch, dashboard, capture }
+enum AppId { ebadge, watch, dashboard, capture, ota }
 
 @immutable
 class AppEntry {
@@ -63,6 +63,15 @@ const List<AppEntry> kAppCatalog = <AppEntry>[
     deviceFilter: '*',
     implemented: true,
   ),
+  AppEntry(
+    id: AppId.ota,
+    title: 'OTA',
+    subtitle: '按芯片类型选择固件升级方案',
+    icon: Icons.system_update_alt,
+    accent: Color(0xFF3F6F9E),
+    deviceFilter: '*',
+    implemented: true,
+  ),
 ];
 
 String routeNameFor(AppId id) {
@@ -75,5 +84,7 @@ String routeNameFor(AppId id) {
       return '/dashboard-root';
     case AppId.capture:
       return '/capture-root';
+    case AppId.ota:
+      return '/ota-root';
   }
 }

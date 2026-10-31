@@ -19,7 +19,7 @@ class WatchOtaPage extends ConsumerStatefulWidget {
 class _WatchOtaPageState extends ConsumerState<WatchOtaPage> {
   Uint8List? _file;
   String? _name;
-  String _status = '选择 RTL8762D S200 固件';
+  String _status = '选择与设备匹配的 RTL8762D 固件';
   bool _running = false;
   double? _progress;
 
@@ -52,10 +52,8 @@ class _WatchOtaPageState extends ConsumerState<WatchOtaPage> {
   Future<void> _start() async {
     final selected = _file;
     final connected = ref.read(connectedDeviceProvider);
-    if (selected == null ||
-        connected == null ||
-        connected.name.toUpperCase() != 'S200') {
-      setState(() => _status = '请先连接 S200 并选择其固件');
+    if (selected == null || connected == null) {
+      setState(() => _status = '请先连接设备并选择匹配的固件');
       return;
     }
     setState(() {
@@ -98,7 +96,7 @@ class _WatchOtaPageState extends ConsumerState<WatchOtaPage> {
               child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Text('当前支持 RTL8762D S200',
+                    Text('RTL8762D · APP 镜像（400 KiB 布局）',
                         style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 16),
                     Text('设备：${connected?.name ?? '未连接'}'),
@@ -110,11 +108,10 @@ class _WatchOtaPageState extends ConsumerState<WatchOtaPage> {
                         child: const Text('选择 BIN 固件')),
                     const SizedBox(height: 12),
                     FilledButton(
-                        onPressed: _running ||
-                                _file == null ||
-                                connected?.name.toUpperCase() != 'S200'
-                            ? null
-                            : _start,
+                        onPressed:
+                            _running || _file == null || connected == null
+                                ? null
+                                : _start,
                         child: const Text('开始升级')),
                     const SizedBox(height: 24),
                     if (_progress != null)

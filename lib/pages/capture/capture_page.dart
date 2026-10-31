@@ -8,6 +8,7 @@ import '../../services/capture/capture_ble_transport.dart';
 import '../../services/capture/capture_models.dart';
 import '../../services/capture/capture_session.dart';
 import '../../services/capture/capture_store.dart';
+import '../../services/capture/reconnect_notification.dart';
 import 'capture_records_page.dart';
 import 'capture_setup_page.dart';
 
@@ -93,6 +94,8 @@ class _CapturePageState extends State<CapturePage> {
   CaptureStore? _store;
   final _sessions = <CaptureSession>[];
   final _selectedIds = <String>{};
+  final _notificationIds = <String>{};
+  final _reconnectTracker = ReconnectNotificationTracker();
   bool _startingBatch = false;
   bool _loading = true, _saving = false, _leaving = false, _canPop = false;
   String? _error;
@@ -116,6 +119,12 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   void _changed() {
+    for (final session in _sessions) {
+      if (_reconnectTracker.shouldNotify(session.profile.id, session.phase,
+          enabled: _notificationIds.contains(session.profile.id))) {
+        unawaited(_notifyReconnect(session));
+      }
+    }
     final awake = _sessions.any((s) => s.busy);
     if (Platform.isAndroid && awake != _awake) {
       _awake = awake;
@@ -128,6 +137,49 @@ class _CapturePageState extends State<CapturePage> {
     }
     _keepAlive();
     if (mounted) setState(() {});
+  }
+
+  Future<void> _notifyReconnect(CaptureSession session) async {
+    if (!Platform.isAndroid) return;
+    try {
+      final shown = await const MethodChannel('honeybox/capture-power')
+          .invokeMethod<bool>('notifyReconnect', {
+        'id': session.profile.id,
+        'name': session.profile.name,
+      });
+      if (shown == false) _message('重连通知未开启，请在系统设置中允许 HoneyBox 发送通知');
+    } catch (e) {
+      _message('发送重连通知失败：$e');
+    }
+  }
+
+  Future<void> _setReconnectNotification(
+      CaptureSession session, bool enabled) async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    final ids = {..._notificationIds};
+    if (enabled) {
+      ids.add(session.profile.id);
+    } else {
+      ids.remove(session.profile.id);
+    }
+    try {
+      await _store!.saveReconnectNotifications(ids);
+      if (!mounted) return;
+      setState(() {
+        _notificationIds
+          ..clear()
+          ..addAll(ids);
+      });
+      if (enabled && Platform.isAndroid) {
+        final status = await Permission.notification.request();
+        if (!status.isGranted) _message('请在系统设置中允许 HoneyBox 发送通知');
+      }
+    } catch (e) {
+      _message('重连通知设置保存失败：$e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   /// Notification permission and battery whitelist, asked once per page.
@@ -179,9 +231,13 @@ class _CapturePageState extends State<CapturePage> {
     });
     try {
       final store = widget.store ?? await CaptureStore.create();
-      final profiles = await store.loadProfiles();
+      final profilesFuture = store.loadProfiles();
+      final notificationsFuture = store.loadReconnectNotifications();
+      final profiles = await profilesFuture;
+      final notificationIds = await notificationsFuture;
       if (!mounted) return;
       _store = store;
+      _notificationIds.addAll(notificationIds);
       for (final p in profiles) {
         _sessions.add(_makeSession(p));
         _selectedIds.add(p.id);
@@ -300,6 +356,7 @@ class _CapturePageState extends State<CapturePage> {
           if (s != session) s.profile
       ]);
       _sessions.remove(session);
+      _reconnectTracker.remove(session.profile.id);
       _selectedIds.remove(session.profile.id);
       _cardKeys.remove(session);
       session.dispose();
@@ -629,6 +686,17 @@ class _CapturePageState extends State<CapturePage> {
                       style: Theme.of(context).textTheme.titleMedium)),
             ]),
             SelectableText(s.profile.id),
+            CheckboxListTile(
+              key: ValueKey('capture-reconnect-notify-${s.profile.id}'),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('意外断开时通知'),
+              subtitle: const Text('采集中断并开始重连时，通过通知栏提醒'),
+              value: _notificationIds.contains(s.profile.id),
+              onChanged: available
+                  ? (value) => _setReconnectNotification(s, value == true)
+                  : null,
+            ),
             Text(
                 '${labels[s.phase]} · ${s.packetCount} 包 · ${s.byteCount} 字节 · 重连 ${s.reconnectCount} 次'),
             for (final c in s.profile.channels)

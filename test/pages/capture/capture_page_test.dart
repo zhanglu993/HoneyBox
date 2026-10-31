@@ -105,6 +105,7 @@ void main() {
             const CaptureChannel(service: '180d', characteristic: '2a37'),
           ]),
         ]));
+    await tester.runAsync(() => store.saveReconnectNotifications({'B'}));
     await tester.runAsync(() async {
       await tester.pumpWidget(MaterialApp(home: CapturePage(store: store)));
       await Future<void>.delayed(const Duration(milliseconds: 100));
@@ -112,15 +113,33 @@ void main() {
     await tester.pumpAndSettle();
     // Pinned overview row plus the device card.
     expect(find.text('我的手表'), findsNWidgets(2));
-    expect(find.text('新传感器'), findsNWidgets(2));
+    expect(find.text('新传感器'), findsWidgets);
     final overview = find.byKey(const Key('capture-overview'));
     expect(find.descendant(of: overview, matching: find.text('2 台 · 采集中 0')),
         findsOneWidget);
     expect(find.descendant(of: overview, matching: find.text('未采集')),
         findsNWidgets(2));
     expect(find.textContaining('e0ff / ffe1'), findsOneWidget);
-    expect(find.textContaining('180d / 2a37'), findsOneWidget);
+    expect(
+        tester
+            .widget<CheckboxListTile>(
+                find.byKey(const ValueKey('capture-reconnect-notify-A')))
+            .value,
+        false);
     expect(find.text('开始选中（2）'), findsOneWidget);
+    await tester.scrollUntilVisible(find.textContaining('180d / 2a37'), 200,
+        scrollable: find
+            .descendant(
+                of: find.byType(ListView).last,
+                matching: find.byType(Scrollable))
+            .first);
+    expect(find.textContaining('180d / 2a37'), findsOneWidget);
+    expect(
+        tester
+            .widget<CheckboxListTile>(
+                find.byKey(const ValueKey('capture-reconnect-notify-B')))
+            .value,
+        true);
     await tester.pumpWidget(const SizedBox());
     await tester.runAsync(() => dir.delete(recursive: true));
   });

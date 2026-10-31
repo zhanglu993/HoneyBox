@@ -33,6 +33,19 @@ void main() {
     expect(find.widgetWithText(AppBar, '选择应用'), findsOneWidget);
   });
 
+  testWidgets('OTA 入口在数据采集下方，打开后选择芯片', (tester) async {
+    await tester.pumpWidget(wrap(const AppLauncherPage()));
+    final capture = find.text('数据采集');
+    final ota = find.text('OTA');
+    await tester.ensureVisible(ota);
+    expect(
+        tester.getTopLeft(ota).dy, greaterThan(tester.getTopLeft(capture).dy));
+    await tester.tap(ota);
+    await tester.pumpAndSettle();
+    expect(find.text('选择芯片类型'), findsOneWidget);
+    expect(find.text('RTL8762D'), findsOneWidget);
+  });
+
   testWidgets('主页面菜单只显示全局功能', (tester) async {
     await tester.pumpWidget(wrap(const AppLauncherPage()));
 

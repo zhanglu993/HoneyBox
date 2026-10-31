@@ -18,7 +18,7 @@ import 'pages/ota/ota_page.dart';
 import 'pages/watch/pages/watch_face_page.dart';
 import 'pages/watch/pages/watch_notification_page.dart';
 import 'pages/watch/pages/watch_health_page.dart';
-import 'pages/watch/pages/watch_ota_page.dart';
+import 'pages/ota/ota_chip_page.dart';
 
 class HoneyBoxApp extends StatelessWidget {
   const HoneyBoxApp({super.key});
@@ -112,7 +112,7 @@ class HoneyBoxApp extends StatelessWidget {
             );
             break;
           case '/watch-ota':
-            page = const WatchOtaPage();
+            page = const OtaChipPage();
             break;
           default:
             page = const EBadgeAppRoot();

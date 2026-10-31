@@ -60,6 +60,7 @@ class MainActivity : FlutterActivity() {
         NotificationListener.registerChannels(flutterEngine, applicationContext)
 
         val messenger = flutterEngine.dartExecutor.binaryMessenger
+        RealtekOtaBridge(this, messenger)
         val exporter = CaptureFileExporter(this)
         captureExporter = exporter
         MethodChannel(messenger, "honeybox/capture-export").setMethodCallHandler(exporter::handle)
@@ -82,6 +83,14 @@ class MainActivity : FlutterActivity() {
                     CaptureKeepAliveService.stop(this)
                 }
                 result.success(null)
+            } else if (call.method == "notifyReconnect") {
+                val id = call.argument<String>("id")
+                val name = call.argument<String>("name")
+                if (id == null || name == null) {
+                    result.error("invalid_arguments", "缺少设备信息", null)
+                } else {
+                    result.success(CaptureKeepAliveService.notifyReconnect(this, id, name))
+                }
             } else {
                 result.notImplemented()
             }

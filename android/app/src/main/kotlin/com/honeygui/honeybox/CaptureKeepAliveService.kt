@@ -76,6 +76,42 @@ class CaptureKeepAliveService : Service() {
         private const val CHANNEL_ID = "honeybox_capture"
         private const val NOTIFICATION_ID = 0xCA97
         private const val EXTRA_TEXT = "text"
+        private const val ALERT_CHANNEL_ID = "honeybox_capture_reconnect"
+
+        fun notifyReconnect(context: Context, id: String, name: String): Boolean {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(
+                    NotificationChannel(ALERT_CHANNEL_ID, "采集设备断连提醒", NotificationManager.IMPORTANCE_DEFAULT),
+                )
+                if (manager.getNotificationChannel(ALERT_CHANNEL_ID).importance == NotificationManager.IMPORTANCE_NONE) return false
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !manager.areNotificationsEnabled()) return false
+            val open = PendingIntent.getActivity(
+                context, 0,
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            @Suppress("DEPRECATION")
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(context, ALERT_CHANNEL_ID)
+            } else {
+                Notification.Builder(context)
+            }
+            val notification = builder
+                .setContentTitle("采集设备连接中断")
+                .setContentText("$name 已断开，正在尝试重连")
+                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build()
+            return try {
+                manager.notify(id, 0xCA98, notification)
+                true
+            } catch (_: SecurityException) {
+                false
+            }
+        }
 
         fun start(context: Context, text: String) {
             val intent = Intent(context, CaptureKeepAliveService::class.java).putExtra(EXTRA_TEXT, text)

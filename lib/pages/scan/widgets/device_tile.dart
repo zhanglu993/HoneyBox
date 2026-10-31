@@ -10,6 +10,7 @@ class DeviceTile extends StatelessWidget {
   final bool connectable;
   final bool isConnecting;
   final VoidCallback? onConnect;
+  final String actionLabel;
 
   /// 虚拟调试设备:在标签行额外显示一枚橙色"调试"徽标以示区分。
   final bool debug;
@@ -22,6 +23,7 @@ class DeviceTile extends StatelessWidget {
     this.connectable = true,
     this.isConnecting = false,
     this.onConnect,
+    this.actionLabel = '连接',
     this.debug = false,
   });
 
@@ -109,7 +111,7 @@ class DeviceTile extends StatelessWidget {
                           ),
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                        child: const Text('连接'),
+                        child: Text(actionLabel),
                       ),
               ),
             ],
