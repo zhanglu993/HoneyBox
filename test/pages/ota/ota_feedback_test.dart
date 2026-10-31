@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +7,9 @@ import 'package:honeybox/providers/ble_provider.dart';
 import '../../helpers/ota_fake_platform.dart';
 import 'package:honeybox/services/ota/device_probe.dart';
 import 'package:honeybox/services/ota/ota_ownership.dart';
+import 'package:honeybox/services/ota/ota_repository.dart';
+import 'package:honeybox/services/ota/ota_session.dart';
+import 'package:honeybox/pages/ota/ota_failure_card.dart';
 
 void main() {
   testWidgets('failed upgrade retains error details and offers reconnect',
@@ -31,6 +35,7 @@ void main() {
     });
     await tester.pumpAndSettle();
     expect(find.textContaining('517'), findsOneWidget);
+    expect(find.byType(OtaFailureCard), findsOneWidget);
     await tester.tap(find.text('重新连接'));
     await tester.pumpAndSettle();
     expect(platform.prepares, 2);
@@ -162,4 +167,29 @@ void main() {
       await platform.controller.close();
     });
   }
+  testWidgets('recent saved record is shown on a new page', (tester) async {
+    final directory = Directory.systemTemp.createTempSync('ota_page_history');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final repository = OtaRepository(directory);
+    final now = DateTime.utc(2026, 10, 31);
+    await tester.runAsync(() => repository.save(OtaSessionRecord(
+        sessionId: 'old', startedAt: now,
+        updatedAt: now, phase: OtaPhase.finished, outcome: OtaOutcome.failed,
+        deviceIdMasked: 'device-1234', firmwareName: 'firmware.bin',
+        firmwareSha256: '', phaseHistory: const [])));
+    final platform = OtaFakePlatform()..isSupported = false;
+    await tester.pumpWidget(ProviderScope(overrides: [
+      otaPlatformProvider.overrideWithValue(platform),
+      otaRepositoryProvider.overrideWith((ref) async => repository),
+    ], child: MaterialApp(home: RealtekOtaPage(
+        device: ScanDevice(deviceId: 'device-1234', name: 'test', rssi: -40)))));
+    for (var i = 0; i < 20 && find.textContaining('上次升级记录').evaluate().isEmpty; i++) {
+      await tester.runAsync(() async { await Future<void>.delayed(const Duration(milliseconds: 50)); });
+      await tester.pump();
+    }
+    expect(find.textContaining('上次升级记录'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await platform.controller.close();
+  });
+
 }
