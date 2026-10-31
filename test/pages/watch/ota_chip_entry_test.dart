@@ -1,3 +1,4 @@
+import '../../helpers/memory_ota_repository.dart';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -41,10 +42,15 @@ void main() {
   testWidgets('通用 OTA 接受固件文件，不预设 400 KiB 布局', (tester) async {
     FilePicker.platform = _Picker();
     await tester.pumpWidget(ProviderScope(
+        overrides: [
+          otaRepositoryProvider
+              .overrideWith((ref) async => MemoryOtaRepository()),
+        ],
         child: MaterialApp(
             home: RealtekOtaPage(
       device: ScanDevice(deviceId: 'AA:BB:CC', name: 'V101', rssi: -50),
     ))));
+    await tester.pump();
     await tester.tap(find.text('选择固件'));
     await tester.pumpAndSettle();
     expect(find.text('firmware.bin'), findsOneWidget);
@@ -52,6 +58,7 @@ void main() {
   testWidgets('选择有效固件后，V101 设备不因名称被禁止开始升级', (tester) async {
     FilePicker.platform = _Picker();
     await tester.pumpWidget(ProviderScope(overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
       connectedDeviceProvider.overrideWith((ref) =>
           ConnectedDeviceInfo(deviceId: 'test', name: 'V101', mtu: 23)),
     ], child: const MaterialApp(home: WatchOtaPage())));

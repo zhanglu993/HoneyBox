@@ -27,8 +27,9 @@ class OtaPhaseEntry {
 class OtaSessionRecord {
   final String sessionId;
   final DateTime startedAt, updatedAt;
-  final OtaPhase phase;
-  final OtaOutcome outcome;
+  final OtaPhase? phase;
+  final OtaOutcome? outcome;
+  final int? targetVersion, expectedIcType;
   final OtaFailure? failure;
   final String deviceIdMasked, firmwareName, firmwareSha256;
   final String _deviceId;
@@ -40,6 +41,8 @@ class OtaSessionRecord {
       required this.phase,
       required this.outcome,
       this.failure,
+      this.targetVersion,
+      this.expectedIcType,
       required String deviceIdMasked,
       required String firmwareName,
       required this.firmwareSha256,
@@ -57,8 +60,10 @@ class OtaSessionRecord {
         'sessionId': sessionId,
         'startedAt': startedAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
-        'phase': phase.name,
-        'outcome': outcome.name,
+        'phase': phase?.name,
+        'outcome': outcome?.name,
+        if (targetVersion != null) 'targetVersion': targetVersion,
+        if (expectedIcType != null) 'expectedIcType': expectedIcType,
         'deviceIdMasked': deviceIdMasked,
         'firmwareName': firmwareName,
         'firmwareSha256': RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(firmwareSha256)
@@ -85,8 +90,10 @@ class OtaSessionRecord {
         sessionId: json['sessionId'] as String,
         startedAt: DateTime.parse(json['startedAt'] as String),
         updatedAt: DateTime.parse(json['updatedAt'] as String),
-        phase: OtaPhase.values.byName(json['phase'] as String),
-        outcome: OtaOutcome.values.byName(json['outcome'] as String),
+        phase: json['phase'] == null ? null : OtaPhase.values.byName(json['phase'] as String),
+        outcome: json['outcome'] == null ? null : OtaOutcome.values.byName(json['outcome'] as String),
+        targetVersion: json['targetVersion'] as int?,
+        expectedIcType: json['expectedIcType'] as int?,
         deviceIdMasked: json['deviceIdMasked'] as String,
         firmwareName: json['firmwareName'] as String,
         firmwareSha256: json['firmwareSha256'] as String,
@@ -119,6 +126,28 @@ class OtaRepository {
       : now = now ?? DateTime.now;
   File _file(String id) =>
       File('${directory.path}/${sha256.convert(utf8.encode(id))}.json');
+  File get _activeFile => File('${directory.path}/active.json');
+
+  Future<void> saveActive(OtaSessionRecord record) async {
+    await directory.create(recursive: true);
+    final temporary = File('${directory.path}/active.tmp');
+    await temporary.writeAsString(jsonEncode(record.toJson()), flush: true);
+    await temporary.rename(_activeFile.path);
+  }
+
+  Future<OtaSessionRecord?> loadActive() async {
+    try {
+      return OtaSessionRecord.fromJson(
+          jsonDecode(await _activeFile.readAsString()) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> clearActive() async {
+    if (await _activeFile.exists()) await _activeFile.delete();
+  }
+
   Future<void> save(OtaSessionRecord record) async {
     await directory.create(recursive: true);
     await _file(record.sessionId)
@@ -133,7 +162,8 @@ class OtaRepository {
     if (!await directory.exists()) return [];
     final result = <OtaSessionRecord>[];
     await for (final entity in directory.list()) {
-      if (entity is! File || !entity.path.endsWith('.json')) continue;
+      if (entity is! File || !entity.path.endsWith('.json') ||
+          entity.path == _activeFile.path) continue;
       try {
         result.add(OtaSessionRecord.fromJson(
             jsonDecode(await entity.readAsString()) as Map<String, dynamic>));

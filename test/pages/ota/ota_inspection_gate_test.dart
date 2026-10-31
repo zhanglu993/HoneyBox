@@ -1,3 +1,4 @@
+import '../../helpers/memory_ota_repository.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -54,6 +55,7 @@ void main() {
       final platform = OtaFakePlatform();
       await tester.pumpWidget(ProviderScope(
           overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
             otaPlatformProvider.overrideWithValue(platform),
             otaBlePermissionProvider.overrideWithValue(() async => true),
             firmwareParserProvider
@@ -123,6 +125,7 @@ void main() {
       });
       await tester.pumpWidget(ProviderScope(
           overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
             otaPlatformProvider.overrideWithValue(platform),
             otaBlePermissionProvider.overrideWithValue(() async => true),
             firmwareParserProvider.overrideWithValue(parser),

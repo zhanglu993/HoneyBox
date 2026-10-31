@@ -1,3 +1,4 @@
+import '../../helpers/memory_ota_repository.dart';
 import 'dart:async';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
@@ -88,12 +89,9 @@ void main() {
       FilePicker.platform = Picker();
       final platform = OtaFakePlatform();
       final probe = WaitingProbe();
-      final directory = await tester.runAsync(
-          () async => Directory.systemTemp.createTempSync('postcheck'));
-      final repository = OtaRepository(directory!);
+      final repository = MemoryOtaRepository();
       addTearDown(() async {
         await platform.controller.close();
-        directory.deleteSync(recursive: true);
       });
       await tester.pumpWidget(ProviderScope(
           overrides: [
@@ -182,6 +180,7 @@ void main() {
     final probe = WaitingProbe();
     await tester.pumpWidget(ProviderScope(
         overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
           otaPlatformProvider.overrideWithValue(platform),
           otaBlePermissionProvider.overrideWithValue(() async => true),
           otaDeviceProbeProvider.overrideWithValue(OtaFakeProbe([])),

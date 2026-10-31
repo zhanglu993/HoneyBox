@@ -1,3 +1,4 @@
+import '../../helpers/memory_ota_repository.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,6 +18,7 @@ void main() {
     final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
         overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
           otaPlatformProvider.overrideWithValue(platform),
           otaBlePermissionProvider.overrideWithValue(() async => true)
         ],
@@ -47,6 +49,7 @@ void main() {
     final platform = OtaFakePlatform()..prepareError = StateError('connection');
     await tester.pumpWidget(ProviderScope(
         overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
           otaPlatformProvider.overrideWithValue(platform),
           otaBlePermissionProvider.overrideWithValue(() async => true),
           otaDeviceProbeProvider.overrideWithValue(OtaFakeProbe(platform.calls,
@@ -73,6 +76,7 @@ void main() {
         ..prepareError = StateError('connection');
       await tester.pumpWidget(ProviderScope(
           overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
             otaPlatformProvider.overrideWithValue(platform),
             otaBlePermissionProvider.overrideWithValue(() async => true),
             otaDeviceProbeProvider
@@ -92,6 +96,7 @@ void main() {
     final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
         overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
           otaPlatformProvider.overrideWithValue(platform),
           otaBlePermissionProvider.overrideWithValue(() async => true)
         ],
@@ -116,6 +121,7 @@ void main() {
     final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
         overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
           otaPlatformProvider.overrideWithValue(platform),
           otaBlePermissionProvider.overrideWithValue(() async => true)
         ],
@@ -141,6 +147,7 @@ void main() {
         (tester) async {
       final platform = OtaFakePlatform();
       final container = ProviderContainer(overrides: [
+        otaRepositoryProvider.overrideWith((ref) async => MemoryOtaRepository()),
         otaPlatformProvider.overrideWithValue(platform),
         otaBlePermissionProvider.overrideWithValue(() async => true),
       ]);

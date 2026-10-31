@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../services/ota/ota_failure.dart';
+import '../../services/ota/ota_session.dart';
+import '../../services/ota/ota_recovery_capability.dart';
 
 const otaMaxRetries = 2;
 
@@ -41,6 +43,9 @@ class OtaFailureCard extends StatelessWidget {
                   failure.deviceState!.isNotEmpty)
                 Text(failure.deviceState!),
               Text(failure.guidance),
+              if (failure.phase != null &&
+                  failure.phase!.index >= OtaPhase.transferring.index)
+                Text(OtaRecoveryCapabilities.forProfile(null).guidance(failure.phase)),
               Wrap(spacing: 8, children: [
                 OutlinedButton(
                     onPressed: failure.canRetry && retryCount < otaMaxRetries
