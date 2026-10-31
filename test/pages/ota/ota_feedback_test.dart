@@ -10,13 +10,15 @@ class FakeOta implements OtaPlatform {
   final controller =
       StreamController<Map<String, Object?>>.broadcast(sync: true);
   int prepares = 0;
+  String? sessionId;
   @override
   bool get supported => true;
   @override
   Stream<Map<String, Object?>> get events => controller.stream;
   @override
-  Future<void> prepare(String deviceId) async {
+  Future<void> prepare(String deviceId, {String? sessionId}) async {
     prepares++;
+    this.sessionId = sessionId;
   }
 
   @override
@@ -37,6 +39,7 @@ void main() {
                     ScanDevice(deviceId: 'opaque', name: 'test', rssi: -40)))));
     await tester.pump();
     platform.controller.add({
+      'sessionId': platform.sessionId,
       'done': true,
       'outcome': 'failed',
       'message': '升级失败',
@@ -51,6 +54,26 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await platform.controller.close();
   });
+  testWidgets('stale events do not change the current session', (tester) async {
+    final platform = FakeOta();
+    await tester.pumpWidget(ProviderScope(
+        overrides: [otaPlatformProvider.overrideWithValue(platform)],
+        child: MaterialApp(
+            home: RealtekOtaPage(
+                device:
+                    ScanDevice(deviceId: 'opaque', name: 'test', rssi: -40)))));
+    await tester.pump();
+    platform.controller.add({
+      'sessionId': 'stale',
+      'done': true,
+      'outcome': 'failed',
+      'message': 'stale error'
+    });
+    await tester.pump();
+    expect(find.text('stale error'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    await platform.controller.close();
+  });
   testWidgets('SDK completion is explicitly pending verification',
       (tester) async {
     final platform = FakeOta();
@@ -61,6 +84,7 @@ void main() {
                 device:
                     ScanDevice(deviceId: 'opaque', name: 'test', rssi: -40)))));
     platform.controller.add({
+      'sessionId': platform.sessionId,
       'done': true,
       'outcome': 'pendingVerification',
       'message': 'SDK报告完成',

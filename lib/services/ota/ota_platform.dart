@@ -47,7 +47,7 @@ class OtaPlatformEvent {
 abstract interface class OtaPlatform {
   bool get supported;
   Stream<Map<String, Object?>> get events;
-  Future<void> prepare(String deviceId);
+  Future<void> prepare(String deviceId, {String? sessionId});
   Future<void> start(String filePath);
   Future<void> close();
 }
@@ -77,7 +77,7 @@ class UnsupportedOtaPlatform implements OtaPlatform {
   @override
   Stream<Map<String, Object?>> get events => const Stream.empty();
   @override
-  Future<void> prepare(String deviceId) async =>
+  Future<void> prepare(String deviceId, {String? sessionId}) async =>
       throw UnsupportedError('当前平台暂不支持 OTA');
   @override
   Future<void> start(String filePath) async =>

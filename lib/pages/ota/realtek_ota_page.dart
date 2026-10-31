@@ -9,11 +9,28 @@ import '../../providers/ble_provider.dart';
 import '../../providers/rtl8762_ota_provider.dart';
 import '../../services/ota/ota_platform.dart';
 import '../../services/ota/android_realtek_ota_platform.dart';
+import '../../services/ota/firmware_inspection.dart';
+import '../../services/ota/ota_preflight.dart';
+import '../../services/ota/ota_session.dart';
 
 final otaPlatformProvider = Provider<OtaPlatform>((ref) =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android
-        ? const AndroidRealtekOtaPlatform()
+        ? AndroidRealtekOtaPlatform()
         : const UnsupportedOtaPlatform());
+
+final firmwareParserProvider = Provider<FirmwareParser>((ref) => _UnknownParser());
+final otaDeviceCapabilitiesProvider =
+    Provider<DeviceCapabilities>((ref) => const DeviceCapabilities());
+
+class _UnknownParser implements FirmwareParser {
+  @override
+  Future<FirmwareParseResult> parse(
+          String path, DeviceCapabilities capabilities) async =>
+      FirmwareParseResult(checks: [
+        const OtaCheck('format', OtaCheckStatus.unknown, '尚不支持固件格式检查'),
+        const OtaCheck('compatibility', OtaCheckStatus.unknown, '尚不支持设备兼容性检查'),
+      ]);
+}
 
 class RealtekOtaPage extends ConsumerStatefulWidget {
   final ScanDevice device;
@@ -35,6 +52,8 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
   String? _errorDetails;
   bool _pendingVerification = false;
   bool _preparing = false;
+  int _sessionSequence = 0;
+  OtaSession? _session;
 
   @override
   void initState() {
@@ -43,18 +62,47 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
     if (_platform.supported) {
       _subscription = _platform.events.listen((event) {
         if (!mounted) return;
+        final session = _session;
+        if (session == null || event['sessionId'] is! String) return;
+        final done = event['done'] == true;
+        final outcomeName = event['outcome'];
+        OtaOutcome? outcome;
+        if (outcomeName != null) {
+          final name = outcomeName == 'canceled' ? 'cancelled' : outcomeName;
+          for (final value in OtaOutcome.values) {
+            if (value.name == name) outcome = value;
+          }
+          if (outcome == null) return;
+        }
+        var phase = done ? OtaPhase.finished : session.phase;
+        if (event['phase'] != null) {
+          final phases = OtaPhase.values.where((p) => p.name == event['phase']);
+          if (phases.isEmpty) return;
+          phase = phases.first;
+        }
+        if (done != (phase == OtaPhase.finished)) return;
         final message = event['message'];
         final progress = event['progress'];
-        final done = event['done'] == true;
+        if (progress != null && progress is! num) return;
+        if (!session.apply(OtaEvent(
+          sessionId: event['sessionId'] as String,
+          phase: phase,
+          outcome: outcome,
+          progress: progress is num ? progress.toDouble() / 100 : null,
+          rawType: event['errorType'] is int ? event['errorType'] as int : null,
+          rawCode: event['errorCode'] is int ? event['errorCode'] as int : null,
+        ))) {
+          return;
+        }
         setState(() {
           if (message is String) _status = message;
-          if (progress is num) _progress = (progress / 100).clamp(0, 1);
+          if (progress is num) _progress = session.progress;
           if (done) _running = false;
           if (event['ready'] == true) _ready = true;
           if (done) _ready = false;
-          if (event['errorType'] != null || event['errorCode'] != null) {
+          if (session.rawType != null || session.rawCode != null) {
             _errorDetails =
-                'SDK 错误类型：${event['errorType'] ?? '未知'}，错误码：${event['errorCode'] ?? '未知'}';
+                'SDK 错误类型：${session.rawType ?? '未知'}，错误码：${session.rawCode ?? '未知'}';
           }
           if (done) {
             _pendingVerification = event['outcome'] == 'pendingVerification';
@@ -82,8 +130,13 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
     });
     try {
       if (mounted) setState(() => _status = '正在连接设备');
+      _session = null;
       await _platform.close();
-      await _platform.prepare(widget.device.deviceId);
+      final session = OtaSession(
+          '${DateTime.now().microsecondsSinceEpoch}-${_sessionSequence++}');
+      _session = session;
+      session.apply(OtaEvent(sessionId: session.id, phase: OtaPhase.preparing));
+      await _platform.prepare(widget.device.deviceId, sessionId: session.id);
     } catch (error) {
       if (mounted) setState(() => _status = '连接失败：$error');
     } finally {
@@ -123,7 +176,39 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
     });
     ref.read(rtl8762OtaInProgressProvider.notifier).state = true;
     try {
-      await _platform.start(_path!);
+      final path = _path!;
+      final session = _session;
+      final inspection = await FirmwareInspection.inspect(path,
+          ref.read(otaDeviceCapabilitiesProvider), ref.read(firmwareParserProvider));
+      if (!mounted) return;
+      if (session != _session || session?.outcome != null || !_ready) {
+        setState(() => _running = false);
+        ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
+        return;
+      }
+      if (!inspection.report.canStart) {
+        setState(() {
+          _running = false;
+          _status = inspection.report.checks
+              .where((check) => check.status != OtaCheckStatus.pass)
+              .map((check) => check.explanation).join('；');
+        });
+        ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
+        return;
+      }
+      final started = await inspection.startIfSafe(() async {
+        if (!mounted || session != _session || session?.outcome != null || !_ready) {
+          throw StateError('设备连接状态已改变');
+        }
+        await _platform.start(path);
+      });
+      if (!started && mounted) {
+        setState(() {
+          _running = false;
+          _status = '固件检查后发生变化或无法读取，请重新选择固件';
+        });
+        ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
+      }
     } catch (error) {
       if (mounted) {
         setState(() {

@@ -10,7 +10,7 @@ class WaitingPlatform implements OtaPlatform {
   @override
   Stream<Map<String, Object?>> get events => const Stream.empty();
   @override
-  Future<void> prepare(String deviceId) => waiting.future;
+  Future<void> prepare(String deviceId, {String? sessionId}) => waiting.future;
   @override
   Future<void> start(String filePath) async {}
   @override
