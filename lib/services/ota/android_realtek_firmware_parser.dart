@@ -123,15 +123,19 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
     final noBatteryCheck = profile != null && (threshold == null || source == BatterySource.none);
     final hasChargingSource = source == BatterySource.bwps || source == BatterySource.basAndBwps;
     final isCharging = hasChargingSource && charging == true;
-    final validBattery = batteryValue != null && batteryValue > 0 && batteryValue <= 100;
+    final validBattery = batteryValue != null && batteryValue >= 0 && batteryValue <= 100;
     final battery = noBatteryCheck || isCharging ||
             (validBattery && threshold != null && batteryValue >= threshold)
         ? OtaCheckStatus.pass : OtaCheckStatus.warn;
     final batteryExplanation = noBatteryCheck ? '档案未启用电量检查'
-        : isCharging ? '设备正在充电'
+        : isCharging ? '设备正在充电或已充满'
+        : hasChargingSource && charging == null && validBattery && threshold != null && batteryValue < threshold
+            ? '电量 $batteryValue% 低于 $threshold%，无法读取充电状态，设备在未充电时可能拒绝进入升级模式'
         : !validBattery ? '无法读取电量，请注意设备电量及充电状态'
         : threshold == null ? '无法确定电量阈值'
-        : batteryValue < threshold ? '电量 $batteryValue% 低于 $threshold%,设备在未充电时可能拒绝进入升级模式'
+        : batteryValue < threshold ? (hasChargingSource && charging == false
+            ? '电量 $batteryValue% 低于 $threshold%，已读到未充电，设备可能拒绝进入升级模式'
+            : '电量 $batteryValue% 低于 $threshold%，设备可能拒绝进入升级模式')
         : '电量 $batteryValue%，达到阈值 $threshold%';
     const missingProfile =
         '未找到匹配的设备档案,请在 OTA 档案注册表中添加(icType/imageId/customerName)';

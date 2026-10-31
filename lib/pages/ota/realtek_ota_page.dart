@@ -207,7 +207,8 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
       DeviceProbeResult probe;
       try {
         // 固件尚未选择，无法安全匹配档案。临时连接结束后才交给 SDK。
-        probe = await ref.read(otaDeviceProbeProvider).probe(widget.device.deviceId);
+        probe = await ref.read(otaDeviceProbeProvider).probe(widget.device.deviceId)
+            .timeout(const Duration(seconds: 35));
       } catch (error) {
         probe = const DeviceProbeResult();
         if (mounted) setState(() => _errorDetails = '设备预读取失败或超时，设备信息未知：$error');

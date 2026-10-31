@@ -150,7 +150,6 @@ class OtaProfileRegistry {
         tempBankSize: 0x64000,
         batteryMinPercent: 30,
         // 出处：固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核。
-        // BWPS 暂未实现读取，充电状态 unknown。
         batterySource: BatterySource.basAndBwps,
         batteryRequiresChargingBelowMin: true,
         evidence: '固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核'),

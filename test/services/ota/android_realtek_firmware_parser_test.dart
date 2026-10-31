@@ -141,6 +141,16 @@ void main() {
     expect(check(await inspect(device(9, 0, 1)), 'capacity'), OtaCheckStatus.pass);
     expect(check(await inspect(), 'capacity'), OtaCheckStatus.pass);
   });
+  test('battery warnings distinguish uncharged from unknown', () async {
+    for (final charging in [false, null]) {
+      final result = await inspect(DeviceCapabilities(confirmed: true,
+          currentVersion: 2, batteryPercent: 20, charging: charging));
+      final check = result.report.checks.firstWhere((c) => c.id == 'battery');
+      expect(check.status, OtaCheckStatus.warn);
+      expect(check.explanation, contains(charging == false ? '已读到未充电' : '无法读取充电状态'));
+      expect(result.report.canStart, isTrue);
+    }
+  });
   test('battery policy depends on profile source', () async {
     Future<OtaCheckStatus> battery(BatterySource source, int? value, bool? charging) async {
       final base = OtaProfileRegistry.defaultProfileById('s200');
@@ -158,6 +168,7 @@ void main() {
     expect(await battery(BatterySource.basAndBwps, 29, false), OtaCheckStatus.warn);
     expect(await battery(BatterySource.basAndBwps, 29, true), OtaCheckStatus.pass);
     expect(await battery(BatterySource.basAndBwps, 29, null), OtaCheckStatus.warn);
+    expect(await battery(BatterySource.basAndBwps, 80, null), OtaCheckStatus.pass);
     expect(await battery(BatterySource.bwps, null, true), OtaCheckStatus.pass);
   });
 
