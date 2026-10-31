@@ -25,6 +25,7 @@ import 'ota_failure_card.dart';
 import '../../services/ota/ota_failure.dart';
 import '../../services/ota/ota_progress.dart';
 import '../../services/ota/ota_repository.dart';
+import '../../services/ota/ota_postcheck.dart';
 
 final otaRepositoryProvider = FutureProvider<OtaRepository>((ref) async {
   final directory = await getApplicationDocumentsDirectory();
@@ -62,6 +63,8 @@ final otaDeviceProbeProvider = Provider<DeviceProbe>((ref) =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android
         ? const FlutterBlueDeviceProbe()
         : const UnknownDeviceProbe());
+final otaPostcheckerProvider = Provider<OtaPostchecker>(
+    (ref) => OtaPostchecker(ref.watch(otaDeviceProbeProvider)));
 final otaDeviceCapabilitiesProvider =
     Provider<DeviceCapabilities>((ref) => const DeviceCapabilities());
 
@@ -95,6 +98,9 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
   String? _errorDetails;
   bool _pendingVerification = false;
   bool _preparing = false;
+  bool _verifying = false;
+  int? _targetVersion, _expectedIcType;
+  PostcheckResult? _postcheck;
   int _sessionSequence = 0;
   OtaSession? _session;
   DeviceCapabilities? _capabilities;
@@ -227,6 +233,9 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
           }
           if (outcome == null) return;
         }
+        if (done && (outcome == null || outcome == OtaOutcome.verified)) {
+          outcome = OtaOutcome.pendingVerification;
+        }
         // The current native bridge reports these SDK states as messages.
         if (!done && event['phase'] == null) {
           if (event['progress'] is num &&
@@ -274,7 +283,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
             rawCode: event['errorCode'] is int ? event['errorCode'] as int : null);
         setState(() {
           if (message is String && session.failureDescription != '阶段超时') {
-            _status = message +
+            _status = (message.contains('升级成功') ? message.replaceAll('升级成功', 'SDK 报告完成') : message) +
                 (done &&
                         outcome == OtaOutcome.failed &&
                         (previousPhase == OtaPhase.preparing ||
@@ -287,7 +296,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
           if (event['ready'] == true) _ready = true;
           if (done) _ready = false;
           if (done) {
-            _pendingVerification = event['outcome'] == 'pendingVerification';
+            _pendingVerification = outcome == OtaOutcome.pendingVerification;
           }
         });
         if (done) {
@@ -320,6 +329,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
   }
 
   Future<void> _prepare() async {
+    if (_pendingVerification || _verifying) return;
     if (_preparing ||
         _running ||
         (_session != null && _session!.outcome == null)) {
@@ -444,13 +454,21 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
       final result = await FilePicker.platform.pickFiles(type: FileType.any);
       if (!mounted || result == null) return;
       final file = result.files.single;
+      final restart = file.path != null && (_pendingVerification || _postcheck != null);
       setState(() {
+        if (restart) {
+          _pendingVerification = false;
+          _postcheck = null;
+          _targetVersion = null;
+          _expectedIcType = null;
+        }
         _path = file.path;
         _name = file.name;
         _status = file.path == null ? '无法读取所选文件' : '已选择固件';
         _progress = null;
         _checks = const [];
       });
+      if (restart && file.path != null) await _prepare();
     } catch (error) {
       if (mounted) setState(() => _status = '选择文件失败：$error');
     }
@@ -532,6 +550,9 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
         return;
       }
+      _targetVersion = target;
+      _expectedIcType = capabilities.otaDeviceInfo?.icType;
+      _postcheck = null;
       final started = await inspection.startIfSafe(() async {
         final permission = await ref.read(otaBlePermissionProvider)();
         if (!mounted ||
@@ -594,6 +615,71 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
     }
   }
 
+  Future<void> _verify() async {
+    if (_running || _preparing || _verifying || !_pendingVerification) return;
+    setState(() => _verifying = true);
+    var acquired = false;
+    try {
+      PostcheckResult result;
+      if (_targetVersion == null) {
+        result = const PostcheckResult(status: PostcheckStatus.unavailable,
+            reason: '目标版本未知，无法自动核验。',
+            guidance: '请重新连接设备，在设备信息中手动核对固件版本和设备身份。');
+      } else if (ref.read(connectedDeviceProvider) != null) {
+        result = const PostcheckResult(status: PostcheckStatus.unavailable,
+            reason: '普通连接正在占用蓝牙。', guidance: '请先断开普通连接后核验。');
+      } else {
+        final ownership = _ownership.acquire(OtaOwner.ota);
+        acquired = ownership.success;
+        if (!acquired) {
+          result = PostcheckResult(status: PostcheckStatus.unavailable,
+              reason: ownership.reason ?? '蓝牙正在使用。', guidance: '请释放蓝牙后重试核验。');
+        } else {
+          try {
+            await _platform.close();
+            result = await ref.read(otaPostcheckerProvider).verifyTarget(
+                expectedIdentity: OtaExpectedIdentity(deviceId: widget.device.deviceId,
+                    icType: _expectedIcType), expectedVersion: _targetVersion!);
+          } catch (_) {
+            result = PostcheckResult(status: PostcheckStatus.unavailable,
+                reason: '无法连接设备进行核验。',
+                guidance: '请重新连接设备，在设备信息中确认版本为 ${formatOtaVersion(_targetVersion!)}，并确认设备身份。');
+          }
+        }
+      }
+      final session = _session;
+      if (session != null) {
+        final now = DateTime.now();
+        final record = OtaSessionRecord(sessionId: session.id,
+            startedAt: _startedAt ?? now, updatedAt: now, phase: OtaPhase.finished,
+            outcome: switch (result.status) {
+              PostcheckStatus.verified => OtaOutcome.verified,
+              PostcheckStatus.mismatch => OtaOutcome.failed,
+              PostcheckStatus.unavailable => OtaOutcome.pendingVerification,
+            }, deviceIdMasked: widget.device.deviceId, firmwareName: _name ?? '',
+            firmwareSha256: _firmwareSha256, phaseHistory: [..._phaseHistory]);
+        final repository = ref.read(otaRepositoryProvider.future);
+        _saveQueue = _saveQueue.then((_) async {
+          try { await (await repository).save(record); } catch (_) {}
+        });
+      }
+      if (mounted) setState(() {
+        _postcheck = result;
+        _pendingVerification = result.status == PostcheckStatus.unavailable;
+        _status = switch (result.status) {
+          PostcheckStatus.verified => '已核验：设备身份与版本 ${formatOtaVersion(result.observedVersion!)} 一致',
+          PostcheckStatus.mismatch => '核验失败：${result.reason}',
+          PostcheckStatus.unavailable => '结果待核验：${result.reason}',
+        };
+      });
+    } catch (_) {
+      if (mounted) setState(() => _status = '结果待核验：核验失败，请重新连接设备并在设备信息中手动确认版本。');
+    } finally {
+      if (acquired) _ownership.release(OtaOwner.ota);
+      if (mounted) setState(() => _verifying = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => PopScope(
         canPop: !_running,
@@ -610,7 +696,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
                   const SizedBox(height: 12),
                   Text(_name ?? '尚未选择固件'),
                   OutlinedButton(
-                      onPressed: _running ? null : _choose,
+                      onPressed: _running || _verifying ? null : _choose,
                       child: const Text('选择固件')),
                   FilledButton(
                       onPressed: !_running &&
@@ -640,13 +726,18 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
                                   : Colors.red),
                       title: Text(check.explanation),
                     ),
-                  if (_pendingVerification)
+                  if (_pendingVerification && _postcheck == null)
                     const Text('结果待核验：SDK 已报告完成，尚未确认设备运行的新固件版本。'),
+                  if (_postcheck != null && _postcheck!.guidance.isNotEmpty)
+                    Text(_postcheck!.guidance),
+                  if (_pendingVerification)
+                    OutlinedButton(onPressed: _running || _preparing || _verifying ? null : _verify,
+                        child: const Text('核验升级结果')),
                   if (_errorDetails != null) SelectableText(_errorDetails!),
                   if (_failure != null) OtaFailureCard(failure: _failure!, retryCount: _retryCount,
                     onRetry: () { setState(() => _retryCount++); unawaited(_prepare()); },
                     onCopy: _copyDiagnostics),
-                  if (!_running && _platform.supported)
+                  if (!_running && !_pendingVerification && !_verifying && _postcheck == null && _platform.supported)
                     OutlinedButton(
                       onPressed: _preparing || (_failure != null &&
                               (!_failure!.canRetry || _retryCount >= otaMaxRetries))
