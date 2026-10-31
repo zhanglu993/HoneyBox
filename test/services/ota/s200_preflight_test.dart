@@ -53,13 +53,14 @@ void main() {
           int? battery = 50,
           bool? charging = false,
           OtaProfileRegistry registry = const OtaProfileRegistry(),
-          int? reportedCapacity}) =>
+          int? reportedCapacity,
+          int? expectedIcType = 9}) =>
       FirmwareInspection.inspect(
           file.path,
           DeviceCapabilities(
               confirmed: true,
               currentVersion: version,
-              expectedIcType: 9,
+              expectedIcType: expectedIcType,
               deviceReportedCapacity: reportedCapacity,
               batteryPercent: battery,
               charging: charging),
@@ -115,7 +116,6 @@ void main() {
     expect(result.report.canStart, isTrue);
   });
   for (final entry in {
-    'customer': 512 + 0x68,
     'commit': 512 + 0x64,
     'ic': 512,
     'image id': 512 + 4,
@@ -124,17 +124,12 @@ void main() {
     test('${entry.key} mismatch blocks', () async {
       await mutate(entry.value, 0, fixHash: entry.key != 'payload');
       expect((await inspect()).report.canStart, isFalse);
-      if (entry.key != 'customer') {
-        expect(
-            (await inspect())
-                .report
-                .checks
-                .any((c) => c.status == OtaCheckStatus.block),
-            isTrue);
-      } else {
-        expect(
-            status(await inspect(), 'compatibility'), OtaCheckStatus.unknown);
-      }
+      expect(
+          (await inspect())
+              .report
+              .checks
+              .any((c) => c.status == OtaCheckStatus.block),
+          isTrue);
     });
   }
   test('synthetic image exceeding 0x64000 blocks', () async {
@@ -165,17 +160,53 @@ void main() {
       {'imageId': 0x2793, 'binId': 0x300, 'size': size - 12, 'version': 3}
     ];
     expect(status(await inspect(), 'capacity'), OtaCheckStatus.block);
+    expect(status(await inspect(registry: const OtaProfileRegistry([])), 'capacity'), OtaCheckStatus.block);
   });
-  test('unknown profile is fail closed with guidance', () async {
+  test('empty registry uses generic checks', () async {
     final result = await inspect(registry: const OtaProfileRegistry([]));
-    expect(status(result, 'compatibility'), OtaCheckStatus.unknown);
-    expect(status(result, 'capacity'), OtaCheckStatus.unknown);
-    expect(result.report.canStart, isFalse);
-    expect(
-        result.report.checks
-            .firstWhere((c) => c.id == 'compatibility')
-            .explanation,
-        contains('请在 OTA 档案注册表中添加'));
+    expect(status(result, 'compatibility'), OtaCheckStatus.pass);
+    expect(status(result, 'capacity'), OtaCheckStatus.pass);
+    expect(result.report.canStart, isTrue);
+    expect(result.report.checks.firstWhere((c) => c.id == 'compatibility').explanation,
+        isNot(contains('档案注册表')));
+  });
+  test('ambiguous profiles use generic checks', () async {
+    final profile = OtaProfileRegistry.defaultProfileById('s200');
+    final result = await inspect(registry: OtaProfileRegistry([profile, profile]));
+    expect(status(result, 'compatibility'), OtaCheckStatus.pass);
+    expect(status(result, 'capacity'), OtaCheckStatus.pass);
+    expect(result.report.canStart, isTrue);
+  });
+  test('S100-like customer uses generic checks', () async {
+    for (var i = 0; i < 'S100_62#'.length; i++) {
+      await mutate(512 + 0x68 + i, 'S100_62#'.codeUnitAt(i));
+    }
+    final result = await inspect();
+    expect(result.report.canStart, isTrue);
+    expect(result.report.checks.any((c) => c.status == OtaCheckStatus.block), isFalse);
+  });
+  test('generic chip mismatch blocks', () async {
+    final result = await inspect(registry: const OtaProfileRegistry([]), expectedIcType: 8);
+    expect(status(result, 'chip'), OtaCheckStatus.block);
+    expect(status(result, 'compatibility'), OtaCheckStatus.block);
+  });
+  test('unconfirmed chip uses header default with warning', () async {
+    final result = await inspect(registry: const OtaProfileRegistry([]), expectedIcType: null);
+    expect(status(result, 'chip'), OtaCheckStatus.unknown);
+    expect(status(result, 'compatibility'), OtaCheckStatus.warn);
+    expect(status(result, 'capacity'), OtaCheckStatus.warn);
+  });
+  test('reported capacity blocks oversized image without profile', () async {
+    final result = await inspect(registry: const OtaProfileRegistry([]), reportedCapacity: 1039);
+    expect(status(result, 'capacity'), OtaCheckStatus.block);
+  });
+  test('generic low battery warns and charging passes', () async {
+    const registry = OtaProfileRegistry([]);
+    final low = await inspect(registry: registry, battery: 20);
+    expect(status(low, 'battery'), OtaCheckStatus.warn);
+    expect(low.report.canStart, isTrue);
+    expect(low.report.checks.firstWhere((c) => c.id == 'battery').explanation, contains('30%'));
+    expect(status(await inspect(registry: registry, battery: 20, charging: true), 'battery'), OtaCheckStatus.pass);
   });
   test('APP bank capacity comes from the matched profile', () async {
     const size = 0x90000;
