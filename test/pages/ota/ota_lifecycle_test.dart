@@ -7,7 +7,6 @@ import 'package:honeybox/providers/ble_provider.dart';
 import 'package:honeybox/services/ota/device_probe.dart';
 import 'package:honeybox/services/ota/ota_postcheck.dart';
 import 'package:honeybox/services/ota/ota_repository.dart';
-import 'package:honeybox/services/ota/ota_session.dart';
 import '../../helpers/ota_fake_platform.dart';
 import 'ota_postcheck_page_test.dart' show info;
 

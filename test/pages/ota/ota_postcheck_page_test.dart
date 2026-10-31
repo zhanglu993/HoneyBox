@@ -1,6 +1,5 @@
 import '../../helpers/memory_ota_repository.dart';
 import 'dart:async';
-import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
