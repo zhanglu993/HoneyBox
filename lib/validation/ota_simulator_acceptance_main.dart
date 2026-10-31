@@ -97,7 +97,8 @@ Future<int> readVersion() async {
 class _SimulatorContractParser implements FirmwareParser {
   final int currentVersion;
   final int? battery;
-  _SimulatorContractParser(this.currentVersion, this.battery);
+  final bool? charging;
+  _SimulatorContractParser(this.currentVersion, this.battery, [this.charging]);
   @override
   Future<FirmwareParseResult> parse(
       String path, DeviceCapabilities capabilities) async {
@@ -138,7 +139,7 @@ class _SimulatorContractParser implements FirmwareParser {
                 : OtaCheckStatus.warn,
             battery == null || battery == 0
                 ? '无法读取电量'
-                : '电量 $battery%（阈值 30%）'),
+                : '电量 $battery%（阈值 30%），充电状态 ${charging ?? '未知'}'),
       ],
     );
   }
@@ -195,6 +196,7 @@ Future<void> accept() async {
     record('probe', {
       'version': probed.currentVersion?.toRadixString(16),
       'battery': probed.batteryPercent,
+      'charging': probed.charging,
       'icType': probed.otaDeviceInfo?.icType,
     });
     if (const bool.fromEnvironment('OTA_SIMULATOR_DART_ENGINE')) {
@@ -248,7 +250,7 @@ Future<void> accept() async {
     final inspection = await FirmwareInspection.inspect(
         file.path,
         DeviceCapabilities(confirmed: true, currentVersion: before),
-        _SimulatorContractParser(before, probed.batteryPercent));
+        _SimulatorContractParser(before, probed.batteryPercent, probed.charging));
     record('inspection', {
       'sha256': inspection.sha256,
       'canStart': inspection.report.canStart,
