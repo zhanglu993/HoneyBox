@@ -9,6 +9,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/ota/android_realtek_firmware_parser.dart';
 import '../services/ota/android_realtek_ota_platform.dart';
+import '../services/ota/device_probe.dart';
 import '../services/ota/firmware_inspection.dart';
 import '../services/ota/ota_preflight.dart';
 import '../services/ota/rtl8762_upgrade.dart';
@@ -95,7 +96,8 @@ Future<int> readVersion() async {
 /// simulator contract (target version at offset 0x60) supplies the pass verdict.
 class _SimulatorContractParser implements FirmwareParser {
   final int currentVersion;
-  _SimulatorContractParser(this.currentVersion);
+  final int? battery;
+  _SimulatorContractParser(this.currentVersion, this.battery);
   @override
   Future<FirmwareParseResult> parse(
       String path, DeviceCapabilities capabilities) async {
@@ -125,8 +127,18 @@ class _SimulatorContractParser implements FirmwareParser {
             'version',
             target != null && target > currentVersion
                 ? OtaCheckStatus.pass
-                : OtaCheckStatus.block,
-            '目标 0x${target?.toRadixString(16)} 对当前 0x${currentVersion.toRadixString(16)}'),
+                : OtaCheckStatus.warn,
+            target == null
+                ? '无法读取目标版本'
+                : '${target > currentVersion ? '升级' : target == currentVersion ? '版本相同' : '降级'}：当前 ${formatOtaVersion(currentVersion)} → 目标 ${formatOtaVersion(target)}'),
+        OtaCheck(
+            'battery',
+            battery != null && battery! > 0 && battery! >= 30
+                ? OtaCheckStatus.pass
+                : OtaCheckStatus.warn,
+            battery == null || battery == 0
+                ? '无法读取电量'
+                : '电量 $battery%（阈值 30%）'),
       ],
     );
   }
@@ -179,6 +191,12 @@ Future<void> accept() async {
     record('targetVerified', {'name': simulator, 'address': address});
     final before = await readVersion();
     record('versionBefore', {'version': '0x${before.toRadixString(16)}'});
+    final probed = await const FlutterBlueDeviceProbe().probe(address);
+    record('probe', {
+      'version': probed.currentVersion?.toRadixString(16),
+      'battery': probed.batteryPercent,
+      'icType': probed.otaDeviceInfo?.icType,
+    });
     if (const bool.fromEnvironment('OTA_SIMULATOR_DART_ENGINE')) {
       record('engine', {'implementation': 'existing HoneyBox Rtl8762Upgrade'});
       await Rtl8762Upgrade(Rtl8762FlutterBlueAdapter(address),
@@ -230,7 +248,7 @@ Future<void> accept() async {
     final inspection = await FirmwareInspection.inspect(
         file.path,
         DeviceCapabilities(confirmed: true, currentVersion: before),
-        _SimulatorContractParser(before));
+        _SimulatorContractParser(before, probed.batteryPercent));
     record('inspection', {
       'sha256': inspection.sha256,
       'canStart': inspection.report.canStart,
@@ -241,6 +259,12 @@ Future<void> accept() async {
     if (!inspection.report.canStart || !await inspection.verifyUnchanged()) {
       throw StateError('固件检查门禁未通过，拒绝写入');
     }
+    final warnings = inspection.report.checks
+        .where((c) => c.status == OtaCheckStatus.warn)
+        .map((c) => '${c.id}:${c.explanation}')
+        .toList();
+    // 验收入口自动代替用户点击“确认继续”，并记录被确认的警告。
+    if (warnings.isNotEmpty) record('warningsConfirmed', {'warnings': warnings});
     await platform.start(file.path);
     record('sdkStarted', {});
     final result = await terminal.future.timeout(const Duration(seconds: 90));
