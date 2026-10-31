@@ -13,19 +13,23 @@ import '../../services/ota/android_realtek_firmware_parser.dart';
 import '../../services/ota/firmware_inspection.dart';
 import '../../services/ota/ota_preflight.dart';
 import '../../services/ota/ota_session.dart';
+import '../../services/ota/ota_device_profile.dart';
 
 final otaPlatformProvider = Provider<OtaPlatform>((ref) =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android
         ? AndroidRealtekOtaPlatform()
         : const UnsupportedOtaPlatform());
 
+final otaProfileRegistryProvider =
+    Provider<OtaProfileRegistry>((ref) => const OtaProfileRegistry());
+
 final firmwareParserProvider = Provider<FirmwareParser>((ref) =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android
-        ? const AndroidRealtekFirmwareParser() : _UnknownParser());
-// Product configuration for the RTL8762D entry; this is not device readback.
-const rtl8762dExpectedIcType = 9;
-final otaDeviceCapabilitiesProvider = Provider<DeviceCapabilities>((ref) =>
-    const DeviceCapabilities(expectedIcType: rtl8762dExpectedIcType));
+        ? AndroidRealtekFirmwareParser(
+            registry: ref.watch(otaProfileRegistryProvider))
+        : _UnknownParser());
+final otaDeviceCapabilitiesProvider =
+    Provider<DeviceCapabilities>((ref) => const DeviceCapabilities());
 
 class _UnknownParser implements FirmwareParser {
   @override
@@ -59,6 +63,8 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
   bool _preparing = false;
   int _sessionSequence = 0;
   OtaSession? _session;
+  DeviceCapabilities? _capabilities;
+  bool _disposed = false;
 
   @override
   void initState() {
@@ -137,6 +143,18 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
       if (mounted) setState(() => _status = '正在连接设备');
       _session = null;
       await _platform.close();
+      var capabilities = ref.read(otaDeviceCapabilitiesProvider);
+      if (_platform is AndroidRealtekOtaPlatform) {
+        capabilities = await _platform.deviceCapabilities(
+            widget.device.deviceId,
+            expectedIcType: capabilities.expectedIcType,
+            deviceReportedCapacity: capabilities.deviceReportedCapacity,
+            batteryPercent: capabilities.batteryPercent,
+            charging: capabilities.charging,
+            allowSameOrOlderVersion: capabilities.allowSameOrOlderVersion);
+      }
+      if (_disposed) return;
+      _capabilities = capabilities;
       final session = OtaSession(
           '${DateTime.now().microsecondsSinceEpoch}-${_sessionSequence++}');
       _session = session;
@@ -151,6 +169,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
 
   @override
   void dispose() {
+    _disposed = true;
     _subscription?.cancel();
     unawaited(_platform.close().catchError((Object _) {}));
     super.dispose();
@@ -183,13 +202,10 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
     try {
       final path = _path!;
       final session = _session;
-      var capabilities = ref.read(otaDeviceCapabilitiesProvider);
-      if (!capabilities.confirmed && _platform is AndroidRealtekOtaPlatform) {
-        capabilities = await _platform.deviceCapabilities(
-            expectedIcType: capabilities.expectedIcType);
-      }
-      final inspection = await FirmwareInspection.inspect(path,
-          capabilities, ref.read(firmwareParserProvider));
+      final DeviceCapabilities capabilities =
+          _capabilities ?? ref.read(otaDeviceCapabilitiesProvider);
+      final inspection = await FirmwareInspection.inspect(
+          path, capabilities, ref.read(firmwareParserProvider));
       if (!mounted) return;
       if (session != _session || session?.outcome != null || !_ready) {
         setState(() => _running = false);
@@ -201,13 +217,17 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
           _running = false;
           _status = inspection.report.checks
               .where((check) => check.status != OtaCheckStatus.pass)
-              .map((check) => check.explanation).join('；');
+              .map((check) => check.explanation)
+              .join('；');
         });
         ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
         return;
       }
       final started = await inspection.startIfSafe(() async {
-        if (!mounted || session != _session || session?.outcome != null || !_ready) {
+        if (!mounted ||
+            session != _session ||
+            session?.outcome != null ||
+            !_ready) {
           throw StateError('设备连接状态已改变');
         }
         await _platform.start(path);

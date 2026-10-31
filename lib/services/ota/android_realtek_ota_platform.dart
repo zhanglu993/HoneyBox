@@ -1,11 +1,16 @@
 import 'package:flutter/services.dart';
 import 'ota_platform.dart';
 import 'firmware_inspection.dart';
+import 'device_version_reader.dart';
 
 /// Android channel adapter. Closing cannot cancel a native transfer.
 class AndroidRealtekOtaPlatform implements OtaPlatform {
   static const _commands = MethodChannel('honeybox/realtek-ota');
   static const _events = EventChannel('honeybox/realtek-ota/events');
+  final DeviceVersionReader versionReader;
+  AndroidRealtekOtaPlatform(
+      {this.versionReader = const FlutterBlueDeviceVersionReader()});
+  bool _reading = false;
   bool _needsClose = false;
   bool _preparing = false;
   @override
@@ -15,25 +20,34 @@ class AndroidRealtekOtaPlatform implements OtaPlatform {
       .receiveBroadcastStream()
       .where((e) => e is Map)
       .map((e) => Map<String, Object?>.from(e as Map));
-  Future<DeviceCapabilities> deviceCapabilities({int? expectedIcType}) async {
-    final values = await _commands.invokeMapMethod<String, Object?>('deviceCapabilities');
-    final ic = values?['icType'];
-    final id = values?['imageId'];
-    final version = values?['currentVersion'];
-    final capacity = values?['capacity'];
-    return DeviceCapabilities(
-      confirmed: ic is int && ic > 0 && id is int && id > 0 &&
-          version is int && version >= 0 && capacity is int && capacity > 0,
-      expectedIcType: expectedIcType,
-      icType: ic is int ? ic : null, imageId: id is int ? id : null,
-      currentVersion: version is int ? version : null,
-      capacity: capacity is int ? capacity : null,
-    );
+  Future<DeviceCapabilities> deviceCapabilities(String deviceId,
+      {int? expectedIcType,
+      int? deviceReportedCapacity,
+      int? batteryPercent,
+      bool? charging,
+      bool allowSameOrOlderVersion = false}) async {
+    if (_reading || _preparing || _needsClose) {
+      throw StateError('OTA 连接正在使用，无法读取版本');
+    }
+    _reading = true;
+    try {
+      final version = await versionReader.readVersion(deviceId);
+      return DeviceCapabilities(
+          confirmed: version != null,
+          expectedIcType: expectedIcType,
+          deviceReportedCapacity: deviceReportedCapacity,
+          currentVersion: version,
+          batteryPercent: batteryPercent,
+          charging: charging,
+          allowSameOrOlderVersion: allowSameOrOlderVersion);
+    } finally {
+      _reading = false;
+    }
   }
 
   @override
   Future<void> prepare(String deviceId, {String? sessionId}) async {
-    if (_preparing || _needsClose) throw StateError('OTA 会话尚未关闭');
+    if (_reading || _preparing || _needsClose) throw StateError('OTA 会话尚未关闭');
     if (sessionId == null || sessionId.isEmpty) {
       throw ArgumentError('sessionId required');
     }
