@@ -18,9 +18,13 @@ import '../services/ota/rtl8762_default_key.dart';
 
 const address = '04:7F:0E:00:7F:76';
 const simulator = 'JW-OTA-SIM';
-const filename = 'SIMULATOR-ONLY-DO-NOT-FLASH.bin';
-const expectedHash =
-    'e26715329dc435e1815ac796739ca332879ae561b01359a65b7404e7621819d8';
+const filename = String.fromEnvironment('OTA_SIM_FILENAME',
+    defaultValue: 'SIMULATOR-ONLY-DO-NOT-FLASH.bin');
+const expectedHash = String.fromEnvironment('OTA_SIM_SHA256',
+    defaultValue:
+        'e26715329dc435e1815ac796739ca332879ae561b01359a65b7404e7621819d8');
+// 版本字段偏移：裸镜像 0x60；带 512B MP 头的镜像为 0x260。
+const versionOffset = int.fromEnvironment('OTA_SIM_VERSION_OFFSET', defaultValue: 0x60);
 const expectedVersion = 0x12345678;
 final output = ValueNotifier<String>('等待测试');
 Future<void> diagnose() async {
@@ -102,9 +106,9 @@ class _SimulatorContractParser implements FirmwareParser {
     });
     final bytes = await File(path).readAsBytes();
     final known = sha256.convert(bytes).toString() == expectedHash;
-    final target = bytes.length >= 0x64
+    final target = bytes.length >= versionOffset + 4
         ? ByteData.sublistView(Uint8List.fromList(bytes))
-            .getUint32(0x60, Endian.little)
+            .getUint32(versionOffset, Endian.little)
         : null;
     final contractOk = known && target == expectedVersion;
     return FirmwareParseResult(
