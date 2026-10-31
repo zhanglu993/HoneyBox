@@ -13,7 +13,9 @@ class PreflightReport {
   PreflightReport(Iterable<OtaCheck> checks)
       : checks = List.unmodifiable(checks);
   bool get canStart =>
-      checks.isNotEmpty && checks.every((c) => c.status == OtaCheckStatus.pass || c.status == OtaCheckStatus.warn);
+      checks.isNotEmpty &&
+      checks.every((c) =>
+          c.status == OtaCheckStatus.pass || c.status == OtaCheckStatus.warn);
 }
 
 /// Required checks are supplied by the protocol adapter, not by device name.
@@ -39,3 +41,33 @@ PreflightReport evaluateOtaPreflight({
   }
   return PreflightReport(results);
 }
+
+class EnvironmentStatus {
+  final bool? blePermissionGranted;
+  final String? ownershipConflict;
+  const EnvironmentStatus({this.blePermissionGranted, this.ownershipConflict});
+}
+
+PreflightReport addEnvironmentChecks(
+        PreflightReport report, EnvironmentStatus environment) =>
+    PreflightReport([
+      ...report.checks,
+      OtaCheck(
+          'permission',
+          environment.blePermissionGranted == true
+              ? OtaCheckStatus.pass
+              : environment.blePermissionGranted == false
+                  ? OtaCheckStatus.block
+                  : OtaCheckStatus.unknown,
+          environment.blePermissionGranted == true
+              ? '蓝牙权限已授予'
+              : environment.blePermissionGranted == false
+                  ? '蓝牙或附近设备权限未授予'
+                  : '蓝牙权限状态未知，请检查系统设置'),
+      OtaCheck(
+          'ownership',
+          environment.ownershipConflict == null
+              ? OtaCheckStatus.pass
+              : OtaCheckStatus.block,
+          environment.ownershipConflict ?? '蓝牙未被其他任务占用'),
+    ]);

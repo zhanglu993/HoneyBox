@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../services/ota/ota_ownership.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../services/capture/capture_ble_transport.dart';
@@ -83,20 +85,30 @@ Future<bool?> confirmResumeCapture(
           ));
 }
 
-class CapturePage extends StatefulWidget {
+class CapturePage extends ConsumerStatefulWidget {
   final CaptureStore? store;
   const CapturePage({super.key, this.store});
   @override
-  State<CapturePage> createState() => _CapturePageState();
+  ConsumerState<CapturePage> createState() => _CapturePageState();
 }
 
-class _CapturePageState extends State<CapturePage> {
+class _CapturePageState extends ConsumerState<CapturePage> {
   CaptureStore? _store;
   final _sessions = <CaptureSession>[];
   final _selectedIds = <String>{};
   final _notificationIds = <String>{};
   final _reconnectTracker = ReconnectNotificationTracker();
   bool _startingBatch = false;
+  bool _ownsCapture = false;
+  late final OtaOwnership _ownership;
+
+  void _releaseCapture() {
+    if (_ownsCapture) {
+      _ownsCapture = false;
+      _ownership.release(OtaOwner.capture);
+    }
+  }
+
   bool _loading = true, _saving = false, _leaving = false, _canPop = false;
   String? _error;
   bool _awake = false, _askedBackground = false;
@@ -114,6 +126,7 @@ class _CapturePageState extends State<CapturePage> {
   @override
   void initState() {
     super.initState();
+    _ownership = ref.read(otaOwnershipProvider.notifier);
     _clock;
     unawaited(_load());
   }
@@ -126,6 +139,7 @@ class _CapturePageState extends State<CapturePage> {
       }
     }
     final awake = _sessions.any((s) => s.busy);
+    if (!awake && !_startingBatch) _releaseCapture();
     if (Platform.isAndroid && awake != _awake) {
       _awake = awake;
       unawaited(const MethodChannel('honeybox/capture-power')
@@ -259,6 +273,14 @@ class _CapturePageState extends State<CapturePage> {
   Future<void> _start(Iterable<CaptureSession> targets) async {
     final list = targets.where((s) => !s.busy).toList();
     if (_startingBatch || list.isEmpty) return;
+    if (!_ownsCapture) {
+      final ownership = _ownership.acquire(OtaOwner.capture);
+      if (!ownership.success) {
+        _message(ownership.reason!);
+        return;
+      }
+      _ownsCapture = true;
+    }
     setState(() => _startingBatch = true);
     try {
       final interrupted = <CaptureSession, File>{};
@@ -287,7 +309,10 @@ class _CapturePageState extends State<CapturePage> {
         unawaited(s.start());
       }
     } finally {
-      if (mounted) setState(() => _startingBatch = false);
+      if (mounted) {
+        setState(() => _startingBatch = false);
+        if (!_sessions.any((s) => s.busy)) _releaseCapture();
+      }
     }
   }
 
@@ -457,6 +482,10 @@ class _CapturePageState extends State<CapturePage> {
       unawaited(const MethodChannel('honeybox/capture-power')
           .invokeMethod<void>(
               'keepAlive', {'text': null}).catchError((Object _) {}));
+    }
+    if (_ownsCapture) {
+      _ownsCapture = false;
+      _ownership.releaseDeferred(OtaOwner.capture);
     }
     _clock.cancel();
     for (final s in _sessions) {

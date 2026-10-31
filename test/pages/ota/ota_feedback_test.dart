@@ -5,13 +5,17 @@ import 'package:honeybox/pages/ota/realtek_ota_page.dart';
 import 'package:honeybox/providers/ble_provider.dart';
 import '../../helpers/ota_fake_platform.dart';
 import 'package:honeybox/services/ota/device_probe.dart';
+import 'package:honeybox/services/ota/ota_ownership.dart';
 
 void main() {
   testWidgets('failed upgrade retains error details and offers reconnect',
       (tester) async {
     final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
-        overrides: [otaPlatformProvider.overrideWithValue(platform)],
+        overrides: [
+          otaPlatformProvider.overrideWithValue(platform),
+          otaBlePermissionProvider.overrideWithValue(() async => true)
+        ],
         child: MaterialApp(
             home: RealtekOtaPage(
                 device:
@@ -33,12 +37,21 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await platform.controller.close();
   });
-  testWidgets('prepare failure suggests charging only with supporting evidence', (tester) async {
+  testWidgets('prepare failure suggests charging only with supporting evidence',
+      (tester) async {
     final platform = OtaFakePlatform()..prepareError = StateError('connection');
-    await tester.pumpWidget(ProviderScope(overrides: [
-      otaPlatformProvider.overrideWithValue(platform),
-      otaDeviceProbeProvider.overrideWithValue(OtaFakeProbe(platform.calls, result: const DeviceProbeResult(batteryPercent: 20, charging: false))),
-    ], child: MaterialApp(home: RealtekOtaPage(device: ScanDevice(deviceId: 'opaque', name: 'test', rssi: -40)))));
+    await tester.pumpWidget(ProviderScope(
+        overrides: [
+          otaPlatformProvider.overrideWithValue(platform),
+          otaBlePermissionProvider.overrideWithValue(() async => true),
+          otaDeviceProbeProvider.overrideWithValue(OtaFakeProbe(platform.calls,
+              result: const DeviceProbeResult(
+                  batteryPercent: 20, charging: false))),
+        ],
+        child: MaterialApp(
+            home: RealtekOtaPage(
+                device:
+                    ScanDevice(deviceId: 'opaque', name: 'test', rssi: -40)))));
     await tester.pumpAndSettle();
     expect(find.textContaining('设备可能因电量低于 30% 且未充电而拒绝进入升级模式'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
@@ -49,12 +62,21 @@ void main() {
     const DeviceProbeResult(batteryPercent: 80, charging: false),
     const DeviceProbeResult(batteryPercent: 20, charging: true),
   ]) {
-    testWidgets('prepare failure does not guess cause without evidence: $probe', (tester) async {
-      final platform = OtaFakePlatform()..prepareError = StateError('connection');
-      await tester.pumpWidget(ProviderScope(overrides: [
-        otaPlatformProvider.overrideWithValue(platform),
-        otaDeviceProbeProvider.overrideWithValue(OtaFakeProbe(platform.calls, result: probe)),
-      ], child: MaterialApp(home: RealtekOtaPage(device: ScanDevice(deviceId: 'opaque', name: 'test', rssi: -40)))));
+    testWidgets('prepare failure does not guess cause without evidence: $probe',
+        (tester) async {
+      final platform = OtaFakePlatform()
+        ..prepareError = StateError('connection');
+      await tester.pumpWidget(ProviderScope(
+          overrides: [
+            otaPlatformProvider.overrideWithValue(platform),
+            otaBlePermissionProvider.overrideWithValue(() async => true),
+            otaDeviceProbeProvider
+                .overrideWithValue(OtaFakeProbe(platform.calls, result: probe)),
+          ],
+          child: MaterialApp(
+              home: RealtekOtaPage(
+                  device: ScanDevice(
+                      deviceId: 'opaque', name: 'test', rssi: -40)))));
       await tester.pumpAndSettle();
       expect(find.textContaining('设备可能因电量低于'), findsNothing);
       await tester.pumpWidget(const SizedBox());
@@ -64,7 +86,10 @@ void main() {
   testWidgets('stale events do not change the current session', (tester) async {
     final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
-        overrides: [otaPlatformProvider.overrideWithValue(platform)],
+        overrides: [
+          otaPlatformProvider.overrideWithValue(platform),
+          otaBlePermissionProvider.overrideWithValue(() async => true)
+        ],
         child: MaterialApp(
             home: RealtekOtaPage(
                 device:
@@ -85,11 +110,15 @@ void main() {
       (tester) async {
     final platform = OtaFakePlatform();
     await tester.pumpWidget(ProviderScope(
-        overrides: [otaPlatformProvider.overrideWithValue(platform)],
+        overrides: [
+          otaPlatformProvider.overrideWithValue(platform),
+          otaBlePermissionProvider.overrideWithValue(() async => true)
+        ],
         child: MaterialApp(
             home: RealtekOtaPage(
                 device:
                     ScanDevice(deviceId: 'opaque', name: 'test', rssi: -40)))));
+    await tester.pump();
     platform.controller.add({
       'sessionId': platform.sessionId,
       'done': true,
@@ -102,4 +131,35 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await platform.controller.close();
   });
+  for (final capture in [true, false]) {
+    testWidgets('existing BLE use blocks preparation: capture=$capture',
+        (tester) async {
+      final platform = OtaFakePlatform();
+      final container = ProviderContainer(overrides: [
+        otaPlatformProvider.overrideWithValue(platform),
+        otaBlePermissionProvider.overrideWithValue(() async => true),
+      ]);
+      if (capture) {
+        container.read(otaOwnershipProvider.notifier).acquire(OtaOwner.capture);
+      } else {
+        container.read(connectedDeviceProvider.notifier).state =
+            ConnectedDeviceInfo(deviceId: 'other', name: 'watch', mtu: 23);
+      }
+      await tester.pumpWidget(UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+              home: RealtekOtaPage(
+                  device: ScanDevice(
+                      deviceId: 'target', name: 'test', rssi: -40)))));
+      await tester.pump();
+      expect(platform.calls, isNot(contains('probe')));
+      expect(platform.calls, isNot(contains('prepare')));
+      expect(platform.calls, isNot(contains('start')));
+      expect(
+          find.textContaining(capture ? '采集正在占用' : '普通连接正在占用'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      container.dispose();
+      await platform.controller.close();
+    });
+  }
 }

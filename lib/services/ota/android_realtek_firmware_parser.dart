@@ -61,15 +61,18 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
                 : OtaCheckStatus.unknown;
     final match = registry.match(header);
     final profile = match.profile;
-    final expectedIc =
-        capabilities.otaDeviceInfo?.icType ?? capabilities.icType ?? capabilities.expectedIcType ?? profile?.icType;
+    final expectedIc = capabilities.otaDeviceInfo?.icType ??
+        capabilities.icType ??
+        capabilities.expectedIcType ??
+        profile?.icType;
     final chip = header.icType == null || expectedIc == null
         ? OtaCheckStatus.unknown
         : header.icType == expectedIc
             ? OtaCheckStatus.pass
             : OtaCheckStatus.block;
     final mismatch = profile != null &&
-        ((capabilities.otaDeviceInfo != null && capabilities.otaDeviceInfo!.icType != profile.icType) ||
+        ((capabilities.otaDeviceInfo != null &&
+                capabilities.otaDeviceInfo!.icType != profile.icType) ||
             header.icType != profile.icType ||
             header.imageId == null ||
             !profile.acceptsImageId(header.imageId!) ||
@@ -91,52 +94,82 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
     // 出处：固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核。
     // FFF1 临时容量仅在 multi 位有效；APP bank 容量仍以档案为准。
     final info = capabilities.otaDeviceInfo;
-    final multiLimit = info != null && info.modeBits & 0x10 != 0 ? info.tempBankSizeBytes : null;
-    final tooLargeForMulti = multiLimit != null && header.imageSize != null && header.imageSize! > multiLimit;
-    final capacity = tooLargeForMulti ? OtaCheckStatus.block : profile == null ||
-            header.imageSize == null ||
-            limit == null ||
-            limit <= 0
-        ? OtaCheckStatus.unknown
-        : header.imageSize! <= limit
-            ? OtaCheckStatus.pass
-            : OtaCheckStatus.block;
+    final multiLimit = info != null && info.modeBits & 0x10 != 0
+        ? info.tempBankSizeBytes
+        : null;
+    final tooLargeForMulti = multiLimit != null &&
+        header.imageSize != null &&
+        header.imageSize! > multiLimit;
+    final tooLargeForProfileTemp = profile?.tempBankSize != null &&
+        header.imageSize != null &&
+        header.imageSize! > profile!.tempBankSize!;
+    final capacity = tooLargeForMulti || tooLargeForProfileTemp
+        ? OtaCheckStatus.block
+        : profile == null ||
+                header.imageSize == null ||
+                limit == null ||
+                limit <= 0
+            ? OtaCheckStatus.unknown
+            : header.imageSize! <= limit
+                ? OtaCheckStatus.pass
+                : OtaCheckStatus.block;
     final current = capabilities.currentVersion;
     final target = header.version;
-    final comparable = current != null && current >= 0 &&
-        current <= 0xffffffff && target != null;
+    final comparable = current != null &&
+        current >= 0 &&
+        current <= 0xffffffff &&
+        target != null;
     final older = comparable && target < current;
     final same = comparable && target == current;
-    final version = !comparable ? OtaCheckStatus.warn
-        : older || same ? (profile?.allowDowngrade == false
-            ? OtaCheckStatus.block : OtaCheckStatus.warn)
-        : OtaCheckStatus.pass;
+    final version = !comparable
+        ? OtaCheckStatus.warn
+        : older || same
+            ? (profile?.allowDowngrade == false
+                ? OtaCheckStatus.block
+                : OtaCheckStatus.warn)
+            : OtaCheckStatus.pass;
     final versionExplanation = !comparable
         ? '无法读取设备当前版本,无法判断是否降级'
-        : older ? '降级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}'
-        : same ? '版本相同,重复升级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}'
-        : '升级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}';
+        : older
+            ? '降级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}'
+            : same
+                ? '版本相同,重复升级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}'
+                : '升级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}';
     final batteryValue = capabilities.batteryPercent;
     final charging = capabilities.charging;
     final threshold = profile?.batteryMinPercent;
     final source = profile?.batterySource;
-    final noBatteryCheck = profile != null && (threshold == null || source == BatterySource.none);
-    final hasChargingSource = source == BatterySource.bwps || source == BatterySource.basAndBwps;
+    final noBatteryCheck =
+        profile != null && (threshold == null || source == BatterySource.none);
+    final hasChargingSource =
+        source == BatterySource.bwps || source == BatterySource.basAndBwps;
     final isCharging = hasChargingSource && charging == true;
-    final validBattery = batteryValue != null && batteryValue >= 0 && batteryValue <= 100;
-    final battery = noBatteryCheck || isCharging ||
+    final validBattery =
+        batteryValue != null && batteryValue >= 0 && batteryValue <= 100;
+    final battery = noBatteryCheck ||
+            isCharging ||
             (validBattery && threshold != null && batteryValue >= threshold)
-        ? OtaCheckStatus.pass : OtaCheckStatus.warn;
-    final batteryExplanation = noBatteryCheck ? '档案未启用电量检查'
-        : isCharging ? '设备正在充电或已充满'
-        : hasChargingSource && charging == null && validBattery && threshold != null && batteryValue < threshold
-            ? '电量 $batteryValue% 低于 $threshold%，无法读取充电状态，设备在未充电时可能拒绝进入升级模式'
-        : !validBattery ? '无法读取电量，请注意设备电量及充电状态'
-        : threshold == null ? '无法确定电量阈值'
-        : batteryValue < threshold ? (hasChargingSource && charging == false
-            ? '电量 $batteryValue% 低于 $threshold%，已读到未充电，设备可能拒绝进入升级模式'
-            : '电量 $batteryValue% 低于 $threshold%，设备可能拒绝进入升级模式')
-        : '电量 $batteryValue%，达到阈值 $threshold%';
+        ? OtaCheckStatus.pass
+        : OtaCheckStatus.warn;
+    final batteryExplanation = noBatteryCheck
+        ? '档案未启用电量检查'
+        : isCharging
+            ? '设备正在充电或已充满'
+            : hasChargingSource &&
+                    charging == null &&
+                    validBattery &&
+                    threshold != null &&
+                    batteryValue < threshold
+                ? '电量 $batteryValue% 低于 $threshold%，无法读取充电状态，设备在未充电时可能拒绝进入升级模式'
+                : !validBattery
+                    ? '无法读取电量，请注意设备电量及充电状态'
+                    : threshold == null
+                        ? '无法确定电量阈值'
+                        : batteryValue < threshold
+                            ? (hasChargingSource && charging == false
+                                ? '电量 $batteryValue% 低于 $threshold%，已读到未充电，设备可能拒绝进入升级模式'
+                                : '电量 $batteryValue% 低于 $threshold%，设备可能拒绝进入升级模式')
+                            : '电量 $batteryValue%，达到阈值 $threshold%';
     const missingProfile =
         '未找到匹配的设备档案,请在 OTA 档案注册表中添加(icType/imageId/customerName)';
     return FirmwareParseResult(
@@ -170,8 +203,10 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
   }
 }
 
-bool infoIcMismatch(DeviceCapabilities capabilities, OtaDeviceProfile profile) =>
-    capabilities.otaDeviceInfo != null && capabilities.otaDeviceInfo!.icType != profile.icType;
+bool infoIcMismatch(
+        DeviceCapabilities capabilities, OtaDeviceProfile profile) =>
+    capabilities.otaDeviceInfo != null &&
+    capabilities.otaDeviceInfo!.icType != profile.icType;
 
 String formatOtaVersion(int value) =>
     '0x${value.toRadixString(16).padLeft(8, '0')} (${value & 0xf}.${(value >> 4) & 0xff}.${(value >> 12) & 0x7fff})';

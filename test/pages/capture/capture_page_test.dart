@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:honeybox/pages/capture/capture_page.dart';
 import 'package:honeybox/services/capture/capture_store.dart';
@@ -28,7 +29,8 @@ void main() {
             const CaptureChannel(service: 'e0ff', characteristic: 'ffe1')
           ])
       ]);
-      await tester.pumpWidget(MaterialApp(home: CapturePage(store: store)));
+      await tester.pumpWidget(
+          ProviderScope(child: MaterialApp(home: CapturePage(store: store))));
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await tester.pumpAndSettle();
@@ -54,7 +56,8 @@ void main() {
             const CaptureChannel(service: 'e0ff', characteristic: 'ffe1')
           ])
       ]);
-      await tester.pumpWidget(MaterialApp(home: CapturePage(store: store)));
+      await tester.pumpWidget(
+          ProviderScope(child: MaterialApp(home: CapturePage(store: store))));
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await tester.pumpAndSettle();
@@ -107,7 +110,8 @@ void main() {
         ]));
     await tester.runAsync(() => store.saveReconnectNotifications({'B'}));
     await tester.runAsync(() async {
-      await tester.pumpWidget(MaterialApp(home: CapturePage(store: store)));
+      await tester.pumpWidget(
+          ProviderScope(child: MaterialApp(home: CapturePage(store: store))));
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await tester.pumpAndSettle();
