@@ -1,5 +1,5 @@
 /// A safety check must pass explicitly; unknown never grants write access.
-enum OtaCheckStatus { pass, block, unknown }
+enum OtaCheckStatus { pass, warn, block, unknown }
 
 class OtaCheck {
   final String id;
@@ -13,7 +13,7 @@ class PreflightReport {
   PreflightReport(Iterable<OtaCheck> checks)
       : checks = List.unmodifiable(checks);
   bool get canStart =>
-      checks.isNotEmpty && checks.every((c) => c.status == OtaCheckStatus.pass);
+      checks.isNotEmpty && checks.every((c) => c.status == OtaCheckStatus.pass || c.status == OtaCheckStatus.warn);
 }
 
 /// Required checks are supplied by the protocol adapter, not by device name.

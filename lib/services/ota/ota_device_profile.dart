@@ -12,6 +12,7 @@ class OtaDeviceProfile {
   final String? customerName;
   final int? appBankSize, tempBankSize, flashAddress, batteryMinPercent;
   final bool batteryRequiresChargingBelowMin;
+  final bool allowDowngrade;
   final BatterySource batterySource;
 
   const OtaDeviceProfile(
@@ -29,6 +30,7 @@ class OtaDeviceProfile {
       this.flashAddress,
       this.batteryMinPercent,
       this.batteryRequiresChargingBelowMin = true,
+      this.allowDowngrade = true,
       this.batterySource = BatterySource.none,
       required this.evidence});
 
@@ -70,6 +72,10 @@ class OtaDeviceProfile {
       final customer = json['customerName'];
       final charging = json['batteryRequiresChargingBelowMin'];
       final source = json['batterySource'];
+      final allowDowngrade = json['allowDowngrade'];
+      if (json.containsKey('allowDowngrade') && allowDowngrade is! bool) {
+        throw const FormatException('allowDowngrade 必须是布尔值');
+      }
       if (source != null && (source is! String || !BatterySource.values.any((v) => v.name == source))) {
         throw const FormatException('batterySource 无效');
       }
@@ -103,6 +109,7 @@ class OtaDeviceProfile {
           batteryMinPercent: battery,
           batterySource: source == null ? BatterySource.none : BatterySource.values.firstWhere((v) => v.name == source),
           batteryRequiresChargingBelowMin: charging as bool? ?? true,
+          allowDowngrade: allowDowngrade as bool? ?? true,
           evidence: requiredString('evidence'));
     } on FormatException {
       rethrow;
@@ -132,6 +139,7 @@ class OtaProfileRegistry {
   static const defaultProfiles = <OtaDeviceProfile>[
     OtaDeviceProfile(
         id: 's200',
+        allowDowngrade: true,
         displayName: 'S200',
         icType: 9,
         imageId: 0x2793,

@@ -27,8 +27,7 @@ class AndroidRealtekOtaPlatform implements OtaPlatform {
       {int? expectedIcType,
       int? deviceReportedCapacity,
       int? batteryPercent,
-      bool? charging,
-      bool allowSameOrOlderVersion = false}) async {
+      bool? charging}) async {
     if (_reading || _preparing || _needsClose || _closing) {
       throw StateError('OTA 连接正在使用，无法读取版本');
     }
@@ -41,8 +40,7 @@ class AndroidRealtekOtaPlatform implements OtaPlatform {
           deviceReportedCapacity: deviceReportedCapacity,
           currentVersion: version,
           batteryPercent: batteryPercent,
-          charging: charging,
-          allowSameOrOlderVersion: allowSameOrOlderVersion);
+          charging: charging);
     } finally {
       _reading = false;
     }

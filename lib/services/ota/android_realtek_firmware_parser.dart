@@ -101,38 +101,38 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
         : header.imageSize! <= limit
             ? OtaCheckStatus.pass
             : OtaCheckStatus.block;
-    // 出处：固件仓库只读分析 2026-10-31，调用方提供，未在本仓库复核。
-    // FFD4 的 git_ver 为 u32；patch_header_check.h 位段中 0x30000010
-    // 表示 0.1.0.6。设备不阻止同版或降级，主机按原始 u32 比较。
-    // DIS 固件字符串为 T006，硬件为 H001；它们不替代 FFD4。
     final current = capabilities.currentVersion;
     final target = header.version;
-    final comparable = current != null &&
-        current >= 0 &&
-        current <= 0xffffffff &&
-        target != null;
-    final older = comparable && target <= current;
-    final overridden = older && capabilities.allowSameOrOlderVersion;
-    final version = !comparable
-        ? OtaCheckStatus.unknown
-        : !older || overridden
-            ? OtaCheckStatus.pass
-            : OtaCheckStatus.block;
+    final comparable = current != null && current >= 0 &&
+        current <= 0xffffffff && target != null;
+    final older = comparable && target < current;
+    final same = comparable && target == current;
+    final version = !comparable ? OtaCheckStatus.warn
+        : older || same ? (profile?.allowDowngrade == false
+            ? OtaCheckStatus.block : OtaCheckStatus.warn)
+        : OtaCheckStatus.pass;
+    final versionExplanation = !comparable
+        ? '无法读取设备当前版本,无法判断是否降级'
+        : older ? '降级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}'
+        : same ? '版本相同,重复升级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}'
+        : '升级：当前 ${formatOtaVersion(current)} → 目标 ${formatOtaVersion(target)}';
     final batteryValue = capabilities.batteryPercent;
     final charging = capabilities.charging;
     final threshold = profile?.batteryMinPercent;
     final source = profile?.batterySource;
     final noBatteryCheck = profile != null && (threshold == null || source == BatterySource.none);
     final hasChargingSource = source == BatterySource.bwps || source == BatterySource.basAndBwps;
-    final battery = noBatteryCheck
-        ? OtaCheckStatus.pass
-        : profile == null || batteryValue == null || batteryValue <= 0 || batteryValue > 100
-            ? OtaCheckStatus.unknown
-            : batteryValue >= threshold!
-                ? OtaCheckStatus.pass
-                : !hasChargingSource || charging == null
-                    ? OtaCheckStatus.unknown
-                    : charging ? OtaCheckStatus.pass : OtaCheckStatus.block;
+    final isCharging = hasChargingSource && charging == true;
+    final validBattery = batteryValue != null && batteryValue > 0 && batteryValue <= 100;
+    final battery = noBatteryCheck || isCharging ||
+            (validBattery && threshold != null && batteryValue >= threshold)
+        ? OtaCheckStatus.pass : OtaCheckStatus.warn;
+    final batteryExplanation = noBatteryCheck ? '档案未启用电量检查'
+        : isCharging ? '设备正在充电'
+        : !validBattery ? '无法读取电量，请注意设备电量及充电状态'
+        : threshold == null ? '无法确定电量阈值'
+        : batteryValue < threshold ? '电量 $batteryValue% 低于 $threshold%,设备在未充电时可能拒绝进入升级模式'
+        : '电量 $batteryValue%，达到阈值 $threshold%';
     const missingProfile =
         '未找到匹配的设备档案,请在 OTA 档案注册表中添加(icType/imageId/customerName)';
     return FirmwareParseResult(
@@ -160,19 +160,14 @@ class AndroidRealtekFirmwareParser implements FirmwareParser {
               profile == null
                   ? missingProfile
                   : '容量：${capacity.name}；${tooLargeForMulti ? 'FFF1 multi 临时容量不足' : '设备档案'}'),
-          OtaCheck(
-              'version',
-              version,
-              '版本：${version.name}；${!comparable ? '设备版本未知' : older ? (overridden ? '同版或降级已显式 override' : '同版或降级被阻断') : '目标版本高于设备'}'),
-          OtaCheck(
-              'battery',
-              battery,
-              noBatteryCheck
-                  ? '档案未启用电量检查'
-                  : '电量：${battery.name}；来源 ${source?.name ?? '未知'}，阈值 ${threshold ?? '未知'}%；${batteryValue == null ? '百分比未知' : '百分比 $batteryValue%'}；${charging == null || !hasChargingSource ? '充电状态未知' : charging ? '正在充电' : '未充电'}'),
+          OtaCheck('version', version, versionExplanation),
+          OtaCheck('battery', battery, batteryExplanation),
         ]);
   }
 }
 
 bool infoIcMismatch(DeviceCapabilities capabilities, OtaDeviceProfile profile) =>
     capabilities.otaDeviceInfo != null && capabilities.otaDeviceInfo!.icType != profile.icType;
+
+String formatOtaVersion(int value) =>
+    '0x${value.toRadixString(16).padLeft(8, '0')} (${value & 0xf}.${(value >> 4) & 0xff}.${(value >> 12) & 0x7fff})';

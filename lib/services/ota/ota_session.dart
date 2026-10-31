@@ -49,6 +49,7 @@ class OtaSession {
     lastActivity = _now();
   }
   static const defaultPhaseTimeouts = <OtaPhase, Duration>{
+    OtaPhase.preparing: Duration(seconds: 60),
     OtaPhase.connecting: Duration(seconds: 60),
     OtaPhase.transferring: Duration(minutes: 5),
     OtaPhase.validating: Duration(minutes: 2),
@@ -63,12 +64,14 @@ class OtaSession {
   final Timer Function(Duration, void Function()) _timerFactory;
   Timer? _timer;
   String? failureDescription;
+  OtaPhase? timedOutPhase;
 
   void dispose() { _timer?.cancel(); _timer = null; }
 
   bool checkTimeout() {
     final limit = _timeouts[phase];
     if (limit == null || !hasTimedOut(limit)) return false;
+    timedOutPhase = phase;
     phase = OtaPhase.finished;
     outcome = OtaOutcome.failed;
     rawType = null;

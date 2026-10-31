@@ -53,18 +53,16 @@ void main() {
           int? battery = 50,
           bool? charging = false,
           OtaProfileRegistry registry = const OtaProfileRegistry(),
-          int? reportedCapacity,
-          bool overrideVersion = false}) =>
+          int? reportedCapacity}) =>
       FirmwareInspection.inspect(
           file.path,
           DeviceCapabilities(
-              confirmed: version != null,
+              confirmed: true,
               currentVersion: version,
               expectedIcType: 9,
               deviceReportedCapacity: reportedCapacity,
               batteryPercent: battery,
-              charging: charging,
-              allowSameOrOlderVersion: overrideVersion),
+              charging: charging),
           AndroidRealtekFirmwareParser(channel: channel, registry: registry));
   OtaCheckStatus status(FirmwareInspection r, String id) =>
       r.report.checks.firstWhere((c) => c.id == id).status;
@@ -88,19 +86,34 @@ void main() {
       () async => expect((await inspect()).report.canStart, isTrue));
   for (final v in [3, 4]) {
     test(
-        'same or downgrade $v blocks',
+        'same or downgrade $v warns',
         () async => expect(status(await inspect(version: v), 'version'),
-            OtaCheckStatus.block));
+            OtaCheckStatus.warn));
   }
   test(
-      'explicit version override',
-      () async => expect(
-          status(await inspect(version: 3, overrideVersion: true), 'version'),
-          OtaCheckStatus.pass));
-  test(
-      'unreadable version is unknown',
+      'unreadable version warns',
       () async => expect(status(await inspect(version: null), 'version'),
-          OtaCheckStatus.unknown));
+          OtaCheckStatus.warn));
+  test('profile can forbid same version and downgrade', () async {
+    const profile = OtaDeviceProfile(id: 'strict', displayName: 'strict', icType: 9, imageId: 0x2793, customerName: 'S200_62#', appBankSize: 0x64000, allowDowngrade: false, evidence: 'test');
+    for (final version in [3, 4]) {
+      expect(status(await inspect(version: version, registry: const OtaProfileRegistry([profile])), 'version'), OtaCheckStatus.block);
+    }
+  });
+  test('downgrade description includes raw and decoded versions', () async {
+    final result = await inspect(version: 0x30000010);
+    expect(result.report.canStart, isTrue);
+    final message = result.report.checks.firstWhere((c) => c.id == 'version').explanation;
+    expect(message, contains('降级'));
+    expect(message, contains('0x30000010 (0.1.0)'));
+    expect(message, contains('目标 0x00000003 (3.0.0)'));
+  });
+  test('missing version and battery warn without blocking', () async {
+    final result = await inspect(version: null, battery: null);
+    expect(status(result, 'version'), OtaCheckStatus.warn);
+    expect(status(result, 'battery'), OtaCheckStatus.warn);
+    expect(result.report.canStart, isTrue);
+  });
   for (final entry in {
     'customer': 512 + 0x68,
     'commit': 512 + 0x64,
@@ -210,17 +223,17 @@ void main() {
     expect(status(await inspect(reportedCapacity: 0x100000), 'capacity'),
         OtaCheckStatus.block);
     expect(status(await inspect(registry: registry, battery: 50), 'battery'),
-        OtaCheckStatus.block);
+        OtaCheckStatus.warn);
     expect(status(await inspect(battery: 50), 'battery'), OtaCheckStatus.pass);
   });
   test(
-      'low battery blocks',
+      'low battery warns',
       () async => expect(
-          status(await inspect(battery: 29), 'battery'), OtaCheckStatus.block));
+          status(await inspect(battery: 29), 'battery'), OtaCheckStatus.warn));
   test(
-      'unknown battery warns and blocks',
+      'unknown battery warns',
       () async => expect(status(await inspect(battery: null), 'battery'),
-          OtaCheckStatus.unknown));
+          OtaCheckStatus.warn));
   test('SDK disagreement blocks', () async {
     sdk['images'] = [
       {'imageId': 1, 'binId': 0x300, 'size': 1028, 'version': 3}
@@ -239,5 +252,8 @@ void main() {
       }
     ];
     expect((await inspect(version: 0x3000000f, battery: 30, charging: null)).report.canStart, isTrue);
+    final same = await inspect(version: 0x30000010, battery: 30);
+    expect(same.report.canStart, isTrue);
+    expect(status(same, 'version'), OtaCheckStatus.warn);
   }, skip: !real.existsSync() ? 'real firmware not available' : false);
 }

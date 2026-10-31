@@ -42,6 +42,42 @@ class _Parser implements FirmwareParser {
 }
 
 void main() {
+  for (final confirm in [true, false]) {
+    testWidgets('warning requires explicit confirmation: $confirm', (tester) async {
+      FilePicker.platform = _Picker();
+      final platform = OtaFakePlatform();
+      await tester.pumpWidget(ProviderScope(overrides: [
+        otaPlatformProvider.overrideWithValue(platform),
+        firmwareParserProvider.overrideWithValue(_Parser(OtaCheckStatus.warn)),
+        otaDeviceProbeProvider.overrideWithValue(OtaFakeProbe(platform.calls, result: const DeviceProbeResult(currentVersion: 2))),
+      ], child: MaterialApp(home: RealtekOtaPage(device: ScanDevice(deviceId: 'device', name: 'test', rssi: -40)))));
+      await tester.pump();
+      platform.controller.add({'sessionId': platform.sessionId, 'ready': true});
+      await tester.pump();
+      await tester.tap(find.text('选择固件'));
+      await tester.pump();
+      await tester.tap(find.text('开始升级'));
+      await tester.runAsync(() async {
+        for (var i = 0; i < 100 && find.text('确认继续').evaluate().isEmpty; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          await tester.pump();
+        }
+      });
+      expect(platform.starts, 0);
+      expect(find.textContaining('检查未通过：warn'), findsWidgets);
+      await tester.tap(find.text(confirm ? '确认继续' : '取消'));
+      await tester.runAsync(() async {
+        for (var i = 0; i < 100 && confirm && platform.starts == 0; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          await tester.pump();
+        }
+      });
+      await tester.pump();
+      expect(platform.starts, confirm ? 1 : 0);
+      await tester.pumpWidget(const SizedBox());
+      await platform.controller.close();
+    });
+  }
   for (final status in [OtaCheckStatus.block, OtaCheckStatus.unknown, OtaCheckStatus.pass]) {
     testWidgets('inspection ${status.name} gates start', (tester) async {
       FilePicker.platform = _Picker();
@@ -67,7 +103,10 @@ void main() {
         for (var i = 0; i < 100 && platform.starts == 0; i++) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
           await tester.pump();
-          if (find.textContaining('检查未通过').evaluate().isNotEmpty) break;
+          if (status != OtaCheckStatus.pass &&
+              find.textContaining('检查未通过').evaluate().isNotEmpty) {
+            break;
+          }
         }
       });
       await tester.pump();
@@ -76,7 +115,7 @@ void main() {
       expect(parser.received?.icType, 9);
       expect(platform.starts, status == OtaCheckStatus.pass ? 1 : 0);
       if (status != OtaCheckStatus.pass) {
-        expect(find.textContaining('检查未通过：${status.name}'), findsOneWidget);
+        expect(find.textContaining('检查未通过：${status.name}'), findsWidgets);
       }
       await tester.pumpWidget(const SizedBox());
     });

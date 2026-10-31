@@ -17,7 +17,6 @@ class DeviceCapabilities {
   final int? batteryPercent;
   final bool? charging;
   final int? deviceReportedCapacity;
-  final bool allowSameOrOlderVersion;
   final int? capacity;
   final int? imageId;
 
@@ -34,7 +33,6 @@ class DeviceCapabilities {
       this.batteryPercent,
       this.charging,
       this.deviceReportedCapacity,
-      this.allowSameOrOlderVersion = false,
       this.layoutConfirmed = false});
 }
 

@@ -40,12 +40,16 @@ void main() {
         'customerName': 'S200_62#',
         'appBankSize': 1048576,
         'batteryMinPercent': 55,
+        'allowDowngrade': false,
         'evidence': 'test'
       }
     ]));
     expect(registry.match(header).status, OtaProfileMatchStatus.matched);
     expect(registry.profiles.single.acceptsImageId(11), isTrue);
     expect(registry.profiles.single.allowedCommitIds, isNull);
+    expect(registry.profiles.single.allowDowngrade, isFalse);
+    expect(s200.allowDowngrade, isTrue);
+    expect(() => OtaDeviceProfile.fromJson({'id':'x','displayName':'x','icType':9,'imageId':1,'evidence':'x','allowDowngrade':'yes'}), throwsFormatException);
   });
   test('invalid JSON and invalid profile give FormatException', () {
     for (final source in [

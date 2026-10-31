@@ -13,6 +13,12 @@ void main() {
     ]);
     expect(report.canStart, isTrue);
   });
+  test('warnings allow start but block and unknown do not', () {
+    for (final status in [OtaCheckStatus.warn, OtaCheckStatus.block, OtaCheckStatus.unknown]) {
+      final report = evaluateOtaPreflight(requiredChecks: {'x'}, checks: [OtaCheck('x', status, '')]);
+      expect(report.canStart, status == OtaCheckStatus.warn);
+    }
+  });
   test('missing or unknown device capability blocks writing', () {
     final missing = evaluateOtaPreflight(
         requiredChecks: {'file', 'device'},

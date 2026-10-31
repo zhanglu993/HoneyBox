@@ -69,6 +69,21 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
   OtaSession? _session;
   DeviceCapabilities? _capabilities;
   bool _disposed = false;
+  List<OtaCheck> _checks = const [];
+
+  String _batteryFailureHint() {
+    final caps = _capabilities;
+    final profiles = ref.read(otaProfileRegistryProvider).profiles;
+    if (caps?.charging != false || profiles.length != 1) return '';
+    final profile = profiles.single;
+    final threshold = profile.batteryMinPercent;
+    if (threshold == null || (profile.batterySource != BatterySource.bwps &&
+        profile.batterySource != BatterySource.basAndBwps)) return '';
+    final value = caps?.batteryPercent;
+    if (value != null && value > 0 && value <= 100 && value >= threshold) return '';
+    return '；设备可能因电量低于 $threshold% 且未充电而拒绝进入升级模式,请充电后重试';
+  }
+
 
   @override
   void initState() {
@@ -83,13 +98,14 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         final disconnected = event['disconnected'] == true ||
             event['message'] == '设备已断开';
         if (disconnected) {
+          final _disconnectHint = session.phase == OtaPhase.preparing || session.phase == OtaPhase.connecting ? _batteryFailureHint() : '';
           if (!session.disconnect(event['sessionId'] as String)) return;
           setState(() {
             _ready = false;
             if (session.outcome == null) {
               _status = '设备正在重启，等待重新连接';
             } else {
-              _status = '设备已断开';
+              _status = '设备已断开${session.failureDescription == '设备已断开' && (session.phase == OtaPhase.finished) ? _disconnectHint : ''}';
               _running = false;
             }
           });
@@ -98,6 +114,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
           }
           return;
         }
+        final previousPhase = session.phase;
         final done = event['done'] == true;
         final outcomeName = event['outcome'];
         OtaOutcome? outcome;
@@ -140,7 +157,9 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         }
         setState(() {
           if (message is String && session.failureDescription != '阶段超时') {
-            _status = message;
+            _status = message + (done && outcome == OtaOutcome.failed &&
+                (previousPhase == OtaPhase.preparing || previousPhase == OtaPhase.connecting)
+                ? _batteryFailureHint() : '');
           }
           if (progress is num) _progress = session.progress;
           if (done) _running = false;
@@ -194,15 +213,14 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         if (mounted) setState(() => _errorDetails = '设备预读取失败或超时，设备信息未知：$error');
       }
       final capabilities = DeviceCapabilities(
-          confirmed: probe.currentVersion != null,
+          confirmed: probe.currentVersion != null || probe.otaDeviceInfo != null,
           icType: probe.otaDeviceInfo?.icType,
           currentVersion: probe.currentVersion,
           otaDeviceInfo: probe.otaDeviceInfo,
           batteryPercent: probe.batteryPercent,
           charging: probe.charging,
           expectedIcType: configured.expectedIcType,
-          deviceReportedCapacity: configured.deviceReportedCapacity,
-          allowSameOrOlderVersion: configured.allowSameOrOlderVersion);
+          deviceReportedCapacity: configured.deviceReportedCapacity);
       if (_disposed) return;
       _capabilities = capabilities;
       final session = OtaSession(
@@ -210,7 +228,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
           onTimeout: (timedOut) {
         if (!mounted || _session != timedOut) return;
         setState(() {
-          _status = '阶段超时';
+          _status = '阶段超时${timedOut.timedOutPhase == OtaPhase.preparing || timedOut.timedOutPhase == OtaPhase.connecting ? _batteryFailureHint() : ''}';
           _running = false;
           _ready = false;
         });
@@ -225,7 +243,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         session.apply(OtaEvent(sessionId: session.id, phase: OtaPhase.finished,
             outcome: OtaOutcome.failed));
       }
-      if (mounted) setState(() => _status = '连接失败：$error');
+      if (mounted) setState(() => _status = '连接失败：$error${_batteryFailureHint()}');
     } finally {
       if (mounted) setState(() => _preparing = false);
     }
@@ -252,6 +270,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         _name = file.name;
         _status = file.path == null ? '无法读取所选文件' : '已选择固件';
         _progress = null;
+        _checks = const [];
       });
     } catch (error) {
       if (mounted) setState(() => _status = '选择文件失败：$error');
@@ -279,6 +298,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
         return;
       }
+      setState(() => _checks = inspection.report.checks);
       if (!inspection.report.canStart) {
         setState(() {
           _running = false;
@@ -289,6 +309,30 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
         });
         ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
         return;
+      }
+      final warnings = inspection.report.checks
+          .where((check) => check.status == OtaCheckStatus.warn).toList();
+      if (warnings.isNotEmpty) {
+        final confirmed = await showDialog<bool>(context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            title: const Text('升级风险提示'),
+            content: SingleChildScrollView(child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: warnings.map((check) => Text(check.explanation)).toList(),
+            )),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('确认继续')),
+            ],
+          ));
+        if (!mounted) return;
+        if (confirmed != true) {
+          setState(() { _running = false; _status = '已取消升级'; });
+          ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
+          return;
+        }
       }
       final started = await inspection.startIfSafe(() async {
         if (!mounted ||
@@ -314,6 +358,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
       }
     } catch (error) {
       final session = _session;
+      final connectionFailure = session?.phase == OtaPhase.connecting;
       if (session != null && session.outcome == null &&
           session.phase == OtaPhase.connecting) {
         session.apply(OtaEvent(sessionId: session.id, phase: OtaPhase.finished,
@@ -322,7 +367,7 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
       if (mounted) {
         setState(() {
           _running = false;
-          _status = '启动失败：$error';
+          _status = '启动失败：$error${connectionFailure ? _batteryFailureHint() : ''}';
         });
       }
       ref.read(rtl8762OtaInProgressProvider.notifier).state = false;
@@ -359,6 +404,14 @@ class _RealtekOtaPageState extends ConsumerState<RealtekOtaPage> {
                   if (_progress != null)
                     LinearProgressIndicator(value: _progress),
                   Text(_platform.supported ? _status : '当前平台暂不支持 OTA'),
+                  for (final check in _checks)
+                    ListTile(
+                      leading: Icon(check.status == OtaCheckStatus.warn ? Icons.warning_amber :
+                          check.status == OtaCheckStatus.pass ? Icons.check_circle : Icons.error,
+                          color: check.status == OtaCheckStatus.warn ? Colors.amber.shade700 :
+                              check.status == OtaCheckStatus.pass ? Colors.green : Colors.red),
+                      title: Text(check.explanation),
+                    ),
                   if (_pendingVerification)
                     const Text('结果待核验：SDK 已报告完成，尚未确认设备运行的新固件版本。'),
                   if (_errorDetails != null) SelectableText(_errorDetails!),

@@ -90,13 +90,14 @@ void main() {
     expect(check(result, 'capacity'), OtaCheckStatus.pass);
   });
   for (final current in [3, 4]) {
-    test('same or older version blocks for device version $current', () async {
+    test('same or older version warns for device version $current', () async {
       final result = await inspect(DeviceCapabilities(
           confirmed: true,
           expectedIcType: 9,
           currentVersion: current,
           batteryPercent: 50));
-      expect(check(result, 'version'), OtaCheckStatus.block);
+      expect(check(result, 'version'), OtaCheckStatus.warn);
+      expect(result.report.canStart, isTrue);
     });
   }
   test('SDK error blocks', () async {
@@ -113,17 +114,17 @@ void main() {
   test('missing device evidence does not authorize writing', () async {
     final result = await inspect(const DeviceCapabilities(expectedIcType: 9));
     expect(check(result, 'chip'), OtaCheckStatus.pass);
-    expect(check(result, 'version'), OtaCheckStatus.unknown);
+    expect(check(result, 'version'), OtaCheckStatus.warn);
     expect(result.report.canStart, isFalse);
   });
-  test('unconfirmed layout does not authorize writing', () async {
+  test('missing battery only warns', () async {
     final result = await inspect(const DeviceCapabilities(
         confirmed: true,
         expectedIcType: 9,
         currentVersion: 2,
         capacity: 1040,
         imageId: 0x2793));
-    expect(result.report.canStart, isFalse);
+    expect(result.report.canStart, isTrue);
   });
   test('empty file blocks before parsing', () async {
     await file.writeAsBytes([]);
@@ -153,11 +154,11 @@ void main() {
     }
     expect(await battery(BatterySource.none, null, null), OtaCheckStatus.pass);
     expect(await battery(BatterySource.bas, 30, null), OtaCheckStatus.pass);
-    expect(await battery(BatterySource.bas, 29, false), OtaCheckStatus.unknown);
-    expect(await battery(BatterySource.basAndBwps, 29, false), OtaCheckStatus.block);
+    expect(await battery(BatterySource.bas, 29, false), OtaCheckStatus.warn);
+    expect(await battery(BatterySource.basAndBwps, 29, false), OtaCheckStatus.warn);
     expect(await battery(BatterySource.basAndBwps, 29, true), OtaCheckStatus.pass);
-    expect(await battery(BatterySource.basAndBwps, 29, null), OtaCheckStatus.unknown);
-    expect(await battery(BatterySource.bwps, null, true), OtaCheckStatus.unknown);
+    expect(await battery(BatterySource.basAndBwps, 29, null), OtaCheckStatus.warn);
+    expect(await battery(BatterySource.bwps, null, true), OtaCheckStatus.pass);
   });
 
 }
