@@ -7,6 +7,7 @@ import com.realsil.sdk.core.RtkConfigure
 import com.realsil.sdk.core.RtkCore
 import com.realsil.sdk.dfu.DfuConstants
 import com.realsil.sdk.dfu.RtkDfu
+import com.realsil.sdk.dfu.model.DfuBufferCheckConfig
 import com.realsil.sdk.dfu.model.DfuConfig
 import com.realsil.sdk.dfu.model.DfuProgressInfo
 import com.realsil.sdk.dfu.model.OtaDeviceInfo
@@ -18,6 +19,7 @@ import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.util.UUID
 
 class RealtekOtaBridge(context: Context, messenger: BinaryMessenger) {
     private val app = context.applicationContext
@@ -30,6 +32,9 @@ class RealtekOtaBridge(context: Context, messenger: BinaryMessenger) {
     private var processing = false
     private var prepared = false
     private var target: OtaDeviceInfo? = null
+    private var generation = 0L
+    private var sessionId = ""
+    private var outcome: String? = null
 
     init {
         EventChannel(messenger, "honeybox/realtek-ota/events").setStreamHandler(object : EventChannel.StreamHandler {
@@ -44,6 +49,10 @@ class RealtekOtaBridge(context: Context, messenger: BinaryMessenger) {
                         result.error("invalid", "设备地址无效，或已有连接", null)
                     } else {
                         try {
+                            cleanup()
+                            val current = ++generation
+                            sessionId = call.argument<String>("sessionId")?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+                            outcome = null
                             address = mac
                             target = null
                             started = true
@@ -52,12 +61,12 @@ class RealtekOtaBridge(context: Context, messenger: BinaryMessenger) {
                             RtkCore.initialize(app, RtkConfigure.Builder().debugEnabled(false).printLog(false).build())
                             RtkDfu.initialize(app, false)
                             adapter = GattDfuAdapter.getInstance(app)
-                            if (adapter?.initialize(callback) != true) {
-                                started = false
+                            if (adapter?.initialize(callback(current)) != true) {
+                                cleanup()
                                 result.error("init", "初始化 Realtek OTA 失败", null)
                             } else result.success(null)
                         } catch (e: Exception) {
-                            started = false
+                            cleanup()
                             result.error("init", e.message, null)
                         }
                     }
@@ -69,55 +78,121 @@ class RealtekOtaBridge(context: Context, messenger: BinaryMessenger) {
                     } else {
                         path = file
                         processing = true
-                        val config = DfuConfig().apply {
-                            setFilePath(path)
-                            setAddress(this@RealtekOtaBridge.address)
-                            setSectionSizeCheckEnabled(false)
-                            setVersionCheckEnabled(false)
+                        try {
+                            val config = DfuConfig().apply {
+                                setFilePath(path)
+                                setAddress(this@RealtekOtaBridge.address)
+                                setSectionSizeCheckEnabled(false)
+                                setVersionCheckEnabled(false)
+                                // DFU's separate GATT connection requests MTU 256; the helper callback
+                                // does not expose its negotiated MTU. Limit payload to (256 - 3) / 16 * 16.
+                                // AAR javap: m.d.d passes the 0x09 MTU minus 3 to j.c.a;
+                                // CUSTOMIZED returns preferredMtuSize unchanged (it does not take min).
+                                setBufferCheckConfig(DfuBufferCheckConfig.Builder()
+                                    .mtuUpdateMechanism(DfuBufferCheckConfig.BUFFER_CHECK_MTU_UPDATE_MECHANISM_CUSTOMIZED)
+                                    .preferredMtuSize((256 - 3) / 16 * 16)
+                                    .build())
+                            }
+                            if (adapter?.startOtaProcedure(config, target, true) != true) {
+                                emit(generation, "Realtek SDK 未能启动升级", done = true, newOutcome = "failed")
+                                result.error("start", "Realtek SDK 未能启动升级", null)
+                            } else result.success(null)
+                        } catch (e: Exception) {
+                            emit(generation, "Realtek SDK 启动异常", done = true, newOutcome = "failed")
+                            result.error("start", e.message, null)
                         }
-                        if (adapter?.startOtaProcedure(config, target, true) != true) {
-                            emit("Realtek SDK 未能启动升级", true)
-                            result.error("start", "Realtek SDK 未能启动升级", null)
-                        } else result.success(null)
                     }
                 }
-                "close" -> { if (!processing) { adapter?.destroy(); adapter = null; started = false; prepared = false }; result.success(null) }
+                "close" -> {
+                    if (processing) result.error("busy", "升级进行中，无法关闭会话", null)
+                    else { generation++; cleanup(); result.success(null) }
+                }
                 else -> result.notImplemented()
             }
         }
     }
 
-    private fun emit(message: String, done: Boolean = false, progress: Int? = null, ready: Boolean = false) {
-        if (done) { started = false; processing = false; prepared = false }
-        handler.post { sink?.success(mapOf("message" to message, "done" to done, "progress" to progress, "ready" to ready)) }
+    /** Release only after terminal state; never imply an in-flight write was canceled. */
+    private fun cleanup() {
+        val previous = adapter
+        adapter = null
+        started = false
+        processing = false
+        prepared = false
+        target = null
+        try { previous?.destroy() } catch (_: Exception) { }
     }
 
-    private val callback = object : DfuAdapter.DfuHelperCallback() {
-        override fun onStateChanged(state: Int) {
-            if (!started) return
-            when (state) {
+    private fun emit(
+        current: Long,
+        message: String,
+        done: Boolean = false,
+        progress: Int? = null,
+        ready: Boolean = false,
+        newOutcome: String? = null,
+        errorType: Int? = null,
+        errorCode: Int? = null,
+    ) {
+        if (current != generation) return
+        // First terminal outcome wins; a later detailed error may enrich a failure.
+        if (newOutcome != null && outcome != null && outcome != newOutcome) return
+        if (done) {
+            if (outcome == null) outcome = newOutcome
+            started = false
+            processing = false
+            prepared = false
+        }
+        val event = mapOf(
+            "sessionId" to sessionId, "message" to message, "done" to done,
+            "progress" to progress, "ready" to ready, "outcome" to outcome,
+            "errorType" to errorType, "errorCode" to errorCode,
+        )
+        handler.post { if (current == generation) sink?.success(event) }
+    }
+
+    /** SDK callbacks can be on arbitrary threads; serialize state transitions on main. */
+    private fun callback(current: Long) = object : DfuAdapter.DfuHelperCallback() {
+        private fun dispatch(action: () -> Unit) {
+            handler.post { if (current == generation) action() }
+        }
+
+        override fun onStateChanged(state: Int) = dispatch {
+            if (started) when (state) {
                 DfuAdapter.STATE_INIT_OK -> {
-                    emit("正在连接设备")
-                    if (adapter?.connectDevice(ConnectParams.Builder().address(address).reconnectTimes(3).build()) != true)
-                        emit("无法发起设备连接", true)
+                    emit(current, "正在连接设备")
+                    val connected = try {
+                        adapter?.connectDevice(ConnectParams.Builder().address(address).reconnectTimes(3).build()) == true
+                    } catch (_: Exception) { false }
+                    if (!connected)
+                        emit(current, "无法发起设备连接", done = true, newOutcome = "failed")
                 }
-                DfuAdapter.STATE_PREPARED -> {
-                    if (!processing) { prepared = true; emit("设备已连接，请选择匹配的固件", ready = true) }
+                DfuAdapter.STATE_PREPARED -> if (!processing) {
+                    prepared = true
+                    emit(current, "设备已连接，请选择匹配的固件", ready = true)
                 }
-                DfuAdapter.STATE_CONNECT_FAILED -> emit("设备连接失败", true)
-                DfuAdapter.STATE_DISCONNECTED -> if (!processing) emit("设备已断开", true)
+                DfuAdapter.STATE_CONNECT_FAILED -> emit(current, "设备连接失败", done = true, newOutcome = "failed")
+                DfuAdapter.STATE_DISCONNECTED -> if (!processing) emit(current, "设备已断开", done = true, newOutcome = "failed")
             }
         }
-        override fun onTargetInfoChanged(info: OtaDeviceInfo?) { target = info }
-        override fun onError(type: Int, code: Int) { if (started) emit("升级失败：类型 $type，错误码 $code", true) }
-        override fun onProgressChanged(info: DfuProgressInfo?) { if (started && info != null) emit("正在传输固件", progress = info.progress) }
-        override fun onProcessStateChanged(state: Int, throughput: Throughput?) {
-            if (!started) return
-            when (state) {
-                DfuConstants.PROGRESS_ACTIVE_IMAGE_AND_RESET -> emit("正在激活固件")
-                DfuConstants.PROGRESS_COMPLETED, DfuConstants.PROGRESS_IMAGE_ACTIVE_SUCCESS -> emit("SDK 报告升级完成，请核对设备版本", true, 100)
-                DfuConstants.PROGRESS_ABORTED -> emit("升级已中止", true)
-                DfuConstants.PROGRESS_PROCESSING_ERROR -> emit("升级失败，请查看错误信息", true)
+        override fun onTargetInfoChanged(info: OtaDeviceInfo?) = dispatch {
+            if (started) target = info
+        }
+        override fun onError(type: Int, code: Int) = dispatch {
+            if (started || outcome == "failed")
+                emit(current, "升级失败：类型 $type，错误码 $code", done = true,
+                    newOutcome = "failed", errorType = type, errorCode = code)
+        }
+        override fun onProgressChanged(info: DfuProgressInfo?) = dispatch {
+            if (started && info != null) emit(current, "正在传输固件", progress = info.progress)
+        }
+        override fun onProcessStateChanged(state: Int, throughput: Throughput?) = dispatch {
+            if (started) when (state) {
+                DfuConstants.PROGRESS_ACTIVE_IMAGE_AND_RESET -> emit(current, "正在激活固件")
+                DfuConstants.PROGRESS_COMPLETED, DfuConstants.PROGRESS_IMAGE_ACTIVE_SUCCESS ->
+                    emit(current, "SDK 报告升级完成，设备版本待核验", done = true, progress = 100,
+                        newOutcome = "pendingVerification")
+                DfuConstants.PROGRESS_ABORTED -> emit(current, "升级已中止", done = true, newOutcome = "canceled")
+                DfuConstants.PROGRESS_PROCESSING_ERROR -> emit(current, "升级失败，请查看错误信息", done = true, newOutcome = "failed")
             }
         }
     }
