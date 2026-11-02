@@ -31,7 +31,9 @@ import kotlin.math.floor
  *   4) Cinepak-encode (first frame key, rest inter) and mux to AVI.
  *
  * outFps = min(targetFps, nativeFps); estTotal = floor(duration · outFps),
- * capped at maxFrames. width/height must be multiples of 4 (Cinepak).
+ * capped at maxFrames. GIF conversion uses ceil instead so a valid final
+ * partial sampling interval is not discarded. width/height must be multiples
+ * of 4 (Cinepak).
  */
 class VideoConverter {
 
@@ -206,37 +208,47 @@ class VideoConverter {
     // ── cached-clip preview (decode our own CVID/AVI back to frames) ─────────
     // The cached .avi is Cinepak — no Android platform decoder (MediaCodec /
     // MediaMetadataRetriever / ExoPlayer) can read it — so we decode it ourselves
-    // ([CinepakDecoder]) into a short set of downscaled PNG frames the Flutter
+    // through the native decoder into a short set of downscaled PNG frames the Flutter
     // side cycles, exactly like previewFrames does for a source video/GIF.
     // Inter frames depend on the running reconstruction, so every frame is
     // decoded in order; only the evenly-sampled subset (≤ maxCount) is PNG-encoded.
     fun decodeCvidPreview(avi: ByteArray, maxCount: Int, maxEdge: Int): PreviewClip {
-        val parsed = CinepakDecoder.parseAvi(avi)
-        val n = parsed.frames.size
-        val w = parsed.width
-        val h = parsed.height
-        val outCount = maxOf(1, minOf(maxCount, n))
-        val pick = BooleanArray(n)
-        if (outCount >= n) {
-            for (i in 0 until n) pick[i] = true
-        } else {
-            for (k in 0 until outCount) {
-                pick[(k.toLong() * n / outCount).toInt().coerceIn(0, n - 1)] = true
+        NativeMediaCodec.AviReader(avi).use { reader ->
+            val info = reader.info()
+            val n = info.frameCount
+            val w = info.width
+            val h = info.height
+            if (n <= 0 || w <= 0 || h <= 0) throw RuntimeException("AVI 视频信息无效")
+
+            val outCount = maxOf(1, minOf(maxCount, n))
+            val pick = BooleanArray(n)
+            if (outCount >= n) {
+                for (i in 0 until n) pick[i] = true
+            } else {
+                for (k in 0 until outCount) {
+                    pick[(k.toLong() * n / outCount).toInt().coerceIn(0, n - 1)] = true
+                }
             }
-        }
-        val dec = CinepakDecoder.Decoder(w, h)
-        val frames = ArrayList<ByteArray>(outCount)
-        for (i in 0 until n) {
-            val argb = dec.decodeFrame(parsed.frames[i]) // sequential — recon continuity
-            if (pick[i]) {
-                val bmp = Bitmap.createBitmap(argb, w, h, Bitmap.Config.ARGB_8888)
-                frames.add(scaledPng(bmp, maxEdge))
-                bmp.recycle()
+
+            val frames = ArrayList<ByteArray>(outCount)
+            NativeMediaCodec.CinepakDecoder(w, h).use { decoder ->
+                val argb = IntArray(w * h)
+                for (i in 0 until n) {
+                    decoder.decode(reader.copyFrame(i), argb) // sequential — recon continuity
+                    if (pick[i]) {
+                        val bmp = Bitmap.createBitmap(argb, w, h, Bitmap.Config.ARGB_8888)
+                        try {
+                            frames.add(scaledPng(bmp, maxEdge))
+                        } finally {
+                            bmp.recycle()
+                        }
+                    }
+                }
             }
+            if (frames.isEmpty()) throw RuntimeException("解码结果为空")
+            val interval = (info.usecPerFrame / 1000).coerceIn(50, 200)
+            return PreviewClip(frames, interval)
         }
-        if (frames.isEmpty()) throw RuntimeException("解码结果为空")
-        val interval = (parsed.usecPerFrame / 1000).coerceIn(50, 200)
-        return PreviewClip(frames, interval)
     }
 
     // Proportionally downscale [src] so its longest edge ≤ [maxEdge], then
@@ -454,38 +466,42 @@ class VideoConverter {
             val canvas = Canvas(dst)
             val pixels = IntArray(outW * outH)
             val rgba = ByteArray(outW * outH * 4)
-            val enc = CinepakEncoder.Encoder(
-                outW, outH,
-                CinepakEncoder.Options(
-                    quality = quality, refine = refine, strips = strips,
-                    skipThresh = skipThresh, keyint = keyint,
-                ),
-            )
-            val frames = ArrayList<ByteArray>()
-
-            var j = 0
-            while (j < plannedTotal && frames.size < maxFrames) {
-                if (cancel.get()) throw Cancelled()
-                val tUs = Math.round(j / outFps * 1_000_000.0)
-                val bmp = r.getFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                if (bmp == null) {
-                    if (frames.isNotEmpty()) break
-                    j++
-                    continue
-                }
-                resizeFrame(bmp, dst, canvas, outW, outH, cropMode, crop, bgColor, pixels, rgba)
-                bmp.recycle()
-                frames.add(enc.encode(rgba))
-                progress?.onProgress(frames.size, maxOf(estTotal, frames.size))
-                j++
-            }
-
-            dst.recycle()
-            if (frames.isEmpty()) throw RuntimeException("未能解码出任何帧")
-
             val muxFps = maxOf(1, Math.round(outFps).toInt())
-            val avi = CvidAviMuxer.buildAvi(frames, outW, outH, muxFps)
-            return Result(avi, outW, outH, frames.size, outFps)
+            try {
+                CvidAviSession(
+                    outW,
+                    outH,
+                    muxFps,
+                    cinepakOptions(quality, refine, strips, skipThresh, keyint),
+                ).use { session ->
+                    var encodedCount = 0
+                    var j = 0
+                    while (j < plannedTotal && encodedCount < maxFrames) {
+                        if (cancel.get()) throw Cancelled()
+                        val tUs = Math.round(j / outFps * 1_000_000.0)
+                        val bmp = r.getFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                        if (bmp == null) {
+                            if (encodedCount > 0) break
+                            j++
+                            continue
+                        }
+                        try {
+                            resizeFrame(bmp, dst, canvas, outW, outH, cropMode, crop, bgColor, pixels, rgba)
+                            session.encodeAndAdd(rgba)
+                        } finally {
+                            bmp.recycle()
+                        }
+                        encodedCount++
+                        progress?.onProgress(encodedCount, maxOf(estTotal, encodedCount))
+                        j++
+                    }
+
+                    if (encodedCount == 0) throw RuntimeException("未能解码出任何帧")
+                    return Result(session.finish(), outW, outH, encodedCount, outFps)
+                }
+            } finally {
+                dst.recycle()
+            }
         } finally {
             releaseRetriever(r)
         }
@@ -529,9 +545,9 @@ class VideoConverter {
         if (nativeFps <= 0) nativeFps = 10.0
 
         val outFps = minOf(targetFps.toDouble(), nativeFps)
-        var estTotal = if (durationSec > 0) floor(durationSec * outFps).toInt() else 1
-        if (estTotal > maxFrames) estTotal = maxFrames
-        val plannedTotal = maxOf(1, estTotal)
+        val plannedTotal = MediaFramePlanner.plannedFrameCount(
+            durationMs.toLong(), outFps, maxFrames, preservePartialInterval = true,
+        )
 
         val opaqueBg = bgColor or 0xFF000000.toInt()
         val srcBmp = Bitmap.createBitmap(gw, gh, Bitmap.Config.ARGB_8888)
@@ -540,38 +556,38 @@ class VideoConverter {
         val canvas = Canvas(dst)
         val pixels = IntArray(dstW * dstH)
         val rgba = ByteArray(dstW * dstH * 4)
-        val enc = CinepakEncoder.Encoder(
-            dstW, dstH,
-            CinepakEncoder.Options(
-                quality = quality, refine = refine, strips = strips,
-                skipThresh = skipThresh, keyint = keyint,
-            ),
-        )
-        val frames = ArrayList<ByteArray>()
-
+        val muxFps = maxOf(1, Math.round(outFps).toInt())
         try {
-            var j = 0
-            while (j < plannedTotal && frames.size < maxFrames) {
-                if (cancel.get()) throw Cancelled()
-                var tMs = if (durationMs > 0) Math.round(j / outFps * 1000.0).toInt() else 0
-                if (durationMs > 0 && tMs >= durationMs) tMs = durationMs - 1
-                srcCanvas.drawColor(opaqueBg, PorterDuff.Mode.SRC)
-                movie.setTime(tMs)
-                movie.draw(srcCanvas, 0f, 0f)
-                resizeFrame(srcBmp, dst, canvas, dstW, dstH, cropMode, crop, bgColor, pixels, rgba)
-                frames.add(enc.encode(rgba))
-                progress?.onProgress(frames.size, maxOf(estTotal, frames.size))
-                j++
+            CvidAviSession(
+                dstW,
+                dstH,
+                muxFps,
+                cinepakOptions(quality, refine, strips, skipThresh, keyint),
+            ).use { session ->
+                var encodedCount = 0
+                var j = 0
+                while (j < plannedTotal && encodedCount < maxFrames) {
+                    if (cancel.get()) throw Cancelled()
+                    val tMs = MediaFramePlanner.presentationTimestampMs(
+                        j, outFps, durationMs.toLong(),
+                    ).toInt()
+                    srcCanvas.drawColor(opaqueBg, PorterDuff.Mode.SRC)
+                    movie.setTime(tMs)
+                    movie.draw(srcCanvas, 0f, 0f)
+                    resizeFrame(srcBmp, dst, canvas, dstW, dstH, cropMode, crop, bgColor, pixels, rgba)
+                    session.encodeAndAdd(rgba)
+                    encodedCount++
+                    progress?.onProgress(encodedCount, maxOf(plannedTotal, encodedCount))
+                    j++
+                }
+
+                if (encodedCount == 0) throw RuntimeException("GIF 未能编码任何帧")
+                return Result(session.finish(), dstW, dstH, encodedCount, outFps)
             }
         } finally {
             srcBmp.recycle()
             dst.recycle()
         }
-
-        if (frames.isEmpty()) throw RuntimeException("GIF 未能编码任何帧")
-        val muxFps = maxOf(1, Math.round(outFps).toInt())
-        val avi = CvidAviMuxer.buildAvi(frames, dstW, dstH, muxFps)
-        return Result(avi, dstW, dstH, frames.size, outFps)
     }
 
     // ── scrolling-text video (danmaku "scroll" mode) ─────────────────────────
@@ -620,44 +636,46 @@ class VideoConverter {
         val canvas = Canvas(dst)
         val pixels = IntArray(size * size)
         val rgba = ByteArray(size * size * 4)
-        val enc = CinepakEncoder.Encoder(
-            size, size,
-            CinepakEncoder.Options(quality = quality, refine = 3, strips = 2, skipThresh = 720, keyint = 0),
-        )
-        val frames = ArrayList<ByteArray>(frameCount)
-
         try {
-            for (j in 0 until frameCount) {
-                if (cancel.get()) throw Cancelled()
-                // right→left: baseX runs period→0 as j advances, so every tiled
-                // copy shifts left each frame (seamless because tiling is periodic).
-                val baseX = period.toDouble() * (frameCount - j) / frameCount
-                canvas.drawColor(opaqueBg, PorterDuff.Mode.SRC)
-                var x = baseX - period // one copy off the left edge, tiled rightward
-                while (x < size) {
-                    canvas.drawBitmap(stripBmp, x.toFloat(), yOff, paint)
-                    x += period
+            CvidAviSession(
+                size,
+                size,
+                safeFps,
+                cinepakOptions(quality, 3, 2, 720, 0),
+            ).use { session ->
+                var encodedCount = 0
+                for (j in 0 until frameCount) {
+                    if (cancel.get()) throw Cancelled()
+                    // right→left: baseX runs period→0 as j advances, so every tiled
+                    // copy shifts left each frame (seamless because tiling is periodic).
+                    val baseX = period.toDouble() * (frameCount - j) / frameCount
+                    canvas.drawColor(opaqueBg, PorterDuff.Mode.SRC)
+                    var x = baseX - period // one copy off the left edge, tiled rightward
+                    while (x < size) {
+                        canvas.drawBitmap(stripBmp, x.toFloat(), yOff, paint)
+                        x += period
+                    }
+                    dst.getPixels(pixels, 0, size, 0, 0, size, size)
+                    for (i in pixels.indices) {
+                        val c = pixels[i]
+                        val o = i * 4
+                        rgba[o] = ((c shr 16) and 0xFF).toByte()     // R
+                        rgba[o + 1] = ((c shr 8) and 0xFF).toByte()  // G
+                        rgba[o + 2] = (c and 0xFF).toByte()          // B
+                        rgba[o + 3] = ((c shr 24) and 0xFF).toByte() // A
+                    }
+                    session.encodeAndAdd(rgba)
+                    encodedCount++
+                    progress?.onProgress(encodedCount, frameCount)
                 }
-                dst.getPixels(pixels, 0, size, 0, 0, size, size)
-                for (i in pixels.indices) {
-                    val c = pixels[i]
-                    val o = i * 4
-                    rgba[o] = ((c shr 16) and 0xFF).toByte()     // R
-                    rgba[o + 1] = ((c shr 8) and 0xFF).toByte()  // G
-                    rgba[o + 2] = (c and 0xFF).toByte()          // B
-                    rgba[o + 3] = ((c shr 24) and 0xFF).toByte() // A
-                }
-                frames.add(enc.encode(rgba))
-                progress?.onProgress(frames.size, frameCount)
+
+                if (encodedCount == 0) throw RuntimeException("字幕滚动帧生成失败")
+                return Result(session.finish(), size, size, encodedCount, safeFps.toDouble())
             }
         } finally {
             stripBmp.recycle()
             dst.recycle()
         }
-
-        if (frames.isEmpty()) throw RuntimeException("字幕滚动帧生成失败")
-        val avi = CvidAviMuxer.buildAvi(frames, size, size, safeFps)
-        return Result(avi, size, size, frames.size, safeFps.toDouble())
     }
 
     // ── multi-image carousel (多图轮播) ───────────────────────────────────────
@@ -690,47 +708,68 @@ class VideoConverter {
         var total = 0
         for (h in holds) total += maxOf(1, h)
 
-        val enc = CinepakEncoder.Encoder(
-            size, size,
-            CinepakEncoder.Options(quality = quality, refine = 3, strips = 2, skipThresh = 720, keyint = 0),
-        )
-        val out = ArrayList<ByteArray>(total)
-
-        for (i in frames.indices) {
-            if (cancel.get()) throw Cancelled()
-            val rgba = frames[i]
-            require(rgba.size >= need) { "图片像素数据不完整" }
-
-            out.add(enc.encode(rgba, forceKey = true))
-            progress?.onProgress(out.size, total)
-
-            val hold = maxOf(1, holds[i])
-            var h = 1
-            var prevInter: ByteArray? = null
-            while (h < hold) {
+        CvidAviSession(
+            size,
+            size,
+            safeFps,
+            cinepakOptions(quality, 3, 2, 720, 0),
+        ).use { session ->
+            var encodedCount = 0
+            for (i in frames.indices) {
                 if (cancel.get()) throw Cancelled()
-                val inter = enc.encode(rgba, forceKey = false)
-                out.add(inter)
-                h++
-                progress?.onProgress(out.size, total)
-                if (prevInter != null && inter.contentEquals(prevInter)) {
-                    // Fixed point reached — duplicate the settled frame for the
-                    // remaining holds (idempotent on the decoder).
-                    while (h < hold) {
-                        out.add(inter)
-                        h++
-                        progress?.onProgress(out.size, total)
-                    }
-                    break
-                }
-                prevInter = inter
-            }
-        }
+                val rgba = frames[i]
+                require(rgba.size >= need) { "图片像素数据不完整" }
 
-        if (out.isEmpty()) throw RuntimeException("未能编码任何帧")
-        val avi = CvidAviMuxer.buildAvi(out, size, size, safeFps)
-        return Result(avi, size, size, out.size, safeFps.toDouble())
+                session.encodeAndAdd(rgba, forceKey = true)
+                encodedCount++
+                progress?.onProgress(encodedCount, total)
+
+                val hold = maxOf(1, holds[i])
+                var h = 1
+                var prevInter: NativeMediaCodec.EncodedFrame? = null
+                while (h < hold) {
+                    if (cancel.get()) throw Cancelled()
+                    val inter = session.encodeAndAdd(rgba, forceKey = false)
+                    encodedCount++
+                    h++
+                    progress?.onProgress(encodedCount, total)
+                    if (
+                        prevInter != null &&
+                        inter.frameFlags == prevInter.frameFlags &&
+                        inter.bytes.contentEquals(prevInter.bytes)
+                    ) {
+                        // Fixed point reached — duplicate the settled frame for the
+                        // remaining holds (idempotent on the decoder).
+                        while (h < hold) {
+                            session.addFrame(inter)
+                            encodedCount++
+                            h++
+                            progress?.onProgress(encodedCount, total)
+                        }
+                        break
+                    }
+                    prevInter = inter
+                }
+            }
+
+            if (encodedCount == 0) throw RuntimeException("未能编码任何帧")
+            return Result(session.finish(), size, size, encodedCount, safeFps.toDouble())
+        }
     }
+
+    private fun cinepakOptions(
+        quality: Int,
+        refine: Int,
+        strips: Int,
+        skipThresh: Int,
+        keyint: Int,
+    ): NativeMediaCodec.CinepakOptions = NativeMediaCodec.CinepakOptions(
+        quality = quality,
+        refineIterations = refine,
+        strips = strips,
+        skipThreshold = skipThresh,
+        keyInterval = keyint,
+    )
 
     private fun releaseRetriever(r: MediaMetadataRetriever) {
         try {

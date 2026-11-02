@@ -11,6 +11,9 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../providers/transfer_provider.dart';
 import '../../services/converter.dart';
+import '../../services/media_task_gate.dart';
+import 'video_example_thumbnail.dart';
+import 'video_thumbnail_policy.dart';
 import '../../services/video_preview_player.dart';
 import '../../services/raster.dart';
 import '../../services/resource_pack.dart';
@@ -77,6 +80,9 @@ enum _PlayState { stopped, playing, paused }
 class _VideoPageState extends ConsumerState<VideoPage> {
   final _picker = ImagePicker();
   final _converter = ConverterService();
+  final _mediaGate = MediaTaskGate();
+  int _mediaLoadSeq = 0;
+  VideoThumbnailFailureKind? _thumbnailFailure;
 
   // Captured while mounted so dispose() never touches `ref` (see initState).
   late final TransferProgressNotifier _transfer;
@@ -166,6 +172,8 @@ class _VideoPageState extends ConsumerState<VideoPage> {
     // has closed this element's own subscription.
     _transfer.resetForDispose();
     _rebuildSeq++;
+    _mediaLoadSeq++;
+    _mediaGate.dispose();
     _converter.cancel();
     _playTimer?.cancel();
     _posTimer?.cancel();
@@ -224,7 +232,12 @@ class _VideoPageState extends ConsumerState<VideoPage> {
       final video = await _picker.pickVideo(source: ImageSource.gallery);
       if (video == null) return;
       final len = await File(video.path).length();
-      await _loadMedia(path: video.path, name: video.name, size: len);
+      await _loadMedia(
+        path: video.path,
+        name: video.name,
+        size: len,
+        isGifSource: false,
+      );
     } catch (e) {
       _snack('选择视频失败: $e');
     }
@@ -259,7 +272,12 @@ class _VideoPageState extends ConsumerState<VideoPage> {
         _snack('这不是 GIF 动图（可能已被转为静态图）');
         return;
       }
-      await _loadMedia(path: path, name: f.name, size: f.size);
+      await _loadMedia(
+        path: path,
+        name: f.name,
+        size: f.size,
+        isGifSource: true,
+      );
     } catch (e) {
       _snack('选择 GIF 失败: $e');
     }
@@ -270,37 +288,50 @@ class _VideoPageState extends ConsumerState<VideoPage> {
     required String path,
     required String name,
     required int size,
+    required bool isGifSource,
   }) async {
+    final loadToken = ++_mediaLoadSeq;
     ui.Image? thumb;
     int tw = 0;
     int th = 0;
-    bool isGif = false;
+    bool? decodedIsGif;
+    VideoThumbnailFailureKind? thumbnailFailure;
     try {
-      final t = await _converter.getVideoThumbnail(path);
+      final t = await _mediaGate.run(
+        () => _converter.getVideoThumbnail(path),
+        priority: MediaTaskPriority.interactive,
+        shouldStart: () => mounted && loadToken == _mediaLoadSeq,
+      );
+      decodedIsGif = t.isGif;
       thumb = await decodeUiImage(t.bytes);
       tw = t.width;
       th = t.height;
-      isGif = t.isGif;
-    } catch (_) {
-      // No preview — conversion still works with cover cropping.
+    } on PlatformException catch (error) {
+      thumbnailFailure = classifyVideoThumbnailFailure(error);
+    } catch (error) {
+      thumbnailFailure = classifyVideoThumbnailFailure(error);
     }
+    final isGif = resolveVideoSourceIsGif(
+      knownGif: isGifSource,
+      decodedIsGif: decodedIsGif,
+    );
 
-    if (!mounted) {
+    if (!mounted || loadToken != _mediaLoadSeq) {
       thumb?.dispose();
       return;
     }
 
-    _thumb?.dispose();
     _stopPlayback();
     _disposeFrames(); // old clip's frames no longer match the new source
     await _player.dispose(); // release the previous source's video player
-    if (!mounted) {
+    if (!mounted || loadToken != _mediaLoadSeq) {
       thumb?.dispose();
       return;
     }
     final base =
         name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
 
+    _thumb?.dispose();
     setState(() {
       _selectedName = name;
       _srcPath = path;
@@ -310,6 +341,7 @@ class _VideoPageState extends ConsumerState<VideoPage> {
       _srcW = tw;
       _srcH = th;
       _isGif = isGif;
+      _thumbnailFailure = thumbnailFailure;
       _avi = null;
       _binSize = 0;
       _frameCount = 0;
@@ -380,22 +412,26 @@ class _VideoPageState extends ConsumerState<VideoPage> {
       _avi = null;
     });
     try {
-      final res = await _converter.convertVideo(
-        path: path,
-        width: _size,
-        height: _size,
-        fps: _fps,
-        quality: _quality,
-        cropMode: 'cover', // only used as the no-preview fallback
-        crop: _cropForConvert(),
-        bgColor: _bgColor,
-        onProgress: (done, total) {
-          if (token != _rebuildSeq || !mounted) return;
-          setState(() {
-            _convProgress = total > 0 ? (done / total).clamp(0.0, 0.99) : 0;
-            _frameCount = done;
-          });
-        },
+      final res = await _mediaGate.run(
+        () => _converter.convertVideo(
+          path: path,
+          width: _size,
+          height: _size,
+          fps: _fps,
+          quality: _quality,
+          cropMode: 'cover', // only used as the no-preview fallback
+          crop: _cropForConvert(),
+          bgColor: _bgColor,
+          onProgress: (done, total) {
+            if (token != _rebuildSeq || !mounted) return;
+            setState(() {
+              _convProgress = total > 0 ? (done / total).clamp(0.0, 0.99) : 0;
+              _frameCount = done;
+            });
+          },
+        ),
+        priority: MediaTaskPriority.interactive,
+        shouldStart: () => mounted && token == _rebuildSeq,
       );
       if (token != _rebuildSeq || !mounted) return;
       setState(() {
@@ -681,7 +717,11 @@ class _VideoPageState extends ConsumerState<VideoPage> {
     if (path == null) return;
     setState(() => _loadingFrames = true);
     try {
-      final preview = await _converter.getVideoFrames(path);
+      final preview = await _mediaGate.run(
+        () => _converter.getVideoFrames(path),
+        priority: MediaTaskPriority.interactive,
+        shouldStart: () => mounted && _srcPath == path,
+      );
       final imgs = <ui.Image>[];
       for (final png in preview.frames) {
         imgs.add(await decodeUiImage(png));
@@ -698,6 +738,8 @@ class _VideoPageState extends ConsumerState<VideoPage> {
         _frameIntervalMs = preview.intervalMs;
         _loadingFrames = false;
       });
+    } on MediaTaskCancelled {
+      return;
     } catch (e) {
       if (!mounted) return;
       setState(() => _loadingFrames = false);
@@ -1008,13 +1050,25 @@ class _VideoPageState extends ConsumerState<VideoPage> {
             if (path.toLowerCase().endsWith('.gif')) {
               return Image.asset(path, fit: BoxFit.cover, cacheWidth: 120);
             }
-            return _ExampleVideoThumb(
-                key: ValueKey(path), assetPath: path, converter: _converter);
+            return VideoExampleThumbnail(
+              key: ValueKey(path),
+              sourceKey: path,
+              load: () => _loadExampleThumbnail(path),
+            );
           },
           onTap: (i) => _loadExampleVideo(items[i]),
         ),
       ],
     );
+  }
+
+  Future<ui.Image> _loadExampleThumbnail(String assetPath) async {
+    final file = await materializeAsset(assetPath);
+    final thumbnail = await _mediaGate.run(
+      () => _converter.getVideoThumbnail(file.path),
+      priority: MediaTaskPriority.background,
+    );
+    return decodeUiImage(thumbnail.bytes);
   }
 
   // Load one of the bundled example clips (video/*.mov or gif/*.gif). It's
@@ -1026,7 +1080,11 @@ class _VideoPageState extends ConsumerState<VideoPage> {
       final file = await materializeAsset(assetPath);
       final size = await file.length();
       await _loadMedia(
-          path: file.path, name: assetPath.split('/').last, size: size);
+        path: file.path,
+        name: assetPath.split('/').last,
+        size: size,
+        isGifSource: assetPath.toLowerCase().endsWith('.gif'),
+      );
     } catch (e) {
       _snack('加载示例失败: $e');
     }
@@ -1049,7 +1107,10 @@ class _VideoPageState extends ConsumerState<VideoPage> {
               overflow: TextOverflow.ellipsis,
               style: theme.textTheme.bodyMedium),
           const SizedBox(height: 4),
-          Text('无法读取首帧，将按封面居中裁剪',
+          Text(
+              videoThumbnailFailureMessage(
+                _thumbnailFailure ?? VideoThumbnailFailureKind.other,
+              ),
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: cs.onSurfaceVariant)),
         ],
@@ -1489,66 +1550,6 @@ class _VideoPageState extends ConsumerState<VideoPage> {
         const SizedBox(width: 12),
         Expanded(child: primary),
       ],
-    );
-  }
-}
-
-/// Round first-frame thumbnail for a bundled example video (mov): the asset is
-/// materialized to a temp file, then its first frame is fetched natively and
-/// decoded. A spinner shows until it's ready (and stays on failure).
-class _ExampleVideoThumb extends StatefulWidget {
-  final String assetPath;
-  final ConverterService converter;
-  const _ExampleVideoThumb({
-    super.key,
-    required this.assetPath,
-    required this.converter,
-  });
-
-  @override
-  State<_ExampleVideoThumb> createState() => _ExampleVideoThumbState();
-}
-
-class _ExampleVideoThumbState extends State<_ExampleVideoThumb> {
-  ui.Image? _img;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final file = await materializeAsset(widget.assetPath);
-      final t = await widget.converter.getVideoThumbnail(file.path);
-      final img = await decodeUiImage(t.bytes);
-      if (!mounted) {
-        img.dispose();
-        return;
-      }
-      setState(() => _img = img);
-    } catch (_) {
-      // Leave the spinner/placeholder if the first frame can't be read.
-    }
-  }
-
-  @override
-  void dispose() {
-    _img?.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final img = _img;
-    if (img != null) return RawImage(image: img, fit: BoxFit.cover);
-    return const Center(
-      child: SizedBox(
-        width: 18,
-        height: 18,
-        child: CircularProgressIndicator(strokeWidth: 2),
-      ),
     );
   }
 }
