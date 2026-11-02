@@ -1,14 +1,14 @@
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'ota_device_profile.dart';
 
 /// An S200 APP image whose structure matches the 400 KiB flash layout.
 /// Structural checks do not prove a device's compatibility or image signature.
 class S200FirmwareImage {
   static const _headerSize = 1024;
   static const _packHeaderSize = 512;
-  static const _appAddress = 0x82c000;
-  static const _capacity = 0x64000;
+  static final _profile = OtaProfileRegistry.defaultProfileById('s200');
 
   final Uint8List imageBytes;
   final int version;
@@ -27,16 +27,18 @@ class S200FirmwareImage {
         _matches(source, 15, part);
     final offset = packaged ? _packHeaderSize : 0;
     final length = source.length - offset;
-    if (length < _headerSize || length > _capacity || length % 4 != 0) {
+    if (length < _headerSize ||
+        length > _profile.appBankSize! ||
+        length % 4 != 0) {
       throw const FormatException('APP 固件长度不符合 S200 布局');
     }
     final data = ByteData.sublistView(source, offset);
     final flags = data.getUint16(2, Endian.little);
-    if (data.getUint8(0) != 9 ||
-        data.getUint16(4, Endian.little) != 0x2793 ||
+    if (data.getUint8(0) != _profile.icType ||
+        data.getUint16(4, Endian.little) != _profile.imageId ||
         flags >> 13 != 0 ||
         data.getUint32(8, Endian.little) + _headerSize != length ||
-        data.getUint32(40, Endian.little) != _appAddress) {
+        data.getUint32(40, Endian.little) != _profile.flashAddress) {
       throw const FormatException('不是受支持的 S200 APP 固件');
     }
     final version = data.getUint32(96, Endian.little);

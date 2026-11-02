@@ -171,4 +171,5 @@ flutter {
 
 dependencies {
     implementation project(":mapfeature")
+    implementation files("libs/crpblelib-2.0.1-1030.aar")
 }

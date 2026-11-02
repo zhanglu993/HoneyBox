@@ -41,6 +41,7 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
+        <service android:name="com.realsil.sdk.dfu.DfuService" android:enabled="true" android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

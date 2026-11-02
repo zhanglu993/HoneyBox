@@ -59,6 +59,7 @@ class MainActivity : FlutterActivity() {
         NotificationListener.registerChannels(flutterEngine, applicationContext)
 
         val messenger = flutterEngine.dartExecutor.binaryMessenger
+        RealtekOtaBridge(this, messenger)
         textureRegistry = flutterEngine.renderer
 
         EventChannel(messenger, eventChannelName).setStreamHandler(

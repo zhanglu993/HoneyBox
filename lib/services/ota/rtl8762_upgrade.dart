@@ -3,6 +3,7 @@ import 'rtl_dfu_protocol.dart';
 import 'rtl_dfu_transfer.dart';
 import 'rtl8762_reconnect.dart';
 import 's200_firmware_image.dart';
+import 'ota_device_profile.dart';
 
 class Rtl8762NormalInfo {
   final Uint8List identity;
@@ -39,15 +40,16 @@ class Rtl8762Upgrade {
   Future<void> run(Uint8List source,
       {void Function(String phase, int done, int total)? onProgress}) async {
     final image = S200FirmwareImage.parse(source);
+    final profile = OtaProfileRegistry.defaultProfileById('s200');
     try {
       onProgress?.call('检查设备', 0, image.imageBytes.length);
       final info = await device.inspectNormal();
       final caps = RtlDfuCapabilities.parse(info.capabilities);
       if (info.identity.length != 6 ||
-          caps.icType != 9 ||
+          caps.icType != profile.icType ||
           caps.flags & 7 != 7 ||
           caps.temporaryCapacity < image.imageBytes.length ||
-          info.batteryPercent < 30 ||
+          info.batteryPercent < profile.batteryMinPercent! ||
           info.batteryPercent > 100) {
         throw const FormatException('设备身份、OTA 能力、容量或电量不符合 RTL8762D S200 要求');
       }
@@ -59,11 +61,11 @@ class Rtl8762Upgrade {
           ic[0] != 0x10 ||
           ic[1] != 0x0b ||
           ic[2] != 1 ||
-          ic[3] != 9) {
+          ic[3] != profile.icType) {
         throw const FormatException('升级模式芯片类型不匹配');
       }
       final id = Uint8List(2);
-      ByteData.sublistView(id).setUint16(0, 0x2793, Endian.little);
+      ByteData.sublistView(id).setUint16(0, profile.imageId!, Endian.little);
       final target = RtlDfuProtocol.targetInfo(await transport.command(6, id));
       if (target.offset != 0) throw const FormatException('设备存在未完成的升级，暂不支持续传');
       final buffer =
@@ -77,7 +79,7 @@ class Rtl8762Upgrade {
           .reduce((a, b) => a < b ? a : b);
       await RtlDfuTransfer(transport, encrypt).transfer(
           image: image.imageBytes,
-          imageId: 0x2793,
+          imageId: profile.imageId!,
           blockSize: buffer.size,
           packetSize: packet,
           onProgress: (done, total) => onProgress?.call('传输固件', done, total));
